@@ -1,0 +1,12 @@
+# CMake output
+build/
+cmake-build-*/
+
+# generated asset bookkeeping
+assets/.stamp
+
+# editor / OS noise
+*.swp
+*~
+.DS_Store
+compile_commands.json
