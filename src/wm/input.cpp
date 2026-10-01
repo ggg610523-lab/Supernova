@@ -359,6 +359,10 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         endDrag(x, y);
         return;
     }
+    if (dragWidget >= 0) {
+        endWidgetDrag();
+        return;
+    }
     // A Control Centre slider keeps tracking until the button comes up, so the
     // release does not have to land on the pill.
     if (ccDrag >= 0) {
@@ -390,6 +394,10 @@ void Manager::onMotion(XMotionEvent& ev) {
     }
     if (dragClient) {
         updateDrag(x, y);
+        return;
+    }
+    if (dragWidget >= 0) {
+        updateWidgetDrag(x, y);
         return;
     }
     if (ccDrag >= 0) {
@@ -499,8 +507,22 @@ void Manager::onKeyPress(XKeyEvent& ev) {
 }
 
 void Manager::applyContextAction(int index) {
+    // The desktop menu: an optional "Remove Widget" when opened on a card, then
+    // the two add entries.
+    if (!contextClient) {
+        int first = 0;
+        if (contextWidget >= 0) {
+            if (index == 0) {
+                removeWidget(contextWidget);
+                return;
+            }
+            first = 1;
+        }
+        if (index == first) addWidget(WidgetKind::Clock);
+        else if (index == first + 1) addWidget(WidgetKind::Battery);
+        return;
+    }
     Client* c = contextClient;
-    if (!c) return;
     switch (index) {
         case 0: toggleMaximize(c); break;
         case 1: minimizeClient(c, true); break;
@@ -845,6 +867,15 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
             }
         }
         closeOverlays();
+        return;
+    }
+
+    // Desktop widgets sit above the wallpaper icons: a left press grabs one to
+    // move or resize, a right press opens the add/remove menu anywhere on the
+    // desktop (above the taskbar).
+    if (button == Button1 && handleWidgetPress(x, y, time)) return;
+    if (button == Button3 && y < screenH - metrics::kTaskbarH) {
+        openDesktopMenu(x, y);
         return;
     }
 

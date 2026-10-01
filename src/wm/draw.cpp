@@ -73,11 +73,26 @@ void Manager::layoutDesktopIcons() {
     const int marginX = 10, marginY = 10;
     const int usableH = screenH - metrics::kTaskbarH - marginY;
     const int rows = std::max(1, (usableH + gapY) / (cellH + gapY));
+    const auto cellAt = [&](int n) {
+        const int col = n / rows, row = n % rows;
+        return Rect{marginX + col * (cellW + gapX), marginY + row * (cellH + gapY), cellW, cellH};
+    };
+    // Walk the same top-to-bottom, left-to-right order, but step over any cell a
+    // widget occupies so the icons reflow around the glass cards.
+    int slot = 0;
     for (size_t i = 0; i < desktopItems.size(); ++i) {
-        const int col = int(i) / rows;
-        const int row = int(i) % rows;
-        desktopIconRects.push_back(Rect{marginX + col * (cellW + gapX),
-                                        marginY + row * (cellH + gapY), cellW, cellH});
+        Rect cell;
+        for (int guard = 0; guard < 4096; ++guard) {
+            cell = cellAt(slot++);
+            bool blocked = false;
+            for (const Widget& w : widgets)
+                if (cell.inflated(8).intersects(w.rect)) {
+                    blocked = true;
+                    break;
+                }
+            if (!blocked) break;
+        }
+        desktopIconRects.push_back(cell);
     }
 }
 
@@ -119,6 +134,7 @@ void Manager::drawDesktopIcons() {
 void Manager::drawDesktop() {
     comp.drawWallpaper();
     drawDesktopIcons();
+    drawWidgets();
 }
 
 void Manager::drawTextAt(const std::string& s, int px, Weight w, const Color& c, int x, int y) {

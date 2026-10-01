@@ -112,6 +112,27 @@ inline constexpr Color kLaunchHover = rgb(0xFFFFFF, 0.10f);
 inline constexpr Color kLaunchDot = rgb(0xFFFFFF, 0.32f);
 inline constexpr Color kLaunchDotActive = rgb(0xFFFFFF, 0.95f);
 
+// --- desktop widgets (iOS 26 "Liquid Glass") ------------------------------
+// Squircles of dark glass sitting directly on the wallpaper. The clock dial and
+// the battery ring stay white/orange/status-tinted, the way iOS tints widget
+// content against a translucent card.
+inline constexpr Color kWidgetGlass = rgb(0x141418, 0.44f);   // acrylic tint over the blur
+inline constexpr Color kWidgetBorder = rgb(0xFFFFFF, 0.16f);  // glass hairline
+inline constexpr Color kWidgetHover = rgb(0xFFFFFF, 0.10f);
+inline constexpr Color kWidgetLabel = rgb(0xFFFFFF, 0.88f);
+inline constexpr Color kWidgetSub = rgb(0xFFFFFF, 0.55f);
+inline constexpr Color kWidgetTick = rgb(0xFFFFFF, 0.90f);
+inline constexpr Color kWidgetTickMinor = rgb(0xFFFFFF, 0.34f);
+inline constexpr Color kWidgetHand = rgb(0xFFFFFF, 1.0f);
+inline constexpr Color kWidgetSecond = rgb(0xFF9F0A);         // iOS systemOrange
+
+inline constexpr Color kWidgetPin = rgb(0xFFFFFF, 0.95f);
+inline constexpr Color kWidgetRingTrack = rgb(0xFFFFFF, 0.16f);
+inline constexpr Color kWidgetGrip = rgb(0xFFFFFF, 0.28f);
+inline constexpr Color kWidgetGreen = rgb(0x30D158);          // iOS systemGreen
+inline constexpr Color kWidgetYellow = rgb(0xFFD60A);         // iOS systemYellow
+inline constexpr Color kWidgetRed = rgb(0xFF453A);            // iOS systemRed
+
 }  // namespace theme
 
 namespace metrics {
@@ -155,6 +176,15 @@ constexpr int kLaunchIconMin = 46;   // floor when the screen is small
 constexpr int kLaunchRowGap = 20;    // vertical gap between icon rows
 constexpr int kLaunchLabelH = 18;    // label strip under each icon
 constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
+
+// --- desktop widgets (iOS 26) ---------------------------------------------
+constexpr int kWidgetRadius = 34;      // squircle corner at the small size
+constexpr int kWidgetMin = 110;        // floor when the user shrinks one
+constexpr int kWidgetGrip = 22;        // bottom-right resize handle (hit box)
+constexpr int kWidgetClock = 168;      // small square widget edge
+constexpr int kWidgetBatteryW = 344;   // medium widget
+constexpr int kWidgetBatteryH = 168;
+constexpr int kWidgetPad = 16;         // widget origin inset
 
 }  // namespace metrics
 

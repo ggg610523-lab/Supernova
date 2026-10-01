@@ -30,6 +30,7 @@
 #include "text.h"
 #include "theme.h"
 #include "util.h"
+#include "widgets.h"
 
 namespace wm {
 
@@ -372,6 +373,23 @@ private:
     bool handleDesktopPress(int x, int y, Time time);
     void openDesktopItem(const DesktopItem& item);
 
+    // ---- desktop widgets (widgets.cpp)
+    void initWidgets();                       // default clock + battery
+    void drawWidgets();
+    void drawClockWidget(const Widget& w);
+    void drawBatteryWidget(const Widget& w);
+    int  widgetAt(int x, int y) const;        // index, or -1
+    bool handleWidgetPress(int x, int y, Time time);  // true when consumed
+    void beginWidgetDrag(int index, int x, int y, bool resize);
+    void updateWidgetDrag(int x, int y);
+    void endWidgetDrag();
+    void addWidget(WidgetKind kind);
+    void removeWidget(int index);
+    void openDesktopMenu(int x, int y);       // right click on the desktop
+    void refreshBattery(bool force);
+    // Corner grip of a widget, for the resize cursor / press test.
+    Rect widgetGripRect(const Widget& w) const;
+
     // ---- cursor helper (declared here to keep the cursor table together)
     void setCursor(int which);
     int cursorShown = 0;
@@ -418,7 +436,8 @@ private:
     int altTabIndex = 0;
     std::vector<Client*> altTabOrder;
     bool contextOpen = false;
-    Client* contextClient = nullptr;
+    Client* contextClient = nullptr;   // null = the desktop (widget) menu
+    int contextWidget = -1;            // widget the menu was opened on, or -1
     Rect contextRect;
     int contextHover = -1;
     std::vector<std::string> contextItems;
@@ -448,6 +467,17 @@ private:
     std::vector<Rect> appRects;      // cells of the *current* page
     std::vector<size_t> appFiltered;
     std::vector<Rect> appDotRects;   // page-indicator hit targets
+    // ---- desktop widgets
+    std::vector<Widget> widgets;
+    int hoverWidget = -1;
+    int dragWidget = -1;          // widget being moved/resized, -1 when none
+    bool widgetResizing = false;
+    Point widgetGrab;             // pointer offset inside the widget at grab
+    int batteryPercent = -1;      // -1 = no battery present
+    bool batteryCharging = false;
+    bool batteryFull = false;
+    double lastBatteryProbe = 0.0;
+    time_t lastClockSecond = 0;
     int hoverApp = -1;
     int startHoverDot = -1;
     int startPage = 0;

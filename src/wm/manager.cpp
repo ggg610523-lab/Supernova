@@ -314,6 +314,7 @@ int Manager::run(const Options& options) {
     // it is computed once here and reused by every frame and hit test.
     desktopItems = scanDesktop();
     layoutDesktopIcons();
+    initWidgets();
     scanExistingWindows();
     updateClientList();
     // Kick the first state probe now, off the critical path, so the Control
@@ -384,7 +385,11 @@ void Manager::loop() {
         pollfd p{};
         p.fd = fd;
         p.events = POLLIN;
-        poll(&p, 1, opts->stats ? 400 : -1);
+        // Widgets tick in the background: the clock on the wall second, the
+        // battery every few seconds. Wake often enough to service them.
+        int timeout = opts->stats ? 400 : -1;
+        if (!widgets.empty() && (timeout < 0 || 250 < timeout)) timeout = 250;
+        poll(&p, 1, timeout);
         if (opts->stats) dirty = true;
     }
 }
@@ -468,6 +473,20 @@ void Manager::tickAnimations(double now) {
         if (!ccControls.empty() && ccAnim < 1.0) layoutControlCenter();
     } else if (ccAnim <= 0.0 && !ccControls.empty()) {
         ccControls.clear();
+    }
+
+    // Widgets: repaint the analog clock when the wall second changes, and
+    // re-probe the battery every few seconds.
+    if (!widgets.empty()) {
+        const time_t sec = time(nullptr);
+        if (sec != lastClockSecond) {
+            lastClockSecond = sec;
+            dirty = true;
+        }
+        if (now - lastBatteryProbe > 5000.0) {
+            lastBatteryProbe = now;
+            refreshBattery(false);
+        }
     }
     if (opts->stats) dirty = true;
 }
@@ -693,6 +712,23 @@ void Manager::updateHoverStates(int px, int py) {
         changed = true;
     }
 
+    // Widgets: a hand over the card, the diagonal resize arrow over its grip.
+    int newWidget = -1;
+    bool overGrip = false;
+    if (!overlayOpen() && !overTaskbar && !dragClient && !clientAt(px, py)) {
+        newWidget = widgetAt(px, py);
+        if (newWidget >= 0) overGrip = widgetGripRect(widgets[newWidget]).contains(px, py);
+    }
+    if (newWidget != hoverWidget) {
+        hoverWidget = newWidget;
+        changed = true;
+    }
+    if (dragWidget >= 0)
+        wantedCursor = widgetResizing ? 3 : 5;
+    else if (newWidget >= 0)
+        wantedCursor = overGrip ? 3 : 5;
+    if (wantedCursor != cursorShown) setCursor(wantedCursor);
+
     if (changed) dirty = true;
 }
 
@@ -720,6 +756,7 @@ void Manager::closeOverlays() {
     startHoverDot = -1;
     startPage = 0;
     contextClient = nullptr;
+    contextWidget = -1;
     contextItems.clear();
     ccHover = -1;
     if (wasCc) endCcDrag();
@@ -1298,7 +1335,7 @@ void Manager::grabPointer() {
 void Manager::ungrabPointer() {
     if (!dpy || !comp.overlay()) return;
     // An in-flight drag owns the pointer until it finishes.
-    if (dragClient) return;
+    if (dragClient || dragWidget >= 0) return;
     XUngrabPointer(dpy, CurrentTime);
 }
 
@@ -1333,6 +1370,7 @@ void Manager::toggleTaskView() {
 void Manager::showContextMenu(Client* c, int x, int y) {
     if (!c) return;
     contextClient = c;
+    contextWidget = -1;
     contextItems.clear();
     contextItems.push_back((c->maximizedH && c->maximizedV) ? "Restore" : "Maximize");
     contextItems.push_back("Minimize");
@@ -1343,6 +1381,35 @@ void Manager::showContextMenu(Client* c, int x, int y) {
 
     const int itemH = 32;
     const int width = 200;
+    const int height = int(contextItems.size()) * itemH + 12;
+    int mx = x, my = y - 6;
+    const int bottom = screenH - metrics::kTaskbarH;
+    if (my + height > bottom) my = bottom - height;
+    if (mx + width > screenW) mx = screenW - width - 4;
+    if (mx < 4) mx = 4;
+    if (my < 4) my = 4;
+    contextRect = Rect{mx, my, width, height};
+    contextOpen = true;
+    contextHover = -1;
+    startOpen = false;
+    grabPointer();
+    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    dirty = true;
+}
+
+// The desktop's own context menu, reusing the client menu plumbing. On a widget
+// it offers "Remove Widget"; on bare wallpaper (or below a widget entry) the two
+// add entries.
+void Manager::openDesktopMenu(int x, int y) {
+    contextClient = nullptr;
+    contextWidget = widgetAt(x, y);
+    contextItems.clear();
+    if (contextWidget >= 0) contextItems.push_back("Remove Widget");
+    contextItems.push_back("Add Clock Widget");
+    contextItems.push_back("Add Battery Widget");
+
+    const int itemH = 32;
+    const int width = 210;
     const int height = int(contextItems.size()) * itemH + 12;
     int mx = x, my = y - 6;
     const int bottom = screenH - metrics::kTaskbarH;

@@ -20,10 +20,15 @@ const char* const kVertexSrc = R"GLSL(
 layout(location = 0) in vec2 aPos;
 uniform mat4 uProj;
 uniform vec4 uRect;      // x, y, w, h in screen pixels
+uniform vec2 uPivot;     // rotation pivot in screen pixels
+uniform vec2 uRot;       // (cos, sin) of the rotation; (1, 0) = none
 out vec2 vQ;             // 0..1 across the quad
 void main() {
     vQ = aPos;
-    gl_Position = uProj * vec4(uRect.xy + aPos * uRect.zw, 0.0, 1.0);
+    vec2 p = uRect.xy + aPos * uRect.zw;
+    vec2 d = p - uPivot;
+    vec2 r = vec2(d.x * uRot.x - d.y * uRot.y, d.x * uRot.y + d.y * uRot.x);
+    gl_Position = uProj * vec4(uPivot + r, 0.0, 1.0);
 }
 )GLSL";
 
@@ -635,8 +640,23 @@ bool Compositor::buildShaders(std::string* error) {
     uClipTop_ = loc("uClipTop");
     uTex_ = loc("uTex");
     uBlur_ = loc("uBlur");
+    uPivot_ = loc("uPivot");
+    uRot_ = loc("uRot");
     uBlurDir_ = glGetUniformLocation(blurProg_, "uBlurDir");
     uWallRes_ = glGetUniformLocation(wallProg_, "uWallRes");
+
+    // Every program shares the vertex shader, so each needs the rotation pivot
+    // and angle initialised to the identity or its quads collapse to a point.
+    glUseProgram(prog_);
+    glUniform2f(uPivot_, 0.f, 0.f);
+    glUniform2f(uRot_, 1.f, 0.f);
+    glUseProgram(blurProg_);
+    glUniform2f(glGetUniformLocation(blurProg_, "uPivot"), 0.f, 0.f);
+    glUniform2f(glGetUniformLocation(blurProg_, "uRot"), 1.f, 0.f);
+    glUseProgram(wallProg_);
+    glUniform2f(glGetUniformLocation(wallProg_, "uPivot"), 0.f, 0.f);
+    glUniform2f(glGetUniformLocation(wallProg_, "uRot"), 1.f, 0.f);
+    glUseProgram(0);
 
     glGenVertexArrays(1, &vao_);
     glBindVertexArray(vao_);
@@ -913,6 +933,8 @@ void Compositor::beginFrame() {
     glBindTexture(GL_TEXTURE_2D, halfA_);  // the blurred wallpaper
     glUniform1i(uBlur_, 1);
     glActiveTexture(GL_TEXTURE0);
+    glUniform2f(uPivot_, 0.f, 0.f);
+    glUniform2f(uRot_, 1.f, 0.f);
     glBindVertexArray(vao_);
 }
 
@@ -933,6 +955,23 @@ void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opa
     glUniform1f(uClipTop_, clipTop == kNoClip ? -1.0e9f : float(clipTop));
     glUniform4f(uColor_, c.r, c.g, c.b, c.a);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, float radius,
+                                 const Color& c, float opacity) {
+    if (w <= 0 || h <= 0) return;
+    glUseProgram(prog_);
+    glBindVertexArray(vao_);
+    glUniform1i(uMode_, 0);
+    glUniform4f(uRect_, float(cx) - w * 0.5f, float(cy) - h * 0.5f, float(w), float(h));
+    glUniform1f(uRadius_, radius);
+    glUniform1f(uOpacity_, opacity);
+    glUniform1f(uClipTop_, -1.0e9f);
+    glUniform4f(uColor_, c.r, c.g, c.b, c.a);
+    glUniform2f(uPivot_, float(cx), float(cy));
+    glUniform2f(uRot_, std::cos(angle), std::sin(angle));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glUniform2f(uRot_, 1.f, 0.f);  // leave the shared state axis-aligned
 }
 
 void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,

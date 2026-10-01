@@ -101,6 +101,11 @@ public:
     static constexpr int kNoClip = -2000000000;
     void drawRect(const Rect& r, float radius, const Color& c, float opacity = 1.0f,
                   int clipTop = kNoClip);
+    // A solid rounded rect rotated by `angle` radians about (cx, cy). The rect
+    // is `w` x `h` *before* rotation, centred on (cx, cy). Used for the clock
+    // hands and ticks, which the axis-aligned drawRect cannot express.
+    void drawRectRotated(int cx, int cy, int w, int h, float angle, float radius,
+                         const Color& c, float opacity = 1.0f);
     void drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,
                      const Color& border, float opacity = 1.0f);
     void drawTex(GLuint tex, const Rect& dst, float radius, const Color& tint,
@@ -156,6 +161,7 @@ private:
     GLint uMaximized_ = -1, uScreen_ = -1, uShadowPad_ = -1, uTexMix_ = -1;
     GLint uKeepAlpha_ = -1, uTintAmount_ = -1, uClipTop_ = -1, uTex_ = -1, uBlur_ = -1;
     GLint uBlurDir_ = -1, uWallRes_ = -1;
+    GLint uPivot_ = -1, uRot_ = -1;
     float proj_[16] = {};
 
     // Wallpaper (a decoded photo when one is available, otherwise the
