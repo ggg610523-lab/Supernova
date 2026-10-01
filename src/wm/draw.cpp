@@ -688,22 +688,34 @@ void Manager::drawStartMenu() {
     if (eased <= 0.001) return;
     const float a = float(eased);
 
-    // Full-screen blurred wallpaper, darkened the way macOS dims the desktop.
-    comp.drawAcrylic(startRect, 0.f, theme::kLaunchTint, 0.16f, Color{0.f, 0.f, 0.f, 0.f}, a);
+    // A frosted, semi-transparent glass over the desktop, the way macOS' Launchpad
+    // reads: the blurred wallpaper supplies the blur, the black wash keeps it a
+    // touch dark -- but the acrylic is deliberately NOT opaque. An opaque sample
+    // of a dark wallpaper is what collapsed this to solid black; letting ~34% of
+    // the real desktop through keeps it translucent instead.
+    constexpr float kGlass = 0.66f;
+    comp.drawAcrylic(startRect, 0.f, theme::kLaunchTint, 0.10f, Color{0.f, 0.f, 0.f, 0.f},
+                     a * kGlass);
     comp.drawRect(startRect, 0.f, theme::kLaunchDim, a);
 
-    // Top-centred search pill.
-    comp.drawRect(searchRect, float(searchRect.h) * 0.5f, theme::kLaunchSearch, a);
-    drawSearchGlyph(Rect{searchRect.x + 12, searchRect.y, searchRect.h, searchRect.h},
+    // Top-centred search pill: magnifier on the left, then placeholder or query,
+    // laid out left to right with a real gap. (The glyph used to span 34px from
+    // x+12 while the text began at x+32, so the two overprinted each other, and a
+    // long query ran straight off the end of the pill.)
+    const int sh = searchRect.h;
+    comp.drawRect(searchRect, float(sh) * 0.5f, theme::kLaunchSearch, a);
+    const int glyph = 18;
+    const int padX = 14;
+    drawSearchGlyph(Rect{searchRect.x + padX, searchRect.y + (sh - glyph) / 2, glyph, glyph},
                     theme::kLaunchSearchText);
     {
         const std::string label = searchText.empty() ? std::string("Search") : searchText;
         const Color col = searchText.empty() ? theme::kLaunchSearchText : theme::kText;
-        const TextTex t = text.get(label, 14, Weight::Regular);
+        const int textX = searchRect.x + padX + glyph + 8;
+        const int maxW = searchRect.right() - textX - 14;
+        const TextTex t = text.get(ellipsize(text, label, 14, maxW), 14, Weight::Regular);
         if (t.tex) {
-            comp.drawText(t, Rect{searchRect.x + searchRect.h - 2,
-                                  searchRect.y + (searchRect.h - t.h) / 2, t.w, t.h},
-                          col, a);
+            comp.drawText(t, Rect{textX, searchRect.y + (sh - t.h) / 2, t.w, t.h}, col, a);
         }
     }
 

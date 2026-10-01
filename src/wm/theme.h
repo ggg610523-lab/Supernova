@@ -110,7 +110,7 @@ inline constexpr Color kCcLabel = rgb(0xFFFFFF, 0.70f);
 // page dots. Deliberately its own skin: white labels on the photo, no Fluent
 // panel chrome.
 inline constexpr Color kLaunchTint = rgb(0x14141A, 1.0f);      // acrylic tint over the blur
-inline constexpr Color kLaunchDim = rgb(0x000000, 0.26f);      // extra darkening wash
+inline constexpr Color kLaunchDim = rgb(0x000000, 0.16f);      // extra darkening wash
 inline constexpr Color kLaunchSearch = rgb(0xFFFFFF, 0.16f);   // search field pill
 inline constexpr Color kLaunchSearchText = rgb(0xFFFFFF, 0.60f);
 inline constexpr Color kLaunchLabel = rgb(0xFFFFFF, 0.95f);

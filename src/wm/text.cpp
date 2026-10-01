@@ -28,6 +28,14 @@ const char* const kFamilies[] = {
 
 constexpr size_t kMaxEntries = 900;
 
+// Grid-fit glyphs and keep the *measure* and *render* passes on identical load
+// flags, so the hinted advances used by layout() are the ones rasterise() draws
+// and the texture is never a pixel narrow. Forcing the autohinter also means any
+// face fontconfig resolves -- including the fallbacks used when MuternVF is
+// absent -- lands stems on whole pixels instead of scaling freely.
+constexpr int kLoadFlags = FT_LOAD_DEFAULT | FT_LOAD_FORCE_AUTOHINT;
+constexpr int kRenderFlags = FT_LOAD_RENDER | FT_LOAD_FORCE_AUTOHINT | FT_LOAD_TARGET_NORMAL;
+
 int weightToFc(Weight w) {
     switch (w) {
         case Weight::Bold: return FC_WEIGHT_BOLD;
@@ -294,7 +302,9 @@ void Text::layout(const std::string& s, void* facePtr, int* outW, int* outH) {
     int pen = 0;
     for (size_t i = 0; i < s.size();) {
         const uint32_t cp = nextCodepoint(s, &i);
-        if (FT_Load_Char(face, cp, FT_LOAD_DEFAULT) != 0) continue;
+        // Same flags as the render pass so measurement and drawing agree on the
+        // hinted advances and the texture is never one pixel short.
+        if (FT_Load_Char(face, cp, kLoadFlags) != 0) continue;
         pen += static_cast<int>(face->glyph->advance.x >> 6);
     }
     *outW = pen > 0 ? pen : 0;
@@ -312,7 +322,7 @@ void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int widt
 
     for (size_t i = 0; i < s.size();) {
         const uint32_t cp = nextCodepoint(s, &i);
-        if (FT_Load_Char(face, cp, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) continue;
+        if (FT_Load_Char(face, cp, kRenderFlags) != 0) continue;
         const FT_Bitmap& bm = face->glyph->bitmap;
         const int gx = pen + face->glyph->bitmap_left;
         const int gy = baseline - face->glyph->bitmap_top;
