@@ -359,6 +359,13 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         endDrag(x, y);
         return;
     }
+    // A Control Centre slider keeps tracking until the button comes up, so the
+    // release does not have to land on the pill.
+    if (ccDrag >= 0) {
+        updateCcDrag(x, y);
+        endCcDrag();
+        return;
+    }
     // A caption button only fires if the release lands on the same button.
     for (auto& cp : clients) {
         Client* c = cp.get();
@@ -385,6 +392,10 @@ void Manager::onMotion(XMotionEvent& ev) {
         updateDrag(x, y);
         return;
     }
+    if (ccDrag >= 0) {
+        updateCcDrag(x, y);
+        return;
+    }
     if (ev.window == comp.overlay() || overlayOpen()) updateHoverStates(x, y);
 }
 
@@ -392,6 +403,13 @@ void Manager::onKeyPress(XKeyEvent& ev) {
     const unsigned mods = ev.state & (ShiftMask | ControlMask | Mod1Mask | Mod4Mask);
     const KeySym sym = XLookupKeysym(&ev, 0);
 
+    if (ccOpen) {
+        // Any key press that is not a Control Centre interaction dismisses it.
+        if (sym == XK_Escape) {
+            closeOverlays();
+            return;
+        }
+    }
     if (startOpen) {
         if (sym == XK_Escape) {
             closeOverlays();
@@ -591,7 +609,7 @@ void Manager::handleTaskbarPress(int x, int y, unsigned button) {
         return;
     }
     if (clockRect.contains(x, y)) {
-        toggleTaskView();
+        toggleControlCenter();
         return;
     }
     for (size_t i = 0; i < taskItems.size(); ++i) {
@@ -745,6 +763,12 @@ bool Manager::handleChromePress(int x, int y, unsigned button, Time time) {
 }
 
 void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
+    // Control Centre stays open when a control is used, exactly as iOS does;
+    // only a press outside the panel dismisses it.
+    if (ccOpen) {
+        handleControlCenterPress(x, y, button);
+        return;
+    }
     if (contextOpen) {
         if (button == Button1 && contextRect.contains(x, y)) {
             const int idx = (y - contextRect.y - 6) / 32;

@@ -61,6 +61,7 @@ void Manager::render() {
     if (taskViewOpen || taskViewAnim > 0.0) drawTaskView();
     if (altTabOpen || altTabAnim > 0.0) drawAltTab();
     if (contextOpen) drawContextMenu();
+    if (ccOpen || ccAnim > 0.0) drawControlCenter();
     if (opts->stats) drawStats();
 }
 

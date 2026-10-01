@@ -316,6 +316,9 @@ int Manager::run(const Options& options) {
     layoutDesktopIcons();
     scanExistingWindows();
     updateClientList();
+    // Kick the first state probe now, off the critical path, so the Control
+    // Centre is already populated the first time the clock is clicked.
+    sysctl.init();
 
     // Unified replacement for the old SDL prototype's "--embed prog": the single
     // compositor launches the requested programs and they show up as normal
@@ -451,6 +454,21 @@ void Manager::tickAnimations(double now) {
     step(startAnim, startOpen ? 1.0 : 0.0, 170.0);
     step(taskViewAnim, taskViewOpen ? 1.0 : 0.0, 170.0);
     step(altTabAnim, altTabOpen ? 1.0 : 0.0, 120.0);
+    // Control Centre: a slightly longer ease so the grid reads as rising out
+    // of the taskbar rather than simply appearing.
+    step(ccAnim, ccOpen ? 1.0 : 0.0, 210.0);
+    // Always drain an in-flight probe, even with the panel closed, so a probe
+    // that was running when it closed cannot leak its pipe. Only a live panel
+    // asks for the periodic refresh.
+    if (sysctl.poll() && ccOpen) dirty = true;
+    if (ccOpen) {
+        // Keep the reading fresh so an external change (a keyboard volume key,
+        // NetworkManager) shows up while the panel is visible.
+        sysctl.requestRefresh(4.0);
+        if (!ccControls.empty() && ccAnim < 1.0) layoutControlCenter();
+    } else if (ccAnim <= 0.0 && !ccControls.empty()) {
+        ccControls.clear();
+    }
     if (opts->stats) dirty = true;
 }
 
@@ -603,6 +621,12 @@ void Manager::updateHoverStates(int px, int py) {
         }
     }
 
+    if (ccOpen) {
+        const int before = ccHover;
+        updateCcHover(px, py);
+        if (ccHover != before) changed = true;
+    }
+
     int edge = 0;
     Client* edgeClient = nullptr;
     if (!overlayOpen()) edge = hitEdge(px, py, &edgeClient);
@@ -611,7 +635,9 @@ void Manager::updateHoverStates(int px, int py) {
         hoverResizeClient = edgeClient;
         changed = true;
     }
-    const int wantedCursor = edge ? edgeCursorKind(edge) : (overTaskbar ? 5 : 0);
+    int wantedCursor = edge ? edgeCursorKind(edge) : (overTaskbar ? 5 : 0);
+    // A Control Centre control is a button, so it gets the hand cursor.
+    if (ccOpen && ccHover >= 0 && size_t(ccHover) < ccControls.size()) wantedCursor = 5;
     if (wantedCursor != cursorShown) setCursor(wantedCursor);
 
     // Caption buttons: the top-most window whose frame covers the point wins.
@@ -656,7 +682,7 @@ void Manager::updateHoverStates(int px, int py) {
 }
 
 bool Manager::overlayOpen() const {
-    return startOpen || taskViewOpen || altTabOpen || contextOpen;
+    return startOpen || taskViewOpen || altTabOpen || contextOpen || ccOpen;
 }
 
 bool Manager::pointInOverlaySurface(int x, int y) const {
@@ -664,18 +690,22 @@ bool Manager::pointInOverlaySurface(int x, int y) const {
     if (taskViewOpen) return true;
     if (altTabOpen) return true;
     if (contextOpen && contextRect.contains(x, y)) return true;
+    if (ccOpen && ccRect.inflated(12).contains(x, y)) return true;
     return false;
 }
 
 void Manager::closeOverlays() {
     const bool was = overlayOpen();
-    startOpen = taskViewOpen = altTabOpen = contextOpen = false;
+    const bool wasCc = ccOpen;
+    startOpen = taskViewOpen = altTabOpen = contextOpen = ccOpen = false;
     altTabOrder.clear();
     altTabIndex = 0;
     searchText.clear();
     hoverApp = -1;
     contextClient = nullptr;
     contextItems.clear();
+    ccHover = -1;
+    if (wasCc) endCcDrag();
     if (was) {
         ungrabPointer();
         XUngrabKeyboard(dpy, CurrentTime);

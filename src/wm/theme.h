@@ -79,6 +79,23 @@ inline constexpr Color kTileTints[6] = {
     rgb(0x2FA37C), rgb(0xC99A1F), rgb(0x3E8FB0),
 };
 
+// --- Control Centre (iOS) -------------------------------------------------
+// A deliberately different skin from the Fluent flyouts above: Control Centre is
+// a grid of dark glass tiles on a heavily blurred backdrop, and the "on" colour
+// of a control is the system fill (iOS blue), not the Windows accent.
+inline constexpr Color kCcBackdrop = rgb(0x000000, 0.38f);
+inline constexpr Color kCcTile = rgb(0x1C1C1E, 0.72f);
+inline constexpr Color kCcTileHover = rgb(0x2C2C2E, 0.82f);
+inline constexpr Color kCcTileBorder = rgb(0xFFFFFF, 0.08f);
+inline constexpr Color kCcActive = rgb(0x0A84FF);   // iOS systemBlue
+inline constexpr Color kCcActiveGlyph = rgb(0xFFFFFF);
+inline constexpr Color kCcGlyph = rgb(0xFFFFFF, 0.92f);
+inline constexpr Color kCcGlyphOff = rgb(0xFFFFFF, 0.42f);  // disabled control
+inline constexpr Color kCcDisabled = rgb(0xFFFFFF, 0.10f);
+inline constexpr Color kCcSliderTrack = rgb(0xFFFFFF, 0.16f);
+inline constexpr Color kCcSliderFill = rgb(0xFFFFFF, 0.92f);
+inline constexpr Color kCcLabel = rgb(0xFFFFFF, 0.70f);
+
 }  // namespace theme
 
 namespace metrics {
@@ -101,6 +118,19 @@ constexpr int kMinH = 90;
 constexpr int kStartW = 620;
 constexpr int kStartH = 620;
 constexpr int kFlyoutRadius = 8;
+
+// --- Control Centre (iOS 18: 4 columns x 5 rows) --------------------------
+// The reference layout is a 4x5 grid of circular spots with 15pt gutters, 18pt
+// tile corners and 15pt tile padding; the inner buttons are 54pt circles.
+constexpr int kCcCols = 4;
+constexpr int kCcRows = 5;
+constexpr int kCcCell = 76;       // one grid cell
+constexpr int kCcGap = 15;        // grid gap
+constexpr int kCcPad = 16;        // panel padding
+constexpr int kCcTileRadius = 18;
+constexpr int kCcButton = 54;     // circular inner button diameter
+constexpr int kCcPanelRadius = 22;
+constexpr int kCcMaxScale = 100;  // percent; shrinks to fit small screens
 
 }  // namespace metrics
 

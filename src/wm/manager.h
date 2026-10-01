@@ -26,6 +26,7 @@
 #include "apps.h"
 #include "compositor.h"
 #include "icons.h"
+#include "sysctl.h"
 #include "text.h"
 #include "theme.h"
 #include "util.h"
@@ -302,6 +303,7 @@ private:
     void showContextMenu(Client* c, int x, int y);
     void openStartMenu();
     void toggleTaskView();
+    void toggleControlCenter();
     bool overlayOpen() const;
     bool pointInOverlaySurface(int x, int y) const;
     // The top-most managed client whose frame contains the point (chrome areas
@@ -319,6 +321,7 @@ private:
     void drawStartMenu();
     void drawAltTab();
     void drawTaskView();
+    void drawControlCenter();
     void drawSnapPreview();
     void drawContextMenu();
     void drawStats();
@@ -338,6 +341,29 @@ private:
     void drawAppTile(const Rect& r, const std::string& name, float radius, const Color& tint,
                      bool hovered);
     void drawWindowThumb(const WindowTex& tex, const Rect& dst, float radius, bool focused);
+
+    // ---- Control Centre (controlcenter.cpp)
+    // The iOS grid is 4 columns x 5 rows; a module occupies one or two cells of
+    // it and every interactive part of a module is registered as a CcControl so
+    // hit testing is a plain rectangle scan.
+    struct CcControl {
+        Rect rect;
+        int id = 0;          // CcId
+        int slot = 0;        // index within a multi-button module
+        bool vertical = false;  // slider: value grows upwards
+    };
+    void layoutControlCenter();
+    void updateCcHover(int px, int py);
+    void handleControlCenterPress(int x, int y, unsigned button);
+    void updateCcDrag(int x, int y);
+    void endCcDrag();
+    void activateCcControl(int id);
+    void launchCcApp(int index);
+    // Index into ccControls of a given (id, slot), or -1.
+    int ccControlIndex(int id, int slot) const;
+    // Scale factor (percent) the whole grid is drawn at, so a short screen
+    // shrinks the panel instead of clipping it.
+    int ccScale() const;
 
     // ---- desktop icons (draw.cpp / input.cpp)
     void layoutDesktopIcons();
@@ -430,9 +456,22 @@ private:
     double altTabAnim = 0.0;
     int  taskViewHover = -1;
 
+    // ---- Control Centre
+    bool ccOpen = false;
+    double ccAnim = 0.0;
+    Rect ccRect;                       // the frosted panel
+    int ccAnchorX = 0;                 // zoom origin: the point under the clock
+    int ccAnchorY = 0;
+    std::vector<CcControl> ccControls;  // every clickable part, in draw order
+    int ccHover = -1;
+    int ccDrag = -1;                   // slider being dragged, -1 when none
+    int ccDragValue = 0;               // preview value while dragging
+    std::vector<std::string> ccLaunchers;  // exec strings for the launcher row
+    SystemControls sysctl;
+    bool dnd = false;                  // Do Not Disturb, enforced by the WM
+
     // ---- loop bookkeeping
-    const Options* opts = nullptr;
-    // Queued --exec commands: launched once, right after the first present(),
+    const Options* opts = nullptr;    // Queued --exec commands: launched once, right after the first present(),
     // so the GL pipeline (context current, VAO bound, wallpaper baked) exists
     // before fork() can touch process-global GL state.
     std::vector<std::string> pendingLaunches;

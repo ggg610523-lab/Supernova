@@ -41,6 +41,8 @@ add_executable(win11wm
   src/wm/windows.cpp
   src/wm/input.cpp
   src/wm/draw.cpp
+  src/wm/controlcenter.cpp
+  src/wm/sysctl.cpp
   src/wm/compositor.cpp
   src/wm/text.cpp
   src/wm/apps.cpp

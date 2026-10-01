@@ -1,0 +1,586 @@
+// The iOS Control Centre: a 4 column x 5 row grid of dark glass tiles that
+// drops out of the taskbar clock.
+//
+// The layout is the real one. A module occupies whole grid cells and its inner
+// controls are 54pt circles (or, for brightness and volume, a full-height pill
+// with a fill level), which is what makes the panel read as Control Centre
+// rather than as a list of switches:
+//
+//        0              1              2              3
+//   0  [ connections 2x2          ] [ media 2x2               ]
+//   1  [                           ] [                        ]
+//   2  [ dnd 1x1 ] [ night 1x1 ] [ brightness 1x2 ] [ volume 1x2 ]
+//   3  [ show desktop 1x2         ] [  (sliders still)         ]
+//   4  [ lock ] [ screenshot ] [ files ] [ terminal ]
+//
+// Everything that needs the outside world goes through SystemControls, which
+// probes asynchronously; this file only reads the cached state and draws.
+#include "manager.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+
+#include "theme.h"
+
+namespace wm {
+namespace {
+
+// Interactive parts of the panel, in draw order. The values are internal; the
+// hit test only ever compares them.
+enum CcId {
+    kCcNone = 0,
+    // connections tile (2x2)
+    kCcAirplane,
+    kCcWifi,
+    kCcBluetooth,
+    kCcWired,
+    // media tile (2x2)
+    kCcMediaPrev,
+    kCcMediaPlay,
+    kCcMediaNext,
+    // sliders (1x2 each)
+    kCcBrightness,
+    kCcVolume,
+    // 1x1 toggles
+    kCcDnd,
+    kCcNight,
+    kCcShowDesktop,
+    // 1x2
+    kCcLock,
+    kCcScreenshot,
+    // launcher row
+    kCcLauncherFirst,
+    kCcLauncherCount = 2,
+};
+
+// `ellipsize` lives in draw.cpp's anonymous namespace; this is the same idea for
+// the Control Centre's own strings.
+std::string ccEllipsize(Text& text, const std::string& s, int px, int maxW) {
+    if (maxW <= 0 || s.empty()) return std::string();
+    if (text.measure(s, px) <= maxW) return s;
+    std::string out = s;
+    while (!out.empty() && text.measure(out + "\u2026", px) > maxW) {
+        out.resize(out.size() - 1);
+        while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80) {
+            out.resize(out.size() - 1);
+        }
+    }
+    return out + "\u2026";
+}
+
+}  // namespace
+
+int Manager::ccControlIndex(int id, int slot) const {
+    for (size_t i = 0; i < ccControls.size(); ++i) {
+        if (ccControls[i].id == id && ccControls[i].slot == slot) return int(i);
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Geometry
+// ---------------------------------------------------------------------------
+
+int Manager::ccScale() const {
+    const int baseW = 2 * metrics::kCcPad + metrics::kCcCols * metrics::kCcCell +
+                      (metrics::kCcCols - 1) * metrics::kCcGap;
+    const int baseH = 2 * metrics::kCcPad + metrics::kCcRows * metrics::kCcCell +
+                      (metrics::kCcRows - 1) * metrics::kCcGap;
+    // Leave room for the taskbar plus the drop shadow above it.
+    const int availH = screenH - metrics::kTaskbarH - 24;
+    const int availW = screenW - 24;
+    int scale = metrics::kCcMaxScale;
+    if (availW * 100 / baseW < scale) scale = availW * 100 / baseW;
+    if (availH * 100 / baseH < scale) scale = availH * 100 / baseH;
+    return std::max(40, scale);
+}
+
+// Places every module and records each clickable part in ccControls.
+void Manager::layoutControlCenter() {
+    ccControls.clear();
+    const int scale = ccScale();
+    const int cell = metrics::kCcCell * scale / 100;
+    const int gap = std::max(2, metrics::kCcGap * scale / 100);
+    const int pad = metrics::kCcPad * scale / 100;
+    const int cols = metrics::kCcCols;
+    const int rows = metrics::kCcRows;
+
+    const int w = 2 * pad + cols * cell + (cols - 1) * gap;
+    const int h = 2 * pad + rows * cell + (rows - 1) * gap;
+
+    // Anchored above the clock, nudged left so it is not hard against the edge.
+    int x = clockRect.right() - w - 4;
+    if (x + w > screenW - 4) x = screenW - w - 4;
+    if (x < 4) x = 4;
+    int y = screenH - metrics::kTaskbarH - 12 - h;
+    if (y < 4) y = 4;
+    ccRect = Rect{x, y, w, h};
+
+    // The panel zooms out of the clock, so remember the point under it, clamped
+    // to the panel so the origin is always inside the final rectangle.
+    ccAnchorX = clampi(clockRect.x + clockRect.w / 2, ccRect.x, ccRect.right());
+    ccAnchorY = clampi(clockRect.y + clockRect.h / 2, ccRect.y, ccRect.bottom());
+
+    // A module spanning `span` cells, positioned at grid column/row.
+    const auto cellRect = [&](int col, int row, int colspan, int rowspan) {
+        return Rect{ccRect.x + pad + col * (cell + gap), ccRect.y + pad + row * (cell + gap),
+                    colspan * cell + (colspan - 1) * gap, rowspan * cell + (rowspan - 1) * gap};
+    };
+    // The circular button inside a module, centred in one of its quarters.
+    const auto innerButton = [&](const Rect& module, int col, int row, int colspan, int rowspan) {
+        const int qw = (module.w - gap) / 2;
+        const int qh = (module.h - gap) / 2;
+        const int d = std::min(metrics::kCcButton * scale / 100, std::min(qw, qh));
+        const int cx = module.x + col * (qw + gap) + qw / 2;
+        const int cy = module.y + row * (qh + gap) + qh / 2;
+        return Rect{cx - d / 2, cy - d / 2, d, d};
+    };
+    const auto add = [&](const Rect& r, int id, int slot = 0, bool vertical = false) {
+        CcControl c;
+        c.rect = r;
+        c.id = id;
+        c.slot = slot;
+        c.vertical = vertical;
+        ccControls.push_back(c);
+        return c;
+    };
+
+    // --- connections 2x2: airplane, wifi, bluetooth, wired -----------------
+    const Rect conn = cellRect(0, 0, 2, 2);
+    add(innerButton(conn, 0, 0, 1, 1), kCcAirplane, 0);
+    add(innerButton(conn, 1, 0, 1, 1), kCcWifi, 1);
+    add(innerButton(conn, 0, 1, 1, 1), kCcBluetooth, 2);
+    add(innerButton(conn, 1, 1, 1, 1), kCcWired, 3);
+
+    // --- media 2x2: title across the top, three transport buttons below ----
+    const Rect media = cellRect(2, 0, 2, 2);
+    const int btn = std::min(metrics::kCcButton * scale / 100, (media.w - 2 * gap) / 3);
+    const int stripY = media.bottom() - gap - btn;
+    for (int i = 0; i < 3; ++i) {
+        const int cx = media.x + gap + i * ((media.w - 2 * gap) / 3) +
+                       (media.w - 2 * gap) / 6;
+        add(Rect{cx - btn / 2, stripY, btn, btn}, kCcMediaPrev + i, i);
+    }
+
+    // --- brightness and volume 1x2 pills ----------------------------------
+    add(cellRect(2, 2, 1, 2), kCcBrightness, 0, true);
+    add(cellRect(3, 2, 1, 2), kCcVolume, 0, true);
+
+    // --- the 1x1 toggles and the bottom row -------------------------------
+    add(cellRect(0, 2, 1, 1), kCcDnd);
+    add(cellRect(1, 2, 1, 1), kCcNight);
+    add(cellRect(0, 3, 2, 1), kCcShowDesktop);
+    add(cellRect(0, 4, 1, 1), kCcLock);
+    add(cellRect(1, 4, 1, 1), kCcScreenshot);
+
+    // --- launchers share the bottom row, which leaves exactly two slots ----
+    for (int i = 0; i < kCcLauncherCount; ++i) {
+        const Rect r = cellRect(2 + i, 4, 1, 1);
+        add(r, kCcLauncherFirst + i, i);
+    }
+}
+
+void Manager::updateCcHover(int px, int py) {
+    int found = -1;
+    for (size_t i = 0; i < ccControls.size(); ++i) {
+        if (ccControls[i].rect.contains(px, py)) {
+            found = int(i);
+            break;
+        }
+    }
+    if (found != ccHover) {
+        ccHover = found;
+        dirty = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interaction
+// ---------------------------------------------------------------------------
+
+void Manager::handleControlCenterPress(int x, int y, unsigned button) {
+    if (button != Button1) {
+        closeOverlays();
+        return;
+    }
+    for (size_t i = 0; i < ccControls.size(); ++i) {
+        const CcControl& c = ccControls[i];
+        if (!c.rect.contains(x, y)) continue;
+
+        // A press inside the panel is consumed, whatever it lands on.
+        if (c.id == kCcBrightness || c.id == kCcVolume) {
+            const SystemState& s = sysctl.state();
+            const bool usable = c.id == kCcVolume ? s.audioPresent
+                                                  : (s.backlightPresent && s.backlightWritable);
+            if (!usable) return;
+            ccDrag = int(i);
+            // Jump to the pressed level, then track the pointer.
+            ccDragValue = c.vertical
+                              ? clampi((c.rect.bottom() - y) * 100 / std::max(1, c.rect.h), 0, 100)
+                              : clampi((x - c.rect.x) * 100 / std::max(1, c.rect.w), 0, 100);
+            if (c.id == kCcVolume) sysctl.setVolume(ccDragValue);
+            else sysctl.setBrightness(ccDragValue);
+            grabPointer();
+            dirty = true;
+            return;
+        }
+        activateCcControl(c.id);
+        return;
+    }
+    // Clicking the panel's padding should not dismiss it.
+    if (ccRect.contains(x, y)) return;
+    closeOverlays();
+}
+
+void Manager::updateCcDrag(int x, int y) {
+    if (ccDrag < 0 || size_t(ccDrag) >= ccControls.size()) return;
+    const CcControl& c = ccControls[size_t(ccDrag)];
+    const int value = c.vertical
+                          ? clampi((c.rect.bottom() - y) * 100 / std::max(1, c.rect.h), 0, 100)
+                          : clampi((x - c.rect.x) * 100 / std::max(1, c.rect.w), 0, 100);
+    if (value == ccDragValue) return;
+    ccDragValue = value;
+    if (c.id == kCcVolume) sysctl.setVolume(value);
+    else sysctl.setBrightness(value);
+    dirty = true;
+}
+
+void Manager::endCcDrag() {
+    if (ccDrag < 0) return;
+    ccDrag = -1;
+    ungrabPointer();
+    dirty = true;
+}
+
+void Manager::launchCcApp(int index) {
+    if (index < 0 || index >= int(ccLaunchers.size())) return;
+    launchApp(ccLaunchers[size_t(index)]);
+}
+
+void Manager::activateCcControl(int id) {
+    const SystemState& s = sysctl.state();
+    switch (id) {
+        case kCcAirplane: sysctl.setAirplane(!s.airplane); break;
+        case kCcWifi:
+            if (s.wifiPresent) sysctl.setWifi(!s.wifi);
+            break;
+        case kCcBluetooth:
+            if (s.btPresent) sysctl.setBluetooth(!s.bt);
+            break;
+        case kCcWired:  // read-only status, like iOS' cellular tile
+            break;
+        case kCcMediaPrev: sysctl.mediaPrev(); break;
+        case kCcMediaPlay: sysctl.mediaPlayPause(); break;
+        case kCcMediaNext: sysctl.mediaNext(); break;
+        case kCcBrightness:
+            if (s.backlightPresent && s.backlightWritable) {
+                sysctl.setBrightness(s.brightness >= 100 ? 0 : s.brightness + 10);
+            }
+            break;
+        case kCcVolume:
+            if (s.audioPresent) sysctl.setMuted(!s.muted);
+            break;
+        case kCcDnd: {
+            // Prefer the real notification daemon; when there is none, fall
+            // back to suppressing our own urgency pulses so the switch still
+            // does something observable.
+            const bool next = !(s.dndPresent ? s.dnd : dnd);
+            if (s.dndPresent) sysctl.setDnd(next);
+            else dnd = next;
+            if (next) {
+                for (auto& cp : clients) cp->attentionPulse = 0.0;
+            }
+            break;
+        }
+        case kCcNight: sysctl.setNightLight(!s.nightLight); break;
+        case kCcShowDesktop: toggleShowDesktop(); break;
+        case kCcLock: sysctl.lockSession(); break;
+        case kCcScreenshot: sysctl.screenshot(); break;
+        default:
+            if (id >= kCcLauncherFirst && id < kCcLauncherFirst + kCcLauncherCount) {
+                launchCcApp(id - kCcLauncherFirst);
+            }
+            break;
+    }
+    dirty = true;
+}
+
+void Manager::toggleControlCenter() {
+    if (ccOpen) {
+        closeOverlays();
+        return;
+    }
+    if (contextOpen || startOpen || taskViewOpen || altTabOpen) closeOverlays();
+    ccOpen = true;
+    ccHover = -1;
+    ccDrag = -1;
+    // Resolve the launcher row once per open: it comes from the .desktop scan,
+    // which is far too slow to run while a frame is being painted.
+    ccLaunchers.clear();
+    struct Want {
+        const char* fallback;  // used when no .desktop entry matched
+        const char* wmClass;
+        const char* nameMatch;  // lower-case substring of Name= or WM_CLASS
+    };
+    static const Want kWants[kCcLauncherCount] = {
+        {"nautilus", "nautilus", "files"},
+        {"xterm", "konsole", "terminal"},
+    };
+    for (const Want& want : kWants) {
+        std::string found;
+        for (const AppEntry& e : apps) {
+            const bool classHit = !e.wmClass.empty() && e.wmClass == want.wmClass;
+            const bool nameHit = containsFold(e.searchKey, want.nameMatch);
+            if (classHit || nameHit) {
+                found = e.exec;
+                break;
+            }
+        }
+        if (found.empty()) found = want.fallback;
+        ccLaunchers.push_back(found);
+    }
+    layoutControlCenter();
+    sysctl.requestRefresh();
+    grabPointer();
+    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    dirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+void Manager::drawControlCenter() {
+    const double eased = fluentEase(ccAnim);
+    if (eased <= 0.001) return;
+    const float a = float(eased);
+    if (ccRect.empty()) layoutControlCenter();
+
+    // The panel grows out of the clock rather than simply appearing: every rect
+    // is scaled about the point under the pointer, and the whole thing fades in
+    // with it. Hit testing still uses the unscaled layout in ccControls, so a
+    // click lands correctly even mid-animation.
+    const float zoom = 0.86f + 0.14f * float(eased);
+    const float ax = float(ccAnchorX);
+    const float ay = float(ccAnchorY);
+    const auto grow = [&](const Rect& r) {
+        const float cx = float(r.x + r.w / 2), cy = float(r.y + r.h / 2);
+        const float w = float(r.w) * zoom, h = float(r.h) * zoom;
+        const Rect out{int(std::lround(cx - w / 2 + (ax - cx) * (1.f - zoom))),
+                        int(std::lround(cy - h / 2 + (ay - cy) * (1.f - zoom))),
+                        int(std::lround(w)), int(std::lround(h))};
+        return out;
+    };
+
+    // iOS blurs and darkens whatever is behind the panel.
+    comp.drawRect(Rect{0, 0, screenW, screenH}, 0.f, theme::kCcBackdrop, a);
+    comp.drawAcrylic(grow(ccRect), float(metrics::kCcPanelRadius) * zoom, theme::kCcTile, 0.92f,
+                     theme::kCcTileBorder, a);
+
+    const int scale = ccScale();
+    const int cell = metrics::kCcCell * scale / 100;
+    const int gap = std::max(2, metrics::kCcGap * scale / 100);
+    const SystemState& s = sysctl.state();
+
+    const auto cellRect = [&](int col, int row, int colspan, int rowspan) {
+        return Rect{ccRect.x + metrics::kCcPad * scale / 100 + col * (cell + gap),
+                    ccRect.y + metrics::kCcPad * scale / 100 + row * (cell + gap),
+                    colspan * cell + (colspan - 1) * gap, rowspan * cell + (rowspan - 1) * gap};
+    };
+    const auto controlRect = [&](int id, int slot) -> Rect {
+        for (const CcControl& c : ccControls) {
+            if (c.id == id && c.slot == slot) return c.rect;
+        }
+        return Rect();
+    };
+    const auto hovered = [&](int id, int slot) {
+        for (size_t i = 0; i < ccControls.size(); ++i) {
+            if (ccControls[i].id == id && ccControls[i].slot == slot) return int(i) == ccHover;
+        }
+        return false;
+    };
+    // A module's background plate.
+    const auto tile = [&](const Rect& r, bool hot) {
+        comp.drawRect(grow(r), float(metrics::kCcTileRadius * scale / 100) * zoom,
+                      hot ? theme::kCcTileHover : theme::kCcTile, a);
+    };
+    // A circular control: filled with the system colour when on, hollow when off.
+    const auto button = [&](const Rect& r, bool on, bool enabled) {
+        const float radius = float(r.w) * 0.5f * zoom;
+        if (!enabled) {
+            comp.drawRect(grow(r), radius, theme::kCcDisabled, a);
+        } else if (on) {
+            comp.drawRect(grow(r), radius, theme::kCcActive, a);
+        } else {
+            comp.drawRect(grow(r), radius, theme::kCcSliderTrack, a);
+        }
+    };
+    const auto glyph = [&](const Rect& r, const char* icon, bool on, bool enabled) {
+        if (!enabled) return;
+        // The blue fill carries the state; the glyph just needs to stay legible.
+        const float opacity = on ? theme::kCcActiveGlyph.a : theme::kCcGlyph.a;
+        const int d = int(r.w * 0.52);
+        const Rect box = grow(Rect{r.x + (r.w - d) / 2, r.y + (r.h - d) / 2, d, d});
+        if (drawAppIcon(box, icon, icon, float(box.w) * 0.22f, opacity)) return;
+        // No icon in the theme: a filled dot still communicates state.
+        const int dot = std::max(3, int(box.w * 0.5));
+        comp.drawRect(Rect{box.x + (box.w - dot) / 2, box.y + (box.h - dot) / 2, dot, dot},
+                      float(dot) * 0.5f, on ? theme::kCcActiveGlyph : theme::kCcGlyph, a);
+    };
+
+    // --- connections ------------------------------------------------------
+    {
+        const Rect m = cellRect(0, 0, 2, 2);
+        tile(m, hovered(kCcAirplane, 0) || hovered(kCcWifi, 1) || hovered(kCcBluetooth, 2) ||
+                  hovered(kCcWired, 3));
+        const struct {
+            int id;
+            int slot;
+            const char* icon;
+            bool on;
+            bool enabled;
+        } rows[] = {
+            {kCcAirplane, 0, "cc-airplane", s.airplane, s.wifiPresent || s.btPresent},
+            {kCcWifi, 1, "cc-wifi", s.wifi, s.wifiPresent},
+            {kCcBluetooth, 2, "cc-bluetooth", s.bt, s.btPresent},
+            {kCcWired, 3, "cc-ethernet", s.wired, s.wiredPresent},
+        };
+        for (const auto& r : rows) {
+            const Rect b = controlRect(r.id, r.slot);
+            button(b, r.on, r.enabled);
+            glyph(b, r.icon, r.on, r.enabled);
+        }
+    }
+
+    // --- media ------------------------------------------------------------
+    {
+        const Rect m = cellRect(2, 0, 2, 2);
+        tile(m, hovered(kCcMediaPlay, 1));
+        // Title and artist live in the space above the transport strip, not
+        // vertically centred over the whole tile, so they never collide with
+        // the buttons.
+        const int btn = std::min(metrics::kCcButton * scale / 100, (m.w - 2 * gap) / 3);
+        const int stripTop = m.bottom() - gap - btn - gap;
+        const Rect area{m.x + gap, m.y + gap, m.w - 2 * gap, std::max(0, stripTop - m.y - gap)};
+        const bool has = s.mediaPresent;
+        const std::string line = !has ? std::string("No media")
+                                      : (s.mediaTitle.empty() ? std::string("Not playing")
+                                                              : s.mediaTitle);
+        const int titlePx = std::max(10, int(m.h * 0.17));
+        const int artistPx = std::max(9, int(m.h * 0.13));
+        drawTextCentered(ccEllipsize(text, line, titlePx, area.w), titlePx, Weight::Medium,
+                         theme::kCcLabel, grow(Rect{area.x, area.y, area.w, area.h * 3 / 5}));
+        if (has && !s.mediaArtist.empty()) {
+            const std::string who = ccEllipsize(text, s.mediaArtist, artistPx, area.w);
+            drawTextCentered(who, artistPx, Weight::Regular, theme::kCcGlyphOff,
+                             grow(Rect{area.x, area.y + area.h * 3 / 5, area.w, area.h * 2 / 5}));
+        }
+        const char* prev = "cc-skip-back";
+        const char* play = s.playing ? "cc-pause" : "cc-play";
+        const char* next = "cc-skip-forward";
+        glyph(controlRect(kCcMediaPrev, 0), prev, false, has);
+        glyph(controlRect(kCcMediaPlay, 1), play, false, has);
+        glyph(controlRect(kCcMediaNext, 2), next, false, has);
+    }
+
+    // --- brightness / volume pills ---------------------------------------
+    // iOS anchors the glyph to the bottom of the pill and grows the fill from
+    // there, rounding only the fill's bottom corners, so the two blend into one
+    // continuous shape.
+    const auto slider = [&](int id, const char* icon, int value, bool enabled) {
+        const Rect m = controlRect(id, 0);
+        if (m.empty()) return;
+        tile(m, hovered(id, 0));
+        const int level = std::max(0, std::min(100, value));
+        const int fillH = m.h * level / 100;
+        const float radius = float(metrics::kCcTileRadius * scale / 100) * zoom;
+        // iOS rounds only the fill's bottom corners (`border-radius: 0 0 R R`).
+        // The compositor takes one radius per rect, so the fill is drawn as a
+        // body plus a bottom cap whose rounded top corners the body covers.
+        if (fillH > 1) {
+            const int cap = std::min(int(radius), fillH);
+            const Rect capRect{m.x, m.bottom() - cap, m.w, cap};
+            const Rect body{m.x, m.y + m.h - fillH, m.w, fillH - cap + 2};
+            if (body.h > 0) comp.drawRect(grow(body), 0.f, theme::kCcSliderFill, a);
+            comp.drawRect(grow(capRect), radius, theme::kCcSliderFill, a);
+        }
+        const int d = int(m.w * 0.44);
+        const int inset = std::max(2, int(d * 0.18));
+        const Rect box = grow(Rect{m.x + (m.w - d) / 2, m.bottom() - d - inset, d, d});
+        if (enabled) {
+            // The glyph inverts once the white fill reaches it, which is exactly
+            // how the icon reads in iOS.
+            const std::string dark = std::string(icon) + "-dark";
+            const char* chosen = (m.bottom() - fillH) <= (box.y + box.h / 2) ? dark.c_str() : icon;
+            if (drawAppIcon(box, chosen, chosen, float(box.w) * 0.22f, 1.0f)) return;
+        }
+        const int dot = std::max(3, box.w / 3);
+        comp.drawRect(Rect{box.x + (box.w - dot) / 2, box.y + (box.h - dot) / 2, dot, dot},
+                      float(dot) * 0.5f, enabled ? theme::kCcGlyph : theme::kCcGlyphOff, a);
+    };
+    slider(kCcBrightness, "cc-sun",
+           ccDrag == ccControlIndex(kCcBrightness, 0) ? ccDragValue : s.brightness,
+           s.backlightPresent && s.backlightWritable);
+    slider(kCcVolume, "cc-volume",
+           ccDrag == ccControlIndex(kCcVolume, 0) ? ccDragValue : (s.muted ? 0 : s.volume),
+           s.audioPresent);
+
+    // --- 1x1 and 1x2 tiles ------------------------------------------------
+    {
+        const Rect m = cellRect(0, 2, 1, 1);
+        tile(m, hovered(kCcDnd, 0));
+        const bool on = s.dndPresent ? s.dnd : dnd;
+        button(m, on, true);
+        glyph(m, "cc-bell-off", on, true);
+    }
+    {
+        const Rect m = cellRect(1, 2, 1, 1);
+        tile(m, hovered(kCcNight, 0));
+        button(m, s.nightLight, s.nightPresent);
+        glyph(m, "cc-moon", s.nightLight, s.nightPresent);
+    }
+    {
+        // "Show desktop" is the 2-wide module iOS gives to Screen Mirroring.
+        const Rect m = cellRect(0, 3, 2, 1);
+        tile(m, hovered(kCcShowDesktop, 0));
+        const bool on = showingDesktop;
+        if (on) {
+            comp.drawRect(grow(m.inflated(-6)), float(metrics::kCcTileRadius * scale / 100) * zoom,
+                          theme::kCcActive, a);
+        }
+        const int d = int(m.h * 0.34);
+        const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
+        drawAppIcon(box, "cc-monitor", "cc-monitor", float(box.w) * 0.22f, 1.0f);
+        drawTextAt("Show desktop", int(m.h * 0.20), Weight::Medium, theme::kCcLabel,
+                   box.right() + gap, m.y + (m.h - int(m.h * 0.20) * 3 / 2) / 2);
+    }
+    {
+        const Rect m = cellRect(0, 4, 1, 1);
+        tile(m, hovered(kCcLock, 0));
+        button(m, false, s.lockPresent);
+        glyph(m, "cc-lock", false, s.lockPresent);
+    }
+    {
+        const Rect m = cellRect(1, 4, 1, 1);
+        tile(m, hovered(kCcScreenshot, 0));
+        button(m, false, s.shotPresent);
+        glyph(m, "cc-camera", false, s.shotPresent);
+    }
+
+    // --- launcher row -----------------------------------------------------
+    static const char* const kLauncherIcons[kCcLauncherCount] = {"cc-folder", "cc-terminal"};
+    for (int i = 0; i < kCcLauncherCount; ++i) {
+        const Rect m = cellRect(2 + i, 4, 1, 1);
+        const bool have = i < int(ccLaunchers.size()) && !ccLaunchers[size_t(i)].empty();
+        tile(m, hovered(kCcLauncherFirst + i, i));
+        if (!have) continue;
+        const int d = int(m.h * 0.46);
+        const Rect box = grow(Rect{m.x + (m.w - d) / 2, m.y + (m.h - d) / 2, d, d});
+        if (!drawAppIcon(box, kLauncherIcons[i], kLauncherIcons[i], float(box.w) * 0.24f, a)) {
+            drawAppTile(box, "?", float(box.w) * 0.24f, theme::kCcActive, false);
+        }
+    }
+}
+
+}  // namespace wm
