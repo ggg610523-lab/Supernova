@@ -157,6 +157,7 @@ struct Client {
     // caption button interaction: 0 minimise, 1 maximise, 2 close, -1 none
     int hoverBtn = -1;
     int pressBtn = -1;
+    double hoverFade[3] = {0.0, 0.0, 0.0};  // eased 0..1 caption-button hover
 
     // ---- animation
     double appear = 1.0;      // 0 -> 1 open animation
@@ -214,6 +215,8 @@ private:
     void loop();
     void handleEvent(XEvent& ev);
     void tickAnimations(double now);
+    // Eases every ambient value (hovers, selections, flyout opacity) one frame.
+    void tickFluidMotion(double dtMs);
     void updateHoverStates(int px, int py);
 
     // ---- client bookkeeping (windows.cpp)
@@ -455,6 +458,22 @@ private:
     bool hoverStart = false;
     bool hoverShowDesktop = false;
     bool hoverClock = false;
+
+    // ---- ambient motion (draw.cpp / manager.cpp)
+    // Every hover, selection and flyout eases through these instead of toggling,
+    // which is what makes the whole shell read as one continuous surface. The
+    // vectors are kept the size of the list they decorate.
+    std::vector<double> taskHover;         // per taskbar button
+    double startHoverAnim = 0.0;           // Start button wash
+    double showDesktopHoverAnim = 0.0;     // show-desktop sliver
+    std::vector<double> appHover;          // per Launchpad tile
+    std::vector<double> dotHover;          // per page dot
+    std::vector<double> ctxHover;          // per context-menu item
+    double contextAnim = 0.0;              // context menu open (1) / closed (0)
+    std::vector<double> desktopIconHover;  // per desktop icon (hover + selection)
+    std::vector<double> widgetHover;       // per desktop widget
+    std::vector<double> ccHoverFade;       // per Control Centre control
+    double snapPreviewAnim = 0.0;          // snap preview fade
 
     // ---- desktop icons (live contents of the session's Desktop directory)
     std::vector<DesktopItem> desktopItems;

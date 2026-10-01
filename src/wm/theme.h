@@ -14,6 +14,13 @@ struct Color {
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
 };
 
+// Blend two colours component-wise; t=0 yields `a`, t=1 yields `b`. Used to
+// cross-fade hover highlights, labels and status colours as they animate.
+inline constexpr Color mixColor(const Color& a, const Color& b, float t) {
+    return Color{a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t,
+                 a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
+}
+
 // 0xRRGGBB (+ optional alpha).
 inline constexpr Color rgb(unsigned hex, float alpha = 1.0f) {
     return Color{float((hex >> 16) & 0xFFu) / 255.0f,
@@ -150,6 +157,7 @@ constexpr int kSnapGap = 4;        // gap Win11 leaves around snapped halves
 constexpr int kSnapZonePx = 24;    // distance from an edge that arms a snap
 constexpr int kAnimMs = 150;       // open/close/minimise duration
 constexpr int kZoomMs = 170;       // maximise / restore duration
+constexpr int kMinimizeMs = 240;   // magic-lamp minimise / restore duration
 constexpr int kMinW = 160;
 constexpr int kMinH = 90;
 constexpr int kStartW = 620;

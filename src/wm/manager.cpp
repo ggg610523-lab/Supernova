@@ -419,10 +419,11 @@ void Manager::tickAnimations(double now) {
             c->vanish = p >= 1.0 ? 1.0 : eased;
             dirty = true;
         }
-        // Minimise/restore runs linearly so it can be reversed mid flight.
+        // Minimise/restore runs linearly so it can be reversed mid flight. The
+        // magic-lamp warp reads minFade directly, so this is its timeline.
         const double minTarget = c->minimized ? 1.0 : 0.0;
         if (c->minFade != minTarget) {
-            const double step = dtMs / double(metrics::kAnimMs);
+            const double step = dtMs / double(metrics::kMinimizeMs);
             c->minFade = c->minFade < minTarget ? std::min(minTarget, c->minFade + step)
                                                 : std::max(minTarget, c->minFade - step);
             dirty = true;
@@ -479,6 +480,10 @@ void Manager::tickAnimations(double now) {
     // reflowed the layout (added, removed, dragged or resized).
     animateDesktopIconReflow(dtMs);
 
+    // Everything else the shell shows: hover washes, selections, flyouts and the
+    // snap preview all ease rather than toggle.
+    tickFluidMotion(dtMs);
+
     // Widgets: repaint the analog clock when the wall second changes, and
     // re-probe the battery every few seconds.
     if (!widgets.empty()) {
@@ -493,6 +498,87 @@ void Manager::tickAnimations(double now) {
         }
     }
     if (opts->stats) dirty = true;
+}
+
+// Ambient motion. Everything the shell used to snap between states -- a hover
+// wash, a selection highlight, a flyout, the caption buttons, the snap preview
+// -- is eased here, so the entire OS moves with one continuous feel. Each value
+// is delta-time paced and reversible mid-flight, which is what keeps it fluid
+// even when the pointer darts around.
+void Manager::tickFluidMotion(double dtMs) {
+    if (dtMs <= 0.0) return;
+    constexpr double kHoverMs = 120.0;   // per-item hover / selection fade
+    constexpr double kFlyoutMs = 140.0;  // dropdown open / close
+    constexpr double kButtonMs = 90.0;   // caption-button hover (a touch snappier)
+
+    // Ease every entry of a per-item fade toward 1 for the hot index and 0 for
+    // the rest, growing or shrinking the vector to `n` entries.
+    const auto fade = [&](std::vector<double>& v, size_t n, int hot) {
+        if (v.size() != n) v.resize(n, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            if (approach(v[i], int(i) == hot ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
+        }
+    };
+
+    // Taskbar: each app button, the Start button and the show-desktop sliver.
+    fade(taskHover, taskItems.size(), hoverTaskIndex);
+    if (approach(startHoverAnim, hoverStart ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
+    if (approach(showDesktopHoverAnim, hoverShowDesktop ? 1.0 : 0.0, dtMs, kHoverMs))
+        dirty = true;
+
+    // Launchpad tiles (only while the overlay is on screen) and its page dots.
+    fade(appHover, startOpen ? appRects.size() : 0, startOpen ? hoverApp : -1);
+    {
+        const size_t n = startOpen ? appDotRects.size() : 0;
+        if (dotHover.size() != n) dotHover.resize(n, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            if (approach(dotHover[i], int(i) == startHoverDot ? 1.0 : 0.0, dtMs, kHoverMs))
+                dirty = true;
+        }
+    }
+
+    // Context-menu items (the panel itself eases open/closed just below).
+    fade(ctxHover, contextItems.size(), contextHover);
+
+    // Desktop icons: the hover and the selection share one fade, so sliding the
+    // selection from one icon to the next cross-fades instead of blinking.
+    {
+        const size_t n = desktopItems.size();
+        if (desktopIconHover.size() != n) desktopIconHover.resize(n, 0.0);
+        for (size_t i = 0; i < n; ++i) {
+            const bool hot = int(i) == hoverDesktopIcon || int(i) == selectedDesktopIcon;
+            if (approach(desktopIconHover[i], hot ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
+        }
+    }
+
+    // Desktop widgets.
+    fade(widgetHover, widgets.size(), hoverWidget);
+
+    // Control Centre controls (only while the panel is on screen).
+    fade(ccHoverFade, ccOpen ? ccControls.size() : 0, ccOpen ? ccHover : -1);
+
+    // Caption buttons on every managed window.
+    for (auto& cp : clients) {
+        Client* c = cp.get();
+        for (int b = 0; b < 3; ++b) {
+            if (approach(c->hoverFade[b], c->hoverBtn == b ? 1.0 : 0.0, dtMs, kButtonMs))
+                dirty = true;
+        }
+    }
+
+    // The dropdown panel opens and closes with a short fade + slide. Its stale
+    // contents are dropped only once the close animation has fully played out.
+    if (approach(contextAnim, contextOpen ? 1.0 : 0.0, dtMs, kFlyoutMs)) dirty = true;
+    if (!contextOpen && contextAnim <= 0.0 && !contextItems.empty()) {
+        contextItems.clear();
+        contextClient = nullptr;
+        contextWidget = -1;
+        contextHover = -1;
+    }
+
+    // The snap preview catches the eye as it arms, then fades away when released.
+    if (approach(snapPreviewAnim, snapZonePreview != kSnapNone ? 1.0 : 0.0, dtMs, kHoverMs))
+        dirty = true;
 }
 
 namespace {
@@ -657,6 +743,25 @@ void Manager::updateHoverStates(int px, int py) {
         }
     }
 
+    if (contextOpen) {
+        // Context-menu item hover, so the row under the pointer lights up (and,
+        // with the eased ctxHover, fades back out as the pointer leaves it).
+        int newCtx = -1;
+        const int itemH = 32, pad = 6;
+        for (size_t i = 0; i < contextItems.size(); ++i) {
+            const Rect item{contextRect.x + pad, contextRect.y + pad + int(i) * itemH,
+                            contextRect.w - 2 * pad, itemH};
+            if (item.contains(px, py)) {
+                newCtx = int(i);
+                break;
+            }
+        }
+        if (newCtx != contextHover) {
+            contextHover = newCtx;
+            changed = true;
+        }
+    }
+
     if (ccOpen) {
         const int before = ccHover;
         updateCcHover(px, py);
@@ -762,9 +867,9 @@ void Manager::closeOverlays() {
     hoverApp = -1;
     startHoverDot = -1;
     startPage = 0;
-    contextClient = nullptr;
-    contextWidget = -1;
-    contextItems.clear();
+    // The menu's items are kept until its close animation finishes (tickFluid
+    // Motion drops them); clearing the hover lets the highlight fade out with it.
+    contextHover = -1;
     ccHover = -1;
     if (wasCc) endCcDrag();
     if (was) {

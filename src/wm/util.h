@@ -67,6 +67,20 @@ inline double clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 inline double lerp(double a, double b, double t) { return a + (b - a) * t; }
 
+// ----------------------------------------------------------------- motion
+// Move `v` a fixed fraction of the way to `target`, paced by the frame's delta
+// time. This is the one stepper the whole shell uses -- hover washes, flyouts,
+// minimise, the snap preview -- so every transition shares a single feel and can
+// be reversed mid-flight. Returns true while `v` still has somewhere to go, so
+// the caller knows to keep repainting.
+inline bool approach(double& v, double target, double dtMs, double ms) {
+    if (v == target) return false;
+    const double d = ms > 0.0 ? dtMs / ms : 1.0;
+    if (target > v) v = (v + d > target) ? target : v + d;
+    else v = (v - d < target) ? target : v - d;
+    return true;
+}
+
 // ------------------------------------------------------------------- easing
 // Cubic bezier with p0=(0,0) and p3=(1,1). Windows 11 ("Fluent") motion uses
 // cubic-bezier(0.1, 0.9, 0.2, 1.0); we solve x(t)=x by bisection, which is

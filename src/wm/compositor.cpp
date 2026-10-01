@@ -15,6 +15,12 @@ namespace {
 // Every primitive is drawn as this one quad, placed by uRect in screen pixels.
 constexpr float kQuad[8] = {0.f, 0.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f};
 
+// Magic-lamp mesh resolution: rows carry the vertical funnel, columns the
+// horizontal convergence. A handful of either is plenty -- the silhouette comes
+// from the per-row warp, not from the tessellation.
+constexpr int kGenieCols = 8;
+constexpr int kGenieRows = 48;
+
 const char* const kVertexSrc = R"GLSL(
 #version 330 core
 layout(location = 0) in vec2 aPos;
@@ -266,6 +272,49 @@ void main() {
 }
 )GLSL";
 
+// The magic-lamp minimise shaders: the window content is drawn over a grid mesh
+// whose vertices are warped into a genie funnel that pours into the taskbar
+// icon. It is a forward warp (each vertex carries its own source uv), so no
+// coordinate inversion is needed and the sides stay smooth at every value.
+const char* const kGenieVertSrc = R"GLSL(
+#version 330 core
+layout(location = 0) in vec2 aGrid;   // 0..1 across the window content
+uniform mat4 uProj;
+uniform vec4 uRect;      // content rect: x, y, w, h (screen px)
+uniform vec4 uIcon;      // taskbar icon rect: x, y, w, h (screen px)
+uniform float uProgress; // 0 = untouched, 1 = fully poured into the icon
+out vec2 vUV;
+void main() {
+    float t = clamp(uProgress, 0.0, 1.0);
+    vec2 src = uRect.xy + aGrid * uRect.zw;
+    // Per-row progress: rows nearer the icon pour in first (the "+ aGrid.y"
+    // term), so at t = 1 every row has reached the icon and the window has
+    // become the icon itself.
+    float s = clamp(t * (1.0 + aGrid.y), 0.0, 1.0);
+    s = s * s * (3.0 - 2.0 * s);               // smoothstep: a softer waist
+    vec2 iconCentre = uIcon.xy + uIcon.zw * 0.5;
+    float dstX = iconCentre.x + (aGrid.x - 0.5) * uIcon.z;  // converge onto icon
+    float dstY = uIcon.y + aGrid.y * uIcon.w;               // slide onto the icon
+    vec2 pos = vec2(mix(src.x, dstX, s), mix(src.y, dstY, s));
+    vUV = aGrid;
+    gl_Position = uProj * vec4(pos, 0.0, 1.0);
+}
+)GLSL";
+
+const char* const kGenieFragSrc = R"GLSL(
+#version 330 core
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uTex;
+uniform float uOpacity;
+uniform float uKeepAlpha;
+void main() {
+    vec4 t = texture(uTex, vUV);
+    float a = uOpacity * mix(1.0, t.a, uKeepAlpha);
+    fragColor = vec4(t.rgb * a, a);
+}
+)GLSL";
+
 // ------------------------------------------------------------------- helpers
 bool compileShader(GLenum type, const char* src, GLuint* out, std::string* error) {
     const GLuint shader = glCreateShader(type);
@@ -376,8 +425,12 @@ void Compositor::shutdown() {
         if (prog_) glDeleteProgram(prog_);
         if (blurProg_) glDeleteProgram(blurProg_);
         if (wallProg_) glDeleteProgram(wallProg_);
-        prog_ = blurProg_ = wallProg_ = 0;
-        vao_ = vbo_ = 0;
+        if (genieProg_) glDeleteProgram(genieProg_);
+        prog_ = blurProg_ = wallProg_ = genieProg_ = 0;
+        if (meshVao_) glDeleteVertexArrays(1, &meshVao_);
+        if (meshVbo_) glDeleteBuffers(1, &meshVbo_);
+        if (meshIbo_) glDeleteBuffers(1, &meshIbo_);
+        vao_ = vbo_ = meshVao_ = meshVbo_ = meshIbo_ = 0;
         const auto delTex = [](GLuint& t) {
             if (t) glDeleteTextures(1, &t);
             t = 0;
@@ -613,6 +666,7 @@ bool Compositor::buildShaders(std::string* error) {
     if (!linkProgram(kVertexSrc, kFragmentSrc, &prog_, error)) return false;
     if (!linkProgram(kVertexSrc, kBlurSrc, &blurProg_, error)) return false;
     if (!linkProgram(kVertexSrc, kWallpaperSrc, &wallProg_, error)) return false;
+    if (!linkProgram(kGenieVertSrc, kGenieFragSrc, &genieProg_, error)) return false;
 
     const auto loc = [this](const char* n) { return glGetUniformLocation(prog_, n); };
     uProj_ = loc("uProj");
@@ -669,6 +723,60 @@ bool Compositor::buildShaders(std::string* error) {
     glBindVertexArray(0);
 
     orthoMatrix(proj_, width_, height_);
+    if (!buildGenieMesh()) {
+        if (error) *error = "failed to build the magic-lamp mesh";
+        return false;
+    }
+    return true;
+}
+
+// The reusable grid the magic-lamp effect draws a window over. Built once; only
+// the vertices' *position* changes per frame (in the vertex shader), so this is
+// just the unit square, finely subdivided.
+bool Compositor::buildGenieMesh() {
+    if (!genieProg_) return false;
+    gProj_ = glGetUniformLocation(genieProg_, "uProj");
+    gRect_ = glGetUniformLocation(genieProg_, "uRect");
+    gIcon_ = glGetUniformLocation(genieProg_, "uIcon");
+    gProgress_ = glGetUniformLocation(genieProg_, "uProgress");
+    gOpacity_ = glGetUniformLocation(genieProg_, "uOpacity");
+    gKeepAlpha_ = glGetUniformLocation(genieProg_, "uKeepAlpha");
+    gTex_ = glGetUniformLocation(genieProg_, "uTex");
+
+    std::vector<float> verts;
+    verts.reserve(size_t(kGenieCols + 1) * size_t(kGenieRows + 1) * 2u);
+    for (int r = 0; r <= kGenieRows; ++r)
+        for (int c = 0; c <= kGenieCols; ++c) {
+            verts.push_back(float(c) / float(kGenieCols));
+            verts.push_back(float(r) / float(kGenieRows));
+        }
+    std::vector<unsigned int> idx;
+    idx.reserve(size_t(kGenieCols) * size_t(kGenieRows) * 6u);
+    for (int r = 0; r < kGenieRows; ++r)
+        for (int c = 0; c < kGenieCols; ++c) {
+            const unsigned int v0 = unsigned(r * (kGenieCols + 1) + c);
+            const unsigned int v1 = v0 + 1;
+            const unsigned int v2 = v0 + unsigned(kGenieCols + 1);
+            const unsigned int v3 = v2 + 1;
+            idx.push_back(v0); idx.push_back(v1); idx.push_back(v2);
+            idx.push_back(v1); idx.push_back(v3); idx.push_back(v2);
+        }
+    meshIndexCount_ = int(idx.size());
+
+    glGenVertexArrays(1, &meshVao_);
+    glBindVertexArray(meshVao_);
+    glGenBuffers(1, &meshVbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, meshVbo_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(verts.size() * sizeof(float)), verts.data(),
+                 GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+    glGenBuffers(1, &meshIbo_);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, meshIbo_);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr(idx.size() * sizeof(unsigned int)),
+                 idx.data(), GL_STATIC_DRAW);
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
     return true;
 }
 
@@ -1019,6 +1127,9 @@ void Compositor::drawText(const TextTex& t, const Rect& dst, const Color& c, flo
 // resolved analytically from a rounded box distance in the fragment shader.
 void Compositor::drawWindow(const WindowSprite& s) {
     if (s.frame.empty()) return;
+    // While a window is minimising or restoring, pour its content into (or out
+    // of) the taskbar icon with the magic-lamp mesh instead of an ordinary frame.
+    if (s.genie > 0.001f && s.tex.valid() && drawGenie(s)) return;
     const Rect quad = s.frame.inflated(metrics::kShadowPad);
     const int capH = s.captionH > 0 ? s.captionH : 0;
     // The client's rect inside the frame: caption on top, 1px border elsewhere.
@@ -1049,8 +1160,7 @@ void Compositor::drawWindow(const WindowSprite& s) {
     glUniform1f(uOpacity_, s.opacity);
     glUniform1f(uMaximized_, s.maximized ? 1.f : 0.f);
     glUniform1f(uTintAmount_, 0.88f);
-    glUniform3f(uHover_, s.minHover ? 1.f : 0.f, s.maxHover ? 1.f : 0.f,
-                s.closeHover ? 1.f : 0.f);
+    glUniform3f(uHover_, s.minHover, s.maxHover, s.closeHover);
     glUniform3f(uPress_, s.minPress ? 1.f : 0.f, s.maxPress ? 1.f : 0.f,
                 s.closePress ? 1.f : 0.f);
     glUniform4f(uColor_, caption.r, caption.g, caption.b, caption.a);
@@ -1068,6 +1178,37 @@ void Compositor::drawWindow(const WindowSprite& s) {
     glBindTexture(GL_TEXTURE_2D, hasTex ? s.tex.tex : 0);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     if (tfi) tfiRelease(s.tex.tex);
+}
+
+// Magic lamp: forward-warp the window's content into (or out of) its taskbar
+// icon. Only the client texture is warped; the Fluent frame chrome is drawn by
+// the main shader and is intentionally absent for the duration of the effect.
+// Returns false when the content texture cannot be bound, so the caller can fall
+// back to the ordinary sprite (e.g. a window with no XComposite texture yet).
+bool Compositor::drawGenie(const WindowSprite& s) {
+    if (!genieProg_ || !meshVao_ || meshIndexCount_ <= 0) return false;
+    const int capH = s.captionH > 0 ? s.captionH : 0;
+    const Rect content{s.frame.x + metrics::kBorder, s.frame.y + capH,
+                       s.frame.w - 2 * metrics::kBorder, s.frame.h - capH - metrics::kBorder};
+    if (content.w < 2 || content.h < 2) return false;
+    if (!tfiBind(s.tex.tex)) return false;  // binds the texture on unit 0
+
+    glUseProgram(genieProg_);
+    glBindVertexArray(meshVao_);
+    glUniformMatrix4fv(gProj_, 1, GL_FALSE, proj_);
+    glUniform4f(gRect_, float(content.x), float(content.y), float(content.w), float(content.h));
+    glUniform4f(gIcon_, float(s.genieIcon.x), float(s.genieIcon.y), float(s.genieIcon.w),
+                float(s.genieIcon.h));
+    glUniform1f(gProgress_, s.genie);
+    glUniform1f(gOpacity_, s.opacity);
+    glUniform1f(gKeepAlpha_, s.tex.alpha ? 1.f : 0.f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s.tex.tex);
+    glUniform1i(gTex_, 0);
+    glDrawElements(GL_TRIANGLES, meshIndexCount_, GL_UNSIGNED_INT, nullptr);
+    glBindVertexArray(0);
+    tfiRelease(s.tex.tex);
+    return true;
 }
 
 void Compositor::present() {

@@ -50,10 +50,16 @@ struct WindowSprite {
     bool maximized = false;
     float opacity = 1.0f;
     float attention = 0.0f;  // 0..1 flash for _NET_WM_STATE_DEMANDS_ATTENTION
-    // Caption button state, in layout order from the right edge.
-    bool closeHover = false, closePress = false;
-    bool maxHover = false, maxPress = false;
-    bool minHover = false, minPress = false;
+    // Caption button state, in layout order from the right edge. The hovers are
+    // 0..1 amounts (the shader mixes by them), so a hover can fade in and out.
+    float closeHover = 0.0f, closePress = 0.0f;
+    float maxHover = 0.0f, maxPress = 0.0f;
+    float minHover = 0.0f, minPress = 0.0f;
+    // Magic lamp: when `genie` is > 0 the window's content is forward-warped
+    // into `genieIcon` (its taskbar button) by the genie mesh, instead of being
+    // drawn as an ordinary frame.
+    float genie = 0.0f;
+    Rect genieIcon;
 };
 
 class Compositor {
@@ -130,6 +136,18 @@ private:
     // _pixmap semantics: the server may not write the pixmap while it is bound).
     bool tfiBind(GLuint tex);
     void tfiRelease(GLuint tex);
+
+    // ---- magic lamp (minimise / restore) ----------------------------------
+    // A window is forward-warped into (or out of) its taskbar button by drawing
+    // it over a fine grid mesh whose vertices follow a genie funnel. Kept apart
+    // from the main shader so the ordinary window path stays untouched.
+    bool buildGenieMesh();
+    bool drawGenie(const WindowSprite& s);
+    GLuint genieProg_ = 0;
+    GLuint meshVao_ = 0, meshVbo_ = 0, meshIbo_ = 0;
+    GLint meshIndexCount_ = 0;
+    GLint gProj_ = -1, gRect_ = -1, gIcon_ = -1, gProgress_ = -1;
+    GLint gOpacity_ = -1, gKeepAlpha_ = -1, gTex_ = -1;
 
     Display* dpy_ = nullptr;
     int screen_ = 0;

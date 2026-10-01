@@ -48,7 +48,11 @@ void Manager::render() {
     // is painted last (and therefore on top).
     for (auto& cp : clients) {
         Client* c = cp.get();
-        if (!c->mapped || c->minimized || c->unredirected) continue;
+        if (!c->mapped || c->unredirected) continue;
+        // A minimising window stays on screen (warping into its taskbar icon)
+        // until the magic-lamp animation has fully played, then it is unmapped
+        // and skipped from here on.
+        if (c->minimized && c->minFade >= 1.0) continue;
         // Re-binding the pixmap here (rather than per motion event) keeps a
         // resize down to one pixmap per frame.
         if (c->pixW <= 0 || !c->tex.valid()) ensurePixmap(c);
@@ -60,7 +64,7 @@ void Manager::render() {
     if (startOpen || startAnim > 0.0) drawStartMenu();
     if (taskViewOpen || taskViewAnim > 0.0) drawTaskView();
     if (altTabOpen || altTabAnim > 0.0) drawAltTab();
-    if (contextOpen) drawContextMenu();
+    if (contextOpen || contextAnim > 0.0) drawContextMenu();
     if (ccOpen || ccAnim > 0.0) drawControlCenter();
     if (opts->stats) drawStats();
 }
@@ -147,11 +151,15 @@ void Manager::drawDesktopIcons() {
         const Rect cell = desktopIconDraw[i];
         const bool selected = int(i) == selectedDesktopIcon;
         const bool hovered = int(i) == hoverDesktopIcon;
-        if (selected || hovered) {
+        // Hover and selection share one eased amount, so the highlight fades in
+        // and, when the selection moves on, cross-fades to the next icon.
+        const double hl = i < desktopIconHover.size() ? desktopIconHover[i] : 0.0;
+        if (hl > 0.001) {
             const Color fill =
                 selected ? Color{theme::kAccent.r, theme::kAccent.g, theme::kAccent.b, 0.30f}
                          : theme::kItemHover;
-            comp.drawRect(Rect{cell.x + 2, cell.y + 2, cell.w - 4, cell.h - 4}, 6.f, fill);
+            comp.drawRect(Rect{cell.x + 2, cell.y + 2, cell.w - 4, cell.h - 4}, 6.f, fill,
+                          float(hl));
         }
         const Rect icon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
         // The item's own icon first, then a generic one, then a letter tile.
@@ -301,19 +309,22 @@ void Manager::drawClientSprite(Client* c) {
         opacity *= 0.25 + 0.75 * t;
         scale = 0.93 + 0.07 * t;
     }
+    // Magic lamp: while minimising (or restoring) the GPU warps the content
+    // into its taskbar icon, so the frame geometry is left alone and only the
+    // opacity fades -- late, so the funnel stays visible on the way in.
+    double genie = 0.0;
+    Rect genieIcon{};
     if (c->minFade > 0.0) {
-        // Minimise: shrink and slide towards the taskbar item. The client is
-        // unmapped only once minFade reaches 1, so it stays live the whole way.
         const double m = c->minFade;
-        opacity *= 1.0 - m;
-        scale *= 1.0 - 0.10 * m;
-        Rect target = f;
+        genie = m;
+        genieIcon = Rect{screenW / 2 - 12, screenH - metrics::kTaskbarH, 24, 24};
         for (const TaskItem& it : taskItems) {
             if (it.client != c) continue;
-            target = Rect{it.rect.x, screenH - metrics::kTaskbarH, it.rect.w, it.rect.w};
+            genieIcon = Rect{it.rect.x + (it.rect.w - 24) / 2, it.rect.y + (it.rect.h - 24) / 2,
+                             24, 24};
             break;
         }
-        f = lerpRect(f, target, m * m);
+        opacity *= 1.0 - m * m;
     }
     if (c->vanish > 0.0) {
         opacity *= 1.0 - c->vanish;
@@ -336,13 +347,18 @@ void Manager::drawClientSprite(Client* c) {
     s.focused = (c == focused) && !c->closing;
     s.opacity = float(opacity);
     s.attention = float(c->attentionPulse) * 0.85f;
-    s.minHover = c->hoverBtn == 0;
-    s.maxHover = c->hoverBtn == 1;
-    s.closeHover = c->hoverBtn == 2;
-    s.minPress = c->pressBtn == 0;
-    s.maxPress = c->pressBtn == 1;
-    s.closePress = c->pressBtn == 2;
+    s.minHover = float(c->hoverFade[0]);
+    s.maxHover = float(c->hoverFade[1]);
+    s.closeHover = float(c->hoverFade[2]);
+    s.minPress = c->pressBtn == 0 ? 1.f : 0.f;
+    s.maxPress = c->pressBtn == 1 ? 1.f : 0.f;
+    s.closePress = c->pressBtn == 2 ? 1.f : 0.f;
+    s.genie = float(genie);
+    s.genieIcon = genieIcon;
     comp.drawWindow(s);
+
+    // The warp carries the content; the caption chrome would only float in place.
+    if (genie > 0.0) return;
 
     if (c->captionH <= 0 || f.w < 160) return;
     const float a = float(opacity);
@@ -414,7 +430,8 @@ void Manager::drawTaskbar() {
     comp.drawAcrylic(bar, 0.f, theme::kTaskbarTint, 0.80f, theme::kShellLine, 1.0f);
     comp.drawRect(Rect{0, y, screenW, 1}, 0.f, theme::kShellBorder);
 
-    if (hoverStart) comp.drawRect(startButtonRect, 6.f, theme::kItemHover);
+    if (startHoverAnim > 0.001)
+        comp.drawRect(startButtonRect, 6.f, theme::kItemHover, float(startHoverAnim));
     drawStartGlyph(startButtonRect, theme::kGlyph);
 
     for (size_t i = 0; i < taskItems.size(); ++i) {
@@ -422,10 +439,11 @@ void Manager::drawTaskbar() {
         Client* w = it.client;
         if (!w) continue;
         const bool active = (w == focused) && !w->minimized;
-        const bool hovered = int(i) == hoverTaskIndex;
-        if (active || hovered) {
-            comp.drawRect(it.rect, 6.f, hovered ? theme::kItemHover : theme::kItemActive);
-        }
+        const double hv = i < taskHover.size() ? taskHover[i] : 0.0;
+        // The active wash is a base layer; the hover wash fades over it, so a
+        // button lights up smoothly instead of popping.
+        if (active) comp.drawRect(it.rect, 6.f, theme::kItemActive);
+        if (hv > 0.001) comp.drawRect(it.rect, 6.f, theme::kItemHover, float(hv));
         const Rect iconArea{it.rect.x + (it.rect.w - 24) / 2, it.rect.y + (it.rect.h - 24) / 2,
                             24, 24};
         if (w->iconTex && w->iconW > 0) {
@@ -433,9 +451,11 @@ void Manager::drawTaskbar() {
         } else if (!drawAppIcon(iconArea, w->appName, w->appName, 5.f, 1.f)) {
             drawAppTile(iconArea, w->title, 5.f, tileTint(w->title), false);
         }
-        // The running/active pill on the bottom edge of the button.
-        const int iw = active ? 16 : (hovered ? 8 : 6);
-        const Color ic = active ? theme::kAccent : (hovered ? theme::kTextMuted : theme::kTextDim);
+        // The running/active pill on the bottom edge of the button: it grows and
+        // brightens as the button is hovered or becomes active.
+        const int iw = std::max(1, int(std::lround(active ? 16.0 : lerp(6.0, 8.0, hv))));
+        const Color ic = active ? theme::kAccent
+                                : mixColor(theme::kTextDim, theme::kTextMuted, float(hv));
         comp.drawRect(Rect{it.rect.x + (it.rect.w - iw) / 2, bar.bottom() - 5, iw, 3}, 1.5f, ic);
     }
 
@@ -450,21 +470,24 @@ void Manager::drawTaskbar() {
     drawTextRight(hhmm, 13, Weight::Regular, theme::kText, right, y + 9);
     drawTextRight(dateStr, 11, Weight::Regular, theme::kTextMuted, right, y + 27);
 
-    if (hoverShowDesktop) comp.drawRect(showDesktopRect, 2.f, theme::kItemHover);
+    if (showDesktopHoverAnim > 0.001)
+        comp.drawRect(showDesktopRect, 2.f, theme::kItemHover, float(showDesktopHoverAnim));
     comp.drawRect(Rect{screenW - 3, y + 6, 2, metrics::kTaskbarH - 12}, 1.f, theme::kShellBorder);
 }
 
 void Manager::drawSnapPreview() {
-    if (snapZonePreview == kSnapNone) return;
+    if (snapZonePreview == kSnapNone || snapPreviewAnim <= 0.001) return;
     const Rect inner = snapGeometry(snapZonePreview).inflated(4);
     if (inner.empty()) return;
-    comp.drawRect(inner, 8.f, theme::kSnapFill);
+    // The preview eases in as the zone arms and fades out once it is released.
+    const float a = float(fluentEase(snapPreviewAnim));
+    comp.drawRect(inner, 8.f, theme::kSnapFill, a);
     // One pixel accent outline: four thin rects, no ring primitive needed.
     const Color b = theme::kSnapBorder;
-    comp.drawRect(Rect{inner.x, inner.y, inner.w, 1}, 1.f, b);
-    comp.drawRect(Rect{inner.x, inner.bottom() - 1, inner.w, 1}, 1.f, b);
-    comp.drawRect(Rect{inner.x, inner.y, 1, inner.h}, 1.f, b);
-    comp.drawRect(Rect{inner.right() - 1, inner.y, 1, inner.h}, 1.f, b);
+    comp.drawRect(Rect{inner.x, inner.y, inner.w, 1}, 1.f, b, a);
+    comp.drawRect(Rect{inner.x, inner.bottom() - 1, inner.w, 1}, 1.f, b, a);
+    comp.drawRect(Rect{inner.x, inner.y, 1, inner.h}, 1.f, b, a);
+    comp.drawRect(Rect{inner.right() - 1, inner.y, 1, inner.h}, 1.f, b, a);
 }
 
 void Manager::layoutStartMenu() {
@@ -573,10 +596,11 @@ void Manager::drawStartMenu() {
         const int ix = cell.x + (cell.w - drawn) / 2;
         const int iy = cell.y + (slot - drawn) / 2;
         const Rect box{ix, iy, drawn, drawn};
-        if (int(i) == hoverApp) {
+        const double hav = i < appHover.size() ? appHover[i] : 0.0;
+        if (hav > 0.001) {
             const int pad = std::max(4, drawn / 8);
             comp.drawRect(Rect{ix - pad, iy - pad, drawn + 2 * pad, drawn + 2 * pad},
-                          float(drawn) * 0.30f, theme::kLaunchHover, a);
+                          float(drawn) * 0.30f, theme::kLaunchHover, a * float(hav));
         }
         if (!drawAppIcon(box, e.icon, e.wmClass, float(drawn) * 0.24f, a)) {
             drawAppTile(box, e.name, float(drawn) * 0.24f, tileTint(e.name), false);
@@ -596,31 +620,39 @@ void Manager::drawStartMenu() {
                          Rect{0, searchRect.bottom() + 40, screenW, 40});
     }
 
-    // Page dots.
+    // Page dots: the current dot and any hovered dot grow and brighten smoothly.
     for (size_t p = 0; p < appDotRects.size(); ++p) {
         const bool active = int(p) == startPage;
-        const bool hot = int(p) == startHoverDot;
-        const int r = active ? 4 : 3;
+        const double dv = p < dotHover.size() ? dotHover[p] : 0.0;
+        const int r = std::max(1, int(std::lround(active ? 4.0 : lerp(3.0, 4.0, dv))));
         const Rect& d = appDotRects[p];
         const int cx = d.x + d.w / 2, cy = d.y + d.h / 2;
-        comp.drawRect(Rect{cx - r, cy - r, 2 * r, 2 * r}, float(r),
-                      (active || hot) ? theme::kLaunchDotActive : theme::kLaunchDot, a);
+        const Color col =
+            mixColor(theme::kLaunchDot, theme::kLaunchDotActive, active ? 1.f : float(dv));
+        comp.drawRect(Rect{cx - r, cy - r, 2 * r, 2 * r}, float(r), col, a);
     }
 }
 
 void Manager::drawContextMenu() {
     if (contextItems.empty()) return;
+    const double eased = fluentEase(contextAnim);
+    if (eased <= 0.001) return;
+    const float a = float(eased);
     const int itemH = 32;
     const int pad = 6;
-    const Rect panel{contextRect.x, contextRect.y, contextRect.w,
+    // The flyout drops the last few pixels into place as it fades in, the way
+    // Windows 11 menus do, and reverses cleanly when it is dismissed.
+    const int dy = int(std::lround(-8.0 * (1.0 - eased)));
+    const Rect panel{contextRect.x, contextRect.y + dy, contextRect.w,
                      int(contextItems.size()) * itemH + 2 * pad};
     comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kFlyoutTint, 0.90f,
-                     theme::kShellBorder);
+                     theme::kShellBorder, a);
     for (size_t i = 0; i < contextItems.size(); ++i) {
         const Rect item{panel.x + pad, panel.y + pad + int(i) * itemH, panel.w - 2 * pad, itemH};
-        if (contextHover == int(i)) comp.drawRect(item, 4.f, theme::kItemHover);
-        drawTextAt(contextItems[i], 13, Weight::Regular,
-                   contextHover == int(i) ? theme::kText : theme::kTextIdle, item.x + 14,
+        const double hv = i < ctxHover.size() ? ctxHover[i] : 0.0;
+        if (hv > 0.001) comp.drawRect(item, 4.f, theme::kItemHover, float(hv) * a);
+        const Color col = mixColor(theme::kTextIdle, theme::kText, float(hv));
+        drawTextAt(contextItems[i], 13, Weight::Regular, col, item.x + 14,
                    item.y + (item.h - 18) / 2);
     }
 }

@@ -210,11 +210,14 @@ void Manager::endWidgetDrag() {
 void Manager::drawWidgets() {
     for (size_t i = 0; i < widgets.size(); ++i) {
         const Widget& w = widgets[i];
-        const bool hot = int(i) == hoverWidget || int(i) == dragWidget;
+        const bool dragging = int(i) == dragWidget;
+        const bool hot = int(i) == hoverWidget || dragging;
+        // The hover wash fades in, and stays lit while the card is being dragged.
+        const double hv = dragging ? 1.0 : (i < widgetHover.size() ? widgetHover[i] : 0.0);
         const float radius = std::min(float(metrics::kWidgetRadius),
                                       std::min(w.rect.w, w.rect.h) * 0.28f);
         comp.drawAcrylic(w.rect, radius, theme::kWidgetGlass, 0.62f, theme::kWidgetBorder);
-        if (hot) comp.drawRect(w.rect, radius, theme::kWidgetHover);
+        if (hv > 0.001) comp.drawRect(w.rect, radius, theme::kWidgetHover, float(hv));
         if (w.kind == WidgetKind::Clock)
             drawClockWidget(w);
         else

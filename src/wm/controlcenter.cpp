@@ -393,19 +393,22 @@ void Manager::drawControlCenter() {
         }
         return Rect();
     };
-    const auto hovered = [&](int id, int slot) {
+    // The eased 0..1 hover amount of a control, so tiles light up and fade back
+    // smoothly instead of snapping.
+    const auto hoverAmt = [&](int id, int slot) -> float {
         for (size_t i = 0; i < ccControls.size(); ++i) {
-            if (ccControls[i].id == id && ccControls[i].slot == slot) return int(i) == ccHover;
+            if (ccControls[i].id == id && ccControls[i].slot == slot)
+                return i < ccHoverFade.size() ? float(ccHoverFade[i]) : 0.0f;
         }
-        return false;
+        return 0.0f;
     };
     // A rounded module plate (the 2x2 tiles, the 1x2 tile and the sliders).
     const auto plateC = [&](const Rect& r, const Color& fill, int radiusPx) {
         const Rect g = grow(r);
         comp.drawRect(g, float(radiusPx) * zoom, fill, a);
     };
-    const auto plate = [&](const Rect& r, bool hot) {
-        plateC(r, hot ? theme::kCcTileHover : theme::kCcTile,
+    const auto plate = [&](const Rect& r, float hot) {
+        plateC(r, mixColor(theme::kCcTile, theme::kCcTileHover, hot),
                metrics::kCcTileRadius * scale / 100);
     };
     // A circular control. For a 1x1 module the circle *is* the whole plate; for
@@ -416,10 +419,10 @@ void Manager::drawControlCenter() {
         const Rect g = grow(r);
         comp.drawRect(g, float(std::min(g.w, g.h)) * 0.5f, fill, a);
     };
-    const auto controlFill = [&](bool on, bool enabled, bool hot) {
+    const auto controlFill = [&](bool on, bool enabled, float hot) {
         if (!enabled) return theme::kCcDisabled;
         if (on) return theme::kCcActive;
-        return hot ? theme::kCcControlHover : theme::kCcControlOff;
+        return mixColor(theme::kCcControlOff, theme::kCcControlHover, hot);
     };
     const auto glyph = [&](const Rect& r, const char* icon, bool on, bool enabled) {
         const float opacity = !enabled ? theme::kCcGlyphOff.a
@@ -437,8 +440,8 @@ void Manager::drawControlCenter() {
     // --- connections ------------------------------------------------------
     {
         const Rect m = cellRect(0, 0, 2, 2);
-        plate(m, hovered(kCcAirplane, 0) || hovered(kCcWifi, 1) || hovered(kCcBluetooth, 2) ||
-                    hovered(kCcWired, 3));
+        plate(m, std::max({hoverAmt(kCcAirplane, 0), hoverAmt(kCcWifi, 1),
+                           hoverAmt(kCcBluetooth, 2), hoverAmt(kCcWired, 3)}));
         const struct {
             int id;
             int slot;
@@ -453,7 +456,7 @@ void Manager::drawControlCenter() {
         };
         for (const auto& r : rows) {
             const Rect b = controlRect(r.id, r.slot);
-            circle(b, controlFill(r.on, r.enabled, hovered(r.id, r.slot)));
+            circle(b, controlFill(r.on, r.enabled, hoverAmt(r.id, r.slot)));
             glyph(b, r.icon, r.on, r.enabled);
         }
     }
@@ -461,7 +464,7 @@ void Manager::drawControlCenter() {
     // --- media ------------------------------------------------------------
     {
         const Rect m = cellRect(2, 0, 2, 2);
-        plate(m, hovered(kCcMediaPlay, 1));
+        plate(m, hoverAmt(kCcMediaPlay, 1));
         // Title and artist live in the space above the transport strip, not
         // vertically centred over the whole tile, so they never collide with
         // the buttons.
@@ -498,7 +501,7 @@ void Manager::drawControlCenter() {
         const Rect m = controlRect(id, 0);
         if (m.empty()) return;
         const int radius = metrics::kCcSliderRadius * scale / 100;
-        plateC(m, hovered(id, 0) ? theme::kCcTileHover : theme::kCcTile, radius);
+        plateC(m, mixColor(theme::kCcTile, theme::kCcTileHover, hoverAmt(id, 0)), radius);
         const int level = std::max(0, std::min(100, value));
         const int fillH = m.h * level / 100;
         const Color fill = enabled ? theme::kCcSliderFill : Color{1.f, 1.f, 1.f, 0.26f};
@@ -538,12 +541,12 @@ void Manager::drawControlCenter() {
     {
         const Rect m = cellRect(0, 2, 1, 1);
         const bool on = s.dndPresent ? s.dnd : dnd;
-        circle(m, controlFill(on, true, hovered(kCcDnd, 0)));
+        circle(m, controlFill(on, true, hoverAmt(kCcDnd, 0)));
         glyph(m, "cc-bell-off", on, true);
     }
     {
         const Rect m = cellRect(1, 2, 1, 1);
-        circle(m, controlFill(s.nightLight, s.nightPresent, hovered(kCcNight, 0)));
+        circle(m, controlFill(s.nightLight, s.nightPresent, hoverAmt(kCcNight, 0)));
         glyph(m, "cc-moon", s.nightLight, s.nightPresent);
     }
     {
@@ -552,7 +555,7 @@ void Manager::drawControlCenter() {
         const Rect m = cellRect(0, 3, 2, 1);
         const bool on = showingDesktop;
         plateC(m, on ? theme::kCcActive
-                     : (hovered(kCcShowDesktop, 0) ? theme::kCcTileHover : theme::kCcTile),
+                     : mixColor(theme::kCcTile, theme::kCcTileHover, hoverAmt(kCcShowDesktop, 0)),
                metrics::kCcTileRadius * scale / 100);
         const int d = int(m.h * 0.34);
         const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
@@ -562,12 +565,12 @@ void Manager::drawControlCenter() {
     }
     {
         const Rect m = cellRect(0, 4, 1, 1);
-        circle(m, controlFill(false, s.lockPresent, hovered(kCcLock, 0)));
+        circle(m, controlFill(false, s.lockPresent, hoverAmt(kCcLock, 0)));
         glyph(m, "cc-lock", false, s.lockPresent);
     }
     {
         const Rect m = cellRect(1, 4, 1, 1);
-        circle(m, controlFill(false, s.shotPresent, hovered(kCcScreenshot, 0)));
+        circle(m, controlFill(false, s.shotPresent, hoverAmt(kCcScreenshot, 0)));
         glyph(m, "cc-camera", false, s.shotPresent);
     }
 
@@ -576,7 +579,7 @@ void Manager::drawControlCenter() {
     for (int i = 0; i < kCcLauncherCount; ++i) {
         const Rect m = cellRect(2 + i, 4, 1, 1);
         const bool have = i < int(ccLaunchers.size()) && !ccLaunchers[size_t(i)].empty();
-        circle(m, controlFill(false, have, hovered(kCcLauncherFirst + i, i)));
+        circle(m, controlFill(false, have, hoverAmt(kCcLauncherFirst + i, i)));
         if (!have) continue;
         const int d = int(m.h * 0.46);
         const Rect box = grow(Rect{m.x + (m.w - d) / 2, m.y + (m.h - d) / 2, d, d});
