@@ -368,6 +368,9 @@ private:
 
     // ---- desktop icons (draw.cpp / input.cpp)
     void layoutDesktopIcons();
+    // Eases every icon's shown cell toward its target cell, so the grid reads
+    // like macOS' spring reflow when a widget is placed, removed or dragged.
+    void animateDesktopIconReflow(double dtMs);
     void drawDesktopIcons();
     // Returns true when the press landed on an icon (and was consumed).
     bool handleDesktopPress(int x, int y, Time time);
@@ -455,7 +458,8 @@ private:
 
     // ---- desktop icons (live contents of the session's Desktop directory)
     std::vector<DesktopItem> desktopItems;
-    std::vector<Rect> desktopIconRects;
+    std::vector<Rect> desktopIconRects;  // target cells computed by layoutDesktopIcons()
+    std::vector<Rect> desktopIconDraw;   // shown cells, eased toward the targets
     int hoverDesktopIcon = -1;
     int selectedDesktopIcon = -1;
     int lastDesktopClick = -1;

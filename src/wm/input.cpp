@@ -889,8 +889,12 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
 // second click on the same icon within the double click window opens it, and a
 // click on bare wallpaper clears the selection.
 bool Manager::handleDesktopPress(int x, int y, Time time) {
-    for (size_t i = 0; i < desktopIconRects.size(); ++i) {
-        if (!desktopIconRects[i].contains(x, y)) continue;
+    // Test what the user actually sees: mid-reflow the shown cells are the
+    // eased positions, not the settled grid targets.
+    const std::vector<Rect>& hit =
+        desktopIconDraw.size() == desktopIconRects.size() ? desktopIconDraw : desktopIconRects;
+    for (size_t i = 0; i < hit.size(); ++i) {
+        if (!hit[i].contains(x, y)) continue;
         const int index = int(i);
         const bool doubleClick = lastDesktopClick == index && time >= lastDesktopClickTime &&
                                  time - lastDesktopClickTime < 400;

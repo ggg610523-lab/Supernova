@@ -192,6 +192,9 @@ void Manager::updateWidgetDrag(int x, int y) {
         w.rect.w = std::clamp(x - w.rect.x, metrics::kWidgetMin, std::max(metrics::kWidgetMin, screenW - w.rect.x));
         w.rect.h = std::clamp(y - w.rect.y, metrics::kWidgetMin, std::max(metrics::kWidgetMin, bottom - w.rect.y));
     }
+    // Recompute the icon grid on every motion step so the icons slide out of the
+    // widget's way live, the way macOS reflows around a dragged item.
+    layoutDesktopIcons();
     dirty = true;
 }
 

@@ -94,15 +94,57 @@ void Manager::layoutDesktopIcons() {
         }
         desktopIconRects.push_back(cell);
     }
+    // Keep the *shown* cells in step with the targets we just computed. Icons
+    // that already existed keep their current on-screen position (they are eased
+    // across by animateDesktopIconReflow()); a brand new entry -- only possible
+    // when the Desktop directory changes -- starts at its target so it does not
+    // fly in from the origin.
+    if (desktopIconDraw.size() != desktopIconRects.size()) {
+        const size_t keep = std::min(desktopIconDraw.size(), desktopIconRects.size());
+        desktopIconDraw.resize(desktopIconRects.size());
+        for (size_t i = keep; i < desktopIconDraw.size(); ++i)
+            desktopIconDraw[i] = desktopIconRects[i];
+    }
+}
+
+// Every frame, glide each icon's shown cell toward the cell the grid wants it
+// in. Frame-rate independent exponential smoothing -- the same shape as macOS'
+// critically damped reflow -- so a widget being dropped, resized or dragged over
+// the grid slides the surrounding icons out of the way instead of teleporting
+// them. Retargeting mid-flight is free: the icons simply head for the new cells,
+// which is exactly what a widget being dragged across the desktop needs.
+void Manager::animateDesktopIconReflow(double dtMs) {
+    if (desktopIconDraw.size() != desktopIconRects.size()) layoutDesktopIcons();
+    if (desktopIconDraw.empty()) return;
+    // Time constant: ~110ms lands the glide in about a third of a second, quick
+    // enough to feel responsive but slow enough to read as motion.
+    const double tau = 110.0;
+    const double k = 1.0 - std::exp(-std::max(0.0, dtMs) / tau);
+    for (size_t i = 0; i < desktopIconDraw.size() && i < desktopIconRects.size(); ++i) {
+        const Rect target = desktopIconRects[i];
+        Rect& cur = desktopIconDraw[i];
+        if (cur == target) continue;
+        const auto ease = [k](int a, int b) { return int(std::lround(a + (b - a) * k)); };
+        const Rect next{ease(cur.x, target.x), ease(cur.y, target.y), ease(cur.w, target.w),
+                        ease(cur.h, target.h)};
+        // Rounding can stall a sub-pixel move; finish the glide in that case so
+        // the animation always terminates (and never repaints forever).
+        cur = (next == cur) ? target : next;
+        dirty = true;
+    }
 }
 
 // Everything sitting on the user's Desktop folder: a folder, a dropped file or
 // a .desktop launcher. A click selects, a double click opens (input.cpp).
 void Manager::drawDesktopIcons() {
-    if (desktopIconRects.size() != desktopItems.size()) layoutDesktopIcons();
-    for (size_t i = 0; i < desktopItems.size() && i < desktopIconRects.size(); ++i) {
+    if (desktopIconRects.size() != desktopItems.size() ||
+        desktopIconDraw.size() != desktopItems.size())
+        layoutDesktopIcons();
+    for (size_t i = 0; i < desktopItems.size() && i < desktopIconDraw.size(); ++i) {
         const DesktopItem& item = desktopItems[i];
-        const Rect cell = desktopIconRects[i];
+        // Draw the eased cell, not the target: this is what makes the icons
+        // glide while a widget reflows the grid.
+        const Rect cell = desktopIconDraw[i];
         const bool selected = int(i) == selectedDesktopIcon;
         const bool hovered = int(i) == hoverDesktopIcon;
         if (selected || hovered) {

@@ -475,6 +475,10 @@ void Manager::tickAnimations(double now) {
         ccControls.clear();
     }
 
+    // Desktop icons: glide toward the cells the grid wants whenever a widget has
+    // reflowed the layout (added, removed, dragged or resized).
+    animateDesktopIconReflow(dtMs);
+
     // Widgets: repaint the analog clock when the wall second changes, and
     // re-probe the battery every few seconds.
     if (!widgets.empty()) {
@@ -700,8 +704,11 @@ void Manager::updateHoverStates(int px, int py) {
     // window, the taskbar or an open flyout must never light up.
     int newDesktop = -1;
     if (!overlayOpen() && !overTaskbar && !dragClient && !clientAt(px, py)) {
-        for (size_t i = 0; i < desktopIconRects.size(); ++i) {
-            if (desktopIconRects[i].contains(px, py)) {
+        // Hit test the *shown* cells so a hover follows an icon mid-glide.
+        const std::vector<Rect>& hit =
+            desktopIconDraw.size() == desktopIconRects.size() ? desktopIconDraw : desktopIconRects;
+        for (size_t i = 0; i < hit.size(); ++i) {
+            if (hit[i].contains(px, py)) {
                 newDesktop = int(i);
                 break;
             }
