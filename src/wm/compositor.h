@@ -96,7 +96,11 @@ public:
     void beginFrame();
     void drawWallpaper();
     void drawWindow(const WindowSprite& s);
-    void drawRect(const Rect& r, float radius, const Color& c, float opacity = 1.0f);
+    // `clipTop`, when set, discards pixels above that screen y before the shape
+    // is rasterised (used for the Control Centre slider fill).
+    static constexpr int kNoClip = -2000000000;
+    void drawRect(const Rect& r, float radius, const Color& c, float opacity = 1.0f,
+                  int clipTop = kNoClip);
     void drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,
                      const Color& border, float opacity = 1.0f);
     void drawTex(GLuint tex, const Rect& dst, float radius, const Color& tint,
@@ -150,7 +154,7 @@ private:
     GLint uShadow_ = -1, uClose_ = -1, uFrame_ = -1, uContent_ = -1, uRadius_ = -1;
     GLint uOpacity_ = -1, uCaptionH_ = -1, uBtnW_ = -1, uHover_ = -1, uPress_ = -1;
     GLint uMaximized_ = -1, uScreen_ = -1, uShadowPad_ = -1, uTexMix_ = -1;
-    GLint uKeepAlpha_ = -1, uTintAmount_ = -1, uTex_ = -1, uBlur_ = -1;
+    GLint uKeepAlpha_ = -1, uTintAmount_ = -1, uClipTop_ = -1, uTex_ = -1, uBlur_ = -1;
     GLint uBlurDir_ = -1, uWallRes_ = -1;
     float proj_[16] = {};
 

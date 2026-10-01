@@ -491,27 +491,26 @@ void Manager::drawControlCenter() {
 
     // --- brightness / volume pills ---------------------------------------
     // iOS anchors the glyph to the bottom of the pill and grows the fill from
-    // there, rounding only the *bottom* corners. The shader takes one radius for
-    // all four corners, so the fill is a square body drawn over a fully rounded
-    // cap: the body hides the cap's top corners and leaves the bottom ones.
+    // there. The fill is the whole pill clipped to its own height, so it follows
+    // the pill's rounded corners at every level instead of being a second,
+    // slightly different shape.
     const auto slider = [&](int id, const char* icon, int value, bool enabled) {
         const Rect m = controlRect(id, 0);
         if (m.empty()) return;
-        plateC(m, hovered(id, 0) ? theme::kCcTileHover : theme::kCcTile,
-               metrics::kCcSliderRadius * scale / 100);
+        const int radius = metrics::kCcSliderRadius * scale / 100;
+        plateC(m, hovered(id, 0) ? theme::kCcTileHover : theme::kCcTile, radius);
         const int level = std::max(0, std::min(100, value));
         const int fillH = m.h * level / 100;
-        const int R = std::max(2, metrics::kCcSliderRadius * scale / 100);
         const Color fill = enabled ? theme::kCcSliderFill : Color{1.f, 1.f, 1.f, 0.26f};
-        if (fillH > 1) {
-            const int r = std::max(1, std::min(R, fillH / 2));
-            const int capH = std::min(fillH, 2 * r);
-            const int bodyH = fillH - capH + r;
-            const Rect cap{m.x, m.bottom() - capH, m.w, capH};
-            const Rect body{m.x, m.bottom() - fillH, m.w, bodyH};
-            const Rect gcap = grow(cap);
-            comp.drawRect(gcap, float(r) * zoom, fill, a);
-            if (bodyH > 0) comp.drawRect(grow(body), 0.f, fill, a);
+        // One clipped draw of the whole pill, so the fill follows the pill's
+        // rounded corners at every height and never double-blends into a seam.
+        const int fillTop = m.bottom() - fillH;
+        const int clipY = int(std::lround(ay + (float(fillTop) - ay) * zoom));
+        if (fillH > 0) {
+            // A full pill is drawn unclipped so its rounded top is exact; any
+            // partial level gets a straight top edge at the clip line.
+            const int top = level >= 100 ? Compositor::kNoClip : clipY;
+            comp.drawRect(grow(m), float(radius) * zoom, fill, a, top);
         }
         const int d = int(m.w * 0.44);
         const int inset = std::max(2, int(d * 0.18));
@@ -520,7 +519,7 @@ void Manager::drawControlCenter() {
             // The glyph inverts once the white fill reaches it, which is exactly
             // how the icon reads in iOS.
             const std::string dark = std::string(icon) + "-dark";
-            const bool reached = (m.bottom() - fillH) <= (box.y + box.h / 2);
+            const bool reached = clipY <= box.y + box.h / 2;
             const char* chosen = reached ? dark.c_str() : icon;
             if (drawAppIcon(box, chosen, chosen, 0.f, 1.0f)) return;
         }

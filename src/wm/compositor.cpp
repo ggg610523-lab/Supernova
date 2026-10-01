@@ -58,6 +58,7 @@ uniform float uShadowPad;
 uniform float uTexMix;    // 1 = take rgb from the texture
 uniform float uKeepAlpha; // 1 = take alpha from the texture
 uniform float uTintAmount;
+uniform float uClipTop;   // mode 0: discard fragments above this screen y
 uniform sampler2D uTex;
 uniform sampler2D uBlur;
 
@@ -116,6 +117,13 @@ void main() {
     vec2 c = uRect.xy + uRect.zw * 0.5;
 
     if (uMode == 0) {                    // rounded solid fill
+        // A vertical clip lets a caller draw only the part of a rounded shape
+        // below some y, which is how a slider fill follows the pill's corners
+        // without overlapping two translucent rects.
+        if (p.y < uClipTop) {
+            fragColor = vec4(0.0);
+            return;
+        }
         float d = sdRound(p - c, uRect.zw * 0.5, uRadius);
         float a = cover(d) * uOpacity * uColor.a;
         fragColor = vec4(uColor.rgb * a, a);
@@ -624,6 +632,7 @@ bool Compositor::buildShaders(std::string* error) {
     uTexMix_ = loc("uTexMix");
     uKeepAlpha_ = loc("uKeepAlpha");
     uTintAmount_ = loc("uTintAmount");
+    uClipTop_ = loc("uClipTop");
     uTex_ = loc("uTex");
     uBlur_ = loc("uBlur");
     uBlurDir_ = glGetUniformLocation(blurProg_, "uBlurDir");
@@ -912,7 +921,8 @@ void Compositor::drawWallpaper() {
             false);
 }
 
-void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opacity) {
+void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opacity,
+                          int clipTop) {
     if (r.empty()) return;
     glUseProgram(prog_);
     glBindVertexArray(vao_);
@@ -920,6 +930,7 @@ void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opa
     glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
     glUniform1f(uRadius_, radius);
     glUniform1f(uOpacity_, opacity);
+    glUniform1f(uClipTop_, clipTop == kNoClip ? -1.0e9f : float(clipTop));
     glUniform4f(uColor_, c.r, c.g, c.b, c.a);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
