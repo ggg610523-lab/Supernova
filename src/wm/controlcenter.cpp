@@ -211,8 +211,7 @@ void Manager::handleControlCenterPress(int x, int y, unsigned button) {
         // A press inside the panel is consumed, whatever it lands on.
         if (c.id == kCcBrightness || c.id == kCcVolume) {
             const SystemState& s = sysctl.state();
-            const bool usable = c.id == kCcVolume ? s.audioPresent
-                                                  : (s.backlightPresent && s.backlightWritable);
+            const bool usable = c.id == kCcVolume ? s.audioPresent : s.brightnessUsable();
             if (!usable) return;
             ccDrag = int(i);
             // Jump to the pressed level, then track the pointer.
@@ -274,8 +273,8 @@ void Manager::activateCcControl(int id) {
         case kCcMediaPlay: sysctl.mediaPlayPause(); break;
         case kCcMediaNext: sysctl.mediaNext(); break;
         case kCcBrightness:
-            if (s.backlightPresent && s.backlightWritable) {
-                sysctl.setBrightness(s.brightness >= 100 ? 0 : s.brightness + 10);
+            if (s.brightnessUsable()) {
+                sysctl.setBrightness(s.brightness >= 100 ? 1 : s.brightness + 10);
             }
             break;
         case kCcVolume:
@@ -400,40 +399,46 @@ void Manager::drawControlCenter() {
         }
         return false;
     };
-    // A module's background plate.
-    const auto tile = [&](const Rect& r, bool hot) {
-        comp.drawRect(grow(r), float(metrics::kCcTileRadius * scale / 100) * zoom,
-                      hot ? theme::kCcTileHover : theme::kCcTile, a);
+    // A rounded module plate (the 2x2 tiles, the 1x2 tile and the sliders).
+    const auto plateC = [&](const Rect& r, const Color& fill, int radiusPx) {
+        const Rect g = grow(r);
+        comp.drawRect(g, float(radiusPx) * zoom, fill, a);
     };
-    // A circular control: filled with the system colour when on, hollow when off.
-    const auto button = [&](const Rect& r, bool on, bool enabled) {
-        const float radius = float(r.w) * 0.5f * zoom;
-        if (!enabled) {
-            comp.drawRect(grow(r), radius, theme::kCcDisabled, a);
-        } else if (on) {
-            comp.drawRect(grow(r), radius, theme::kCcActive, a);
-        } else {
-            comp.drawRect(grow(r), radius, theme::kCcSliderTrack, a);
-        }
+    const auto plate = [&](const Rect& r, bool hot) {
+        plateC(r, hot ? theme::kCcTileHover : theme::kCcTile,
+               metrics::kCcTileRadius * scale / 100);
+    };
+    // A circular control. For a 1x1 module the circle *is* the whole plate; for
+    // the connectivity tile it is one of the four inner spots. Drawing a rounded
+    // square underneath a circle is what made the corners peek out, so there is
+    // deliberately no separate tile here.
+    const auto circle = [&](const Rect& r, const Color& fill) {
+        const Rect g = grow(r);
+        comp.drawRect(g, float(std::min(g.w, g.h)) * 0.5f, fill, a);
+    };
+    const auto controlFill = [&](bool on, bool enabled, bool hot) {
+        if (!enabled) return theme::kCcDisabled;
+        if (on) return theme::kCcActive;
+        return hot ? theme::kCcControlHover : theme::kCcControlOff;
     };
     const auto glyph = [&](const Rect& r, const char* icon, bool on, bool enabled) {
-        if (!enabled) return;
-        // The blue fill carries the state; the glyph just needs to stay legible.
-        const float opacity = on ? theme::kCcActiveGlyph.a : theme::kCcGlyph.a;
-        const int d = int(r.w * 0.52);
+        const float opacity = !enabled ? theme::kCcGlyphOff.a
+                                       : (on ? theme::kCcActiveGlyph.a : theme::kCcGlyph.a);
+        const int d = int(r.w * 0.50);
         const Rect box = grow(Rect{r.x + (r.w - d) / 2, r.y + (r.h - d) / 2, d, d});
-        if (drawAppIcon(box, icon, icon, float(box.w) * 0.22f, opacity)) return;
+        if (drawAppIcon(box, icon, icon, 0.f, opacity)) return;
         // No icon in the theme: a filled dot still communicates state.
-        const int dot = std::max(3, int(box.w * 0.5));
+        const int dot = std::max(3, int(box.w * 0.4));
         comp.drawRect(Rect{box.x + (box.w - dot) / 2, box.y + (box.h - dot) / 2, dot, dot},
-                      float(dot) * 0.5f, on ? theme::kCcActiveGlyph : theme::kCcGlyph, a);
+                      float(dot) * 0.5f, enabled && on ? theme::kCcActiveGlyph : theme::kCcGlyph,
+                      a * opacity);
     };
 
     // --- connections ------------------------------------------------------
     {
         const Rect m = cellRect(0, 0, 2, 2);
-        tile(m, hovered(kCcAirplane, 0) || hovered(kCcWifi, 1) || hovered(kCcBluetooth, 2) ||
-                  hovered(kCcWired, 3));
+        plate(m, hovered(kCcAirplane, 0) || hovered(kCcWifi, 1) || hovered(kCcBluetooth, 2) ||
+                    hovered(kCcWired, 3));
         const struct {
             int id;
             int slot;
@@ -448,7 +453,7 @@ void Manager::drawControlCenter() {
         };
         for (const auto& r : rows) {
             const Rect b = controlRect(r.id, r.slot);
-            button(b, r.on, r.enabled);
+            circle(b, controlFill(r.on, r.enabled, hovered(r.id, r.slot)));
             glyph(b, r.icon, r.on, r.enabled);
         }
     }
@@ -456,7 +461,7 @@ void Manager::drawControlCenter() {
     // --- media ------------------------------------------------------------
     {
         const Rect m = cellRect(2, 0, 2, 2);
-        tile(m, hovered(kCcMediaPlay, 1));
+        plate(m, hovered(kCcMediaPlay, 1));
         // Title and artist live in the space above the transport strip, not
         // vertically centred over the whole tile, so they never collide with
         // the buttons.
@@ -486,24 +491,27 @@ void Manager::drawControlCenter() {
 
     // --- brightness / volume pills ---------------------------------------
     // iOS anchors the glyph to the bottom of the pill and grows the fill from
-    // there, rounding only the fill's bottom corners, so the two blend into one
-    // continuous shape.
+    // there, rounding only the *bottom* corners. The shader takes one radius for
+    // all four corners, so the fill is a square body drawn over a fully rounded
+    // cap: the body hides the cap's top corners and leaves the bottom ones.
     const auto slider = [&](int id, const char* icon, int value, bool enabled) {
         const Rect m = controlRect(id, 0);
         if (m.empty()) return;
-        tile(m, hovered(id, 0));
+        plateC(m, hovered(id, 0) ? theme::kCcTileHover : theme::kCcTile,
+               metrics::kCcSliderRadius * scale / 100);
         const int level = std::max(0, std::min(100, value));
         const int fillH = m.h * level / 100;
-        const float radius = float(metrics::kCcTileRadius * scale / 100) * zoom;
-        // iOS rounds only the fill's bottom corners (`border-radius: 0 0 R R`).
-        // The compositor takes one radius per rect, so the fill is drawn as a
-        // body plus a bottom cap whose rounded top corners the body covers.
+        const int R = std::max(2, metrics::kCcSliderRadius * scale / 100);
+        const Color fill = enabled ? theme::kCcSliderFill : Color{1.f, 1.f, 1.f, 0.26f};
         if (fillH > 1) {
-            const int cap = std::min(int(radius), fillH);
-            const Rect capRect{m.x, m.bottom() - cap, m.w, cap};
-            const Rect body{m.x, m.y + m.h - fillH, m.w, fillH - cap + 2};
-            if (body.h > 0) comp.drawRect(grow(body), 0.f, theme::kCcSliderFill, a);
-            comp.drawRect(grow(capRect), radius, theme::kCcSliderFill, a);
+            const int r = std::max(1, std::min(R, fillH / 2));
+            const int capH = std::min(fillH, 2 * r);
+            const int bodyH = fillH - capH + r;
+            const Rect cap{m.x, m.bottom() - capH, m.w, capH};
+            const Rect body{m.x, m.bottom() - fillH, m.w, bodyH};
+            const Rect gcap = grow(cap);
+            comp.drawRect(gcap, float(r) * zoom, fill, a);
+            if (bodyH > 0) comp.drawRect(grow(body), 0.f, fill, a);
         }
         const int d = int(m.w * 0.44);
         const int inset = std::max(2, int(d * 0.18));
@@ -512,8 +520,9 @@ void Manager::drawControlCenter() {
             // The glyph inverts once the white fill reaches it, which is exactly
             // how the icon reads in iOS.
             const std::string dark = std::string(icon) + "-dark";
-            const char* chosen = (m.bottom() - fillH) <= (box.y + box.h / 2) ? dark.c_str() : icon;
-            if (drawAppIcon(box, chosen, chosen, float(box.w) * 0.22f, 1.0f)) return;
+            const bool reached = (m.bottom() - fillH) <= (box.y + box.h / 2);
+            const char* chosen = reached ? dark.c_str() : icon;
+            if (drawAppIcon(box, chosen, chosen, 0.f, 1.0f)) return;
         }
         const int dot = std::max(3, box.w / 3);
         comp.drawRect(Rect{box.x + (box.w - dot) / 2, box.y + (box.h - dot) / 2, dot, dot},
@@ -521,50 +530,45 @@ void Manager::drawControlCenter() {
     };
     slider(kCcBrightness, "cc-sun",
            ccDrag == ccControlIndex(kCcBrightness, 0) ? ccDragValue : s.brightness,
-           s.backlightPresent && s.backlightWritable);
+           s.brightnessUsable());
     slider(kCcVolume, "cc-volume",
            ccDrag == ccControlIndex(kCcVolume, 0) ? ccDragValue : (s.muted ? 0 : s.volume),
            s.audioPresent);
 
-    // --- 1x1 and 1x2 tiles ------------------------------------------------
+    // --- 1x1 circles and the 1x2 tile ------------------------------------
     {
         const Rect m = cellRect(0, 2, 1, 1);
-        tile(m, hovered(kCcDnd, 0));
         const bool on = s.dndPresent ? s.dnd : dnd;
-        button(m, on, true);
+        circle(m, controlFill(on, true, hovered(kCcDnd, 0)));
         glyph(m, "cc-bell-off", on, true);
     }
     {
         const Rect m = cellRect(1, 2, 1, 1);
-        tile(m, hovered(kCcNight, 0));
-        button(m, s.nightLight, s.nightPresent);
+        circle(m, controlFill(s.nightLight, s.nightPresent, hovered(kCcNight, 0)));
         glyph(m, "cc-moon", s.nightLight, s.nightPresent);
     }
     {
-        // "Show desktop" is the 2-wide module iOS gives to Screen Mirroring.
+        // "Show desktop" is the 2-wide module iOS gives to Screen Mirroring: a
+        // rounded plate that turns systemBlue while the desktop is showing.
         const Rect m = cellRect(0, 3, 2, 1);
-        tile(m, hovered(kCcShowDesktop, 0));
         const bool on = showingDesktop;
-        if (on) {
-            comp.drawRect(grow(m.inflated(-6)), float(metrics::kCcTileRadius * scale / 100) * zoom,
-                          theme::kCcActive, a);
-        }
+        plateC(m, on ? theme::kCcActive
+                     : (hovered(kCcShowDesktop, 0) ? theme::kCcTileHover : theme::kCcTile),
+               metrics::kCcTileRadius * scale / 100);
         const int d = int(m.h * 0.34);
         const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
-        drawAppIcon(box, "cc-monitor", "cc-monitor", float(box.w) * 0.22f, 1.0f);
+        drawAppIcon(box, "cc-monitor", "cc-monitor", 0.f, 1.0f);
         drawTextAt("Show desktop", int(m.h * 0.20), Weight::Medium, theme::kCcLabel,
                    box.right() + gap, m.y + (m.h - int(m.h * 0.20) * 3 / 2) / 2);
     }
     {
         const Rect m = cellRect(0, 4, 1, 1);
-        tile(m, hovered(kCcLock, 0));
-        button(m, false, s.lockPresent);
+        circle(m, controlFill(false, s.lockPresent, hovered(kCcLock, 0)));
         glyph(m, "cc-lock", false, s.lockPresent);
     }
     {
         const Rect m = cellRect(1, 4, 1, 1);
-        tile(m, hovered(kCcScreenshot, 0));
-        button(m, false, s.shotPresent);
+        circle(m, controlFill(false, s.shotPresent, hovered(kCcScreenshot, 0)));
         glyph(m, "cc-camera", false, s.shotPresent);
     }
 
@@ -573,12 +577,12 @@ void Manager::drawControlCenter() {
     for (int i = 0; i < kCcLauncherCount; ++i) {
         const Rect m = cellRect(2 + i, 4, 1, 1);
         const bool have = i < int(ccLaunchers.size()) && !ccLaunchers[size_t(i)].empty();
-        tile(m, hovered(kCcLauncherFirst + i, i));
+        circle(m, controlFill(false, have, hovered(kCcLauncherFirst + i, i)));
         if (!have) continue;
         const int d = int(m.h * 0.46);
         const Rect box = grow(Rect{m.x + (m.w - d) / 2, m.y + (m.h - d) / 2, d, d});
-        if (!drawAppIcon(box, kLauncherIcons[i], kLauncherIcons[i], float(box.w) * 0.24f, a)) {
-            drawAppTile(box, "?", float(box.w) * 0.24f, theme::kCcActive, false);
+        if (!drawAppIcon(box, kLauncherIcons[i], kLauncherIcons[i], 0.f, a)) {
+            drawAppTile(box, "?", float(box.w) * 0.30f, theme::kCcActive, false);
         }
     }
 }

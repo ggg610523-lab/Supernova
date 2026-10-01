@@ -75,15 +75,39 @@ elif has amixer; then
 fi
 
 # --- backlight ----------------------------------------------------------
+# Three backends, in descending order of fidelity: a writable sysfs node,
+# `brightnessctl` (udev rules usually let the active user drive it), and
+# `xrandr --brightness` as a software fallback when there is no panel node at
+# all (desktops, external monitors). `bl=` is only emitted when we can read a
+# real level; the xrandr path has no getter, so the WM tracks it itself.
+bl_seen=0
 for d in /sys/class/backlight/*; do
     [ -r "$d/brightness" ] || continue
     cur=$(cat "$d/brightness" 2>/dev/null) || continue
     max=$(cat "$d/max_brightness" 2>/dev/null) || continue
     [ "$max" -gt 0 ] 2>/dev/null || continue
     printf 'bl=%d\n' "$((cur * 100 / max))"
+    bl_seen=1
     [ -w "$d/brightness" ] && printf 'blw=1\n'
     break
 done
+if has brightnessctl; then
+    printf 'bt=1\n'
+    if [ "$bl_seen" = 0 ]; then
+        c=$(brightnessctl get 2>/dev/null); m=$(brightnessctl max 2>/dev/null)
+        if [ -n "$c" ] && [ -n "$m" ] && [ "$m" -gt 0 ] 2>/dev/null; then
+            printf 'bl=%d\n' "$((c * 100 / m))"
+            bl_seen=1
+        fi
+    fi
+fi
+if [ "$bl_seen" = 0 ] && has xrandr; then
+    xrout=$(xrandr --query 2>/dev/null | awk '/ connected/{print $1; exit}')
+    if [ -n "$xrout" ]; then
+        printf 'xr=1\n'
+        printf 'xo=%s\n' "$xrout"
+    fi
+fi
 
 # --- Do Not Disturb: the notification daemon's pause mode ---------------
 if has dunstctl; then
@@ -291,6 +315,16 @@ void SystemControls::parse(const std::string& blob) {
             continue;
         }
         if (!value(line, "blw").empty()) { next.backlightWritable = true; continue; }
+        if (!value(line, "bt").empty()) { next.brightnessctlPresent = true; continue; }
+        if (!value(line, "xr").empty()) {
+            // No panel node we can read: dim in software and remember the level
+            // ourselves, since xrandr has no brightness getter.
+            next.backlightPresent = true;
+            next.xrandrPresent = true;
+            next.brightness = s_.brightness;
+            continue;
+        }
+        if (!value(line, "xo").empty()) { next.xrandrOutput = value(line, "xo"); continue; }
         if (!value(line, "na").empty()) { next.dndPresent = true; continue; }
         if (!value(line, "np").empty()) { next.dnd = value(line, "np") == "1"; continue; }
         if (!value(line, "mp").empty()) { next.mediaPresent = true; continue; }
@@ -343,16 +377,32 @@ void SystemControls::setMuted(bool on) {
 }
 
 void SystemControls::setBrightness(int percent) {
-    if (!s_.backlightPresent || !s_.backlightWritable) return;
-    s_.brightness = clampi(percent, 0, 100);
-    // The sysfs node is 0..max_brightness, not 0..100, so the shell rescales.
-    char cmd[192];
-    std::snprintf(cmd, sizeof cmd,
-                  "f=$(echo /sys/class/backlight/*/brightness); "
-                  "m=$(echo /sys/class/backlight/*/max_brightness); "
-                  "printf '%%s' $(( %d * $(cat $m) / 100 )) > $f",
-                  s_.brightness);
-    run(cmd);
+    if (!s_.backlightPresent) return;
+    // Never let the slider black the panel out completely; iOS stops just above
+    // zero too, and a fully dark screen is impossible to undo by touch.
+    s_.brightness = clampi(percent, 1, 100);
+    char cmd[256];
+    if (s_.backlightWritable) {
+        // The sysfs node is 0..max_brightness, not 0..100, so the shell rescales.
+        std::snprintf(cmd, sizeof cmd,
+                      "f=$(echo /sys/class/backlight/*/brightness); "
+                      "m=$(echo /sys/class/backlight/*/max_brightness); "
+                      "printf '%%s' $(( %d * $(cat $m) / 100 )) > $f",
+                      s_.brightness);
+        run(cmd);
+    } else if (s_.brightnessctlPresent) {
+        std::snprintf(cmd, sizeof cmd, "brightnessctl set %d%%", s_.brightness);
+        run(cmd);
+    } else if (s_.xrandrPresent && !s_.xrandrOutput.empty()) {
+        // Software dimming: map 1..100 onto 0.25..1.0 gamma so the bottom of the
+        // slider is visibly dim without ever going fully black.
+        const double f = 0.25 + 0.75 * double(s_.brightness) / 100.0;
+        std::snprintf(cmd, sizeof cmd, "xrandr --output %s --brightness %.2f",
+                      s_.xrandrOutput.c_str(), f);
+        run(cmd);
+    } else {
+        return;
+    }
     scheduleRefresh();
 }
 

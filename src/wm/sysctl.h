@@ -25,7 +25,10 @@ struct SystemState {
     bool wiredPresent = false;
     bool audioPresent = false;
     bool backlightPresent = false;
-    bool backlightWritable = false;
+    bool backlightWritable = false;   // /sys/class/backlight/.../brightness is writable
+    bool brightnessctlPresent = false;  // `brightnessctl` can drive the panel
+    bool xrandrPresent = false;       // software dimming fallback (no /sys backlight)
+    std::string xrandrOutput;         // connected output to dim
     bool mediaPresent = false;
     bool nightPresent = false;
     bool shotPresent = false;
@@ -39,7 +42,7 @@ struct SystemState {
     bool airplane = false;      // iOS parity: no radios and no wired link
     bool muted = false;
     int volume = 0;             // 0..100
-    int brightness = 0;         // 0..100
+    int brightness = 100;       // 0..100 (starts full so the xrandr path is sane)
     bool playing = false;
     bool nightLight = false;    // tracked by us: the helper has no getter
     bool dnd = false;           // notification daemon paused (Do Not Disturb)
@@ -49,6 +52,13 @@ struct SystemState {
     // True once a probe has come back at least once.
     bool probed = false;
 
+    // A brightness slider is usable when *any* backend can drive the panel:
+    // a writable sysfs node, `brightnessctl`, or `xrandr --brightness`.
+    bool brightnessUsable() const {
+        return backlightPresent &&
+               (backlightWritable || brightnessctlPresent || xrandrPresent);
+    }
+
     // Lets poll() skip a state commit (and a repaint) when a probe changed
     // nothing. `probed` is excluded on purpose: the first probe must always be
     // committed, otherwise the panel would never learn that probing works.
@@ -56,7 +66,10 @@ struct SystemState {
         return wifiPresent == o.wifiPresent && btPresent == o.btPresent &&
                wiredPresent == o.wiredPresent && audioPresent == o.audioPresent &&
                backlightPresent == o.backlightPresent &&
-               backlightWritable == o.backlightWritable && mediaPresent == o.mediaPresent &&
+               backlightWritable == o.backlightWritable &&
+               brightnessctlPresent == o.brightnessctlPresent &&
+               xrandrPresent == o.xrandrPresent && xrandrOutput == o.xrandrOutput &&
+               mediaPresent == o.mediaPresent &&
                nightPresent == o.nightPresent && shotPresent == o.shotPresent &&
                lockPresent == o.lockPresent && dndPresent == o.dndPresent &&
                wifi == o.wifi && bt == o.bt &&
