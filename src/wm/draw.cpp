@@ -59,6 +59,10 @@ void Manager::render() {
         drawClientSprite(c);
     }
 
+    // App launch placeholders sit above the windows but below the taskbar, so a
+    // just-launched app reads as "opening" the instant it is double-clicked.
+    drawLaunches();
+
     drawSnapPreview();
     drawTaskbar();
     if (startOpen || startAnim > 0.0) drawStartMenu();
@@ -178,6 +182,122 @@ void Manager::drawDesktopIcons() {
         // them legible over a light patch of wallpaper.
         comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.65f}, 1.0f);
         comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kText, 1.0f);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App launch animation (iOS style)
+// ---------------------------------------------------------------------------
+// iOS opens an app by growing the tapped icon into the app's window with a
+// short, decelerating zoom while the icon cross-fades into the app. We do the
+// same on the desktop: the icon's tile expands into the window the app will
+// occupy, showing the app's own icon, so a double-click is answered instantly
+// even when the process takes a moment to map its first window.
+namespace {
+constexpr double kLaunchMs = 380.0;          // icon -> placeholder grow
+constexpr double kLaunchSettleMs = 240.0;    // retarget onto the real frame
+constexpr double kLaunchFadeMs = 240.0;      // placeholder cross-fade once claimed
+constexpr double kLaunchTimeoutMs = 8000.0;  // give up if nothing ever maps
+}  // namespace
+
+void Manager::beginLaunchAnim(const DesktopItem& item, const Rect& fromIcon) {
+    LaunchAnim a;
+    a.from = fromIcon;
+    a.rect = fromIcon;
+    a.icon = item.icon;
+    a.name = item.name;
+    a.start = nowMs();
+    a.ms = kLaunchMs;
+    // A generous, centred window the tile can grow into. placeNewClient centres
+    // new windows too, so the real frame usually lands close by and the morph in
+    // claimLaunch smooths out whatever difference remains.
+    const int bottom = screenH - metrics::kTaskbarH;
+    const int w = std::clamp(int(screenW * 0.60), metrics::kMinW,
+                             std::max(metrics::kMinW, screenW - 120));
+    const int h = std::clamp(int(bottom * 0.60), metrics::kMinH,
+                             std::max(metrics::kMinH, bottom - 120));
+    a.to = Rect{(screenW - w) / 2, (bottom - h) / 2, w, h};
+    launches.push_back(std::move(a));
+    dirty = true;
+}
+
+// The window the launch spawned has finally mapped: hand it the tile so it can
+// grow out of the placeholder instead of appearing on top of it.
+void Manager::claimLaunch(Client* c) {
+    if (!c || launches.empty()) return;
+    const double now = nowMs();
+    for (LaunchAnim& a : launches) {
+        if (a.client || now - a.start > kLaunchTimeoutMs) continue;
+        a.client = c;
+        a.claimStart = now;
+        c->fromLaunch = true;  // no scale-in: match the placeholder exactly
+        // The placeholder could only *guess* at the window's size before the app
+        // answered. Now the real frame is known, retarget the tile onto it and
+        // put both the tile and the window on the very same timeline: they ease
+        // from the same point to the same rect over the same 240ms, so the two
+        // are exactly the same size throughout the cross-fade and there is no
+        // jump when one hands over to the other.
+        a.from = a.rect;
+        a.to = c->frame;
+        a.start = now;
+        a.ms = kLaunchSettleMs;
+        c->animFrom = a.rect;
+        c->animStart = now;
+        c->animMs = kLaunchSettleMs;
+        dirty = true;
+        return;
+    }
+}
+
+void Manager::tickLaunches(double now, double dtMs) {
+    if (launches.empty()) return;
+    (void)dtMs;
+    for (size_t i = launches.size(); i-- > 0;) {
+        LaunchAnim& a = launches[i];
+        // The tile keeps easing toward `to` even after a claim -- that is how it
+        // arrives at exactly the window's rect while the two cross-fade.
+        const double p = clamp01((now - a.start) / a.ms);
+        // Same curve as the window's frame morph (fluentEase), so tile and window
+        // are the same size at every instant, not just at the end.
+        a.rect = lerpRect(a.from, a.to, fluentEase(p));
+        if (a.client) {
+            // The real window is on screen now: fade the placeholder away.
+            if (now - a.claimStart >= kLaunchFadeMs) launches.erase(launches.begin() + i);
+            else dirty = true;
+            continue;
+        }
+        // A launch that never maps a window must not linger for ever. A tile that
+        // has finished growing just waits quietly -- no repaint until the app
+        // answers (claimLaunch restarts it) or it times out.
+        if (now - a.start > kLaunchTimeoutMs) launches.erase(launches.begin() + i);
+        else if (p < 1.0) dirty = true;
+    }
+}
+
+// The placeholder tile: a Fluent glass frame with the app's icon in it, painted
+// above the windows so it reads as "the app is opening".
+void Manager::drawLaunches() {
+    if (launches.empty()) return;
+    const double now = nowMs();
+    for (const LaunchAnim& a : launches) {
+        double opacity = 1.0;
+        if (a.client) opacity = clamp01(1.0 - (now - a.claimStart) / kLaunchFadeMs);
+        if (opacity <= 0.01) continue;
+        const Rect r = a.rect;
+        if (r.w < 8 || r.h < 8) continue;
+        const float rad = std::min(float(metrics::kRadius) + 6.f, std::min(r.w, r.h) * 0.22f);
+        comp.drawAcrylic(r, rad, theme::kShellTint, 0.86f, theme::kShellBorder, float(opacity));
+        // The app's own icon, sized to the tile: it starts exactly where the
+        // desktop icon was and ends as a large app glyph, exactly like iOS.
+        const int side = std::max(24, int(std::min(r.w, r.h) * 0.42));
+        const Rect box{r.x + (r.w - side) / 2, r.y + (r.h - side) / 2 - side / 8, side, side};
+        if (!drawAppIcon(box, a.icon, std::string(), rad * 0.6f, float(opacity)) &&
+            !drawAppIcon(box, a.name, std::string(), rad * 0.6f, float(opacity))) {
+            drawAppTile(box, a.name, rad * 0.6f, tileTint(a.name), false);
+        }
+        const std::string label = ellipsize(text, a.name, 15, std::max(40, r.w - 48));
+        drawTextCentered(label, 15, Weight::Medium, theme::kText,
+                         Rect{r.x, box.bottom() + 14, r.w, 24});
     }
 }
 
@@ -304,10 +424,13 @@ void Manager::drawClientSprite(Client* c) {
     double scale = 1.0;
 
     if (c->appear < 1.0) {
-        // Open: grow the last few percent while fading in (Fluent motion).
+        // Open: grow the last few percent while fading in (Fluent motion). A
+        // window born from a launch placeholder keeps its size so it is exactly
+        // the same size as the tile it is cross-fading with -- only the opacity
+        // does the transition.
         const double t = fluentEase(c->appear);
         opacity *= 0.25 + 0.75 * t;
-        scale = 0.93 + 0.07 * t;
+        scale = c->fromLaunch ? 1.0 : 0.93 + 0.07 * t;
     }
     // Magic lamp: while minimising (or restoring) the GPU warps the content
     // into its taskbar icon, so the frame geometry is left alone and only the

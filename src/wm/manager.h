@@ -169,6 +169,10 @@ struct Client {
     double animStart = 0.0;
     int animMs = metrics::kAnimMs;
     double attentionPulse = 0.0;
+    // Opened from a desktop icon's launch placeholder: the placeholder already
+    // supplies the reveal, so the usual zoom-in scale would only fight it and
+    // make the window a slightly different size from the tile it replaces.
+    bool fromLaunch = false;
     bool closing = false;
     double closeDeadline = 0.0;
 };
@@ -377,7 +381,29 @@ private:
     void drawDesktopIcons();
     // Returns true when the press landed on an icon (and was consumed).
     bool handleDesktopPress(int x, int y, Time time);
-    void openDesktopItem(const DesktopItem& item);
+    void openDesktopItem(const DesktopItem& item, const Rect& fromIcon);
+
+    // ---- app launch animation (desktop icon -> window, iOS style)
+    // Double-clicking a desktop icon grows a placeholder tile out of the icon
+    // and into the window the app will open, so the launch feels instant even
+    // while the process is still starting. When the real window finally maps it
+    // morphs out of the tile instead of popping in.
+    struct LaunchAnim {
+        Rect from;    // the desktop icon it grew out of
+        Rect to;      // the window rect it settles into
+        Rect rect;    // current animated rect
+        std::string icon;
+        std::string name;
+        double start = 0.0;
+        double ms = 0.0;
+        Client* client = nullptr;  // the real window, once it maps
+        double claimStart = 0.0;
+    };
+    std::vector<LaunchAnim> launches;
+    void beginLaunchAnim(const DesktopItem& item, const Rect& fromIcon);
+    void claimLaunch(Client* c);            // hand a fresh window its launch tile
+    void tickLaunches(double now, double dtMs);
+    void drawLaunches();
 
     // ---- desktop widgets (widgets.cpp)
     void initWidgets();                       // default clock + battery
@@ -481,8 +507,6 @@ private:
     std::vector<Rect> desktopIconDraw;   // shown cells, eased toward the targets
     int hoverDesktopIcon = -1;
     int selectedDesktopIcon = -1;
-    int lastDesktopClick = -1;
-    Time lastDesktopClickTime = 0;
 
     std::vector<AppEntry> apps;
     std::string searchText;

@@ -480,6 +480,9 @@ void Manager::tickAnimations(double now) {
     // reflowed the layout (added, removed, dragged or resized).
     animateDesktopIconReflow(dtMs);
 
+    // App launch placeholders (desktop icon growing into the app's window).
+    tickLaunches(now, dtMs);
+
     // Everything else the shell shows: hover washes, selections, flyouts and the
     // snap preview all ease rather than toggle.
     tickFluidMotion(dtMs);

@@ -46,6 +46,9 @@ void Manager::onMapRequest(XMapRequestEvent& ev) {
     if (c->closing) return;
     if (!known) placeNewClient(c);
     mapClient(c);
+    // If the user launched this from a desktop icon, grow the window out of that
+    // placeholder rather than letting it pop in on top of it.
+    if (!known) claimLaunch(c);
     focusClient(c, true);
 }
 
@@ -885,10 +888,10 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
     handleChromePress(x, y, button, time);
 }
 
-// A desktop icon behaves the way Windows' does: the first click selects, a
-// second click on the same icon within the double click window opens it, and a
-// click on bare wallpaper clears the selection.
+// A desktop icon opens on a single click, the way a launcher should; a click on
+// bare wallpaper clears the selection.
 bool Manager::handleDesktopPress(int x, int y, Time time) {
+    (void)time;
     // Test what the user actually sees: mid-reflow the shown cells are the
     // eased positions, not the settled grid targets.
     const std::vector<Rect>& hit =
@@ -896,23 +899,20 @@ bool Manager::handleDesktopPress(int x, int y, Time time) {
     for (size_t i = 0; i < hit.size(); ++i) {
         if (!hit[i].contains(x, y)) continue;
         const int index = int(i);
-        const bool doubleClick = lastDesktopClick == index && time >= lastDesktopClickTime &&
-                                 time - lastDesktopClickTime < 400;
-        lastDesktopClick = index;
-        lastDesktopClickTime = time;
         selectedDesktopIcon = index;
         hoverDesktopIcon = index;
-        if (doubleClick && index < int(desktopItems.size())) {
-            lastDesktopClick = -1;
-            selectedDesktopIcon = -1;
-            openDesktopItem(desktopItems[size_t(index)]);
+        if (index < int(desktopItems.size())) {
+            // Grow the placeholder out of the icon's own glyph, not its cell, so
+            // the animation starts exactly where the user clicked.
+            const Rect cell = hit[i];
+            const Rect fromIcon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
+            openDesktopItem(desktopItems[size_t(index)], fromIcon);
         }
         dirty = true;
         return true;
     }
     if (selectedDesktopIcon >= 0) {
         selectedDesktopIcon = -1;
-        lastDesktopClick = -1;
         dirty = true;
     }
     return false;
@@ -921,7 +921,10 @@ bool Manager::handleDesktopPress(int x, int y, Time time) {
 // Opens one desktop item: a launcher runs its Exec, anything else is handed to
 // the session's default handler (xdg-open), so folders open in the file manager
 // and files in whatever the desktop is configured to use.
-void Manager::openDesktopItem(const DesktopItem& item) {
+void Manager::openDesktopItem(const DesktopItem& item, const Rect& fromIcon) {
+    // iOS-style launch: the icon starts growing into a window tile right away, so
+    // the double-click feels answered before the process has even been forked.
+    beginLaunchAnim(item, fromIcon);
     if (!item.exec.empty()) {
         launchApp(item.exec);
         return;
