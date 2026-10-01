@@ -427,9 +427,20 @@ void Manager::onKeyPress(XKeyEvent& ev) {
             runShortcut(sym, mods);
             return;
         }
+        // Left/Right flip Launchpad pages.
+        if (sym == XK_Left || sym == XK_Right) {
+            const int next = startPage + (sym == XK_Right ? 1 : -1);
+            if (next >= 0 && next < startPageCount) {
+                startPage = next;
+                layoutStartMenu();
+                dirty = true;
+            }
+            return;
+        }
         if (sym == XK_BackSpace) {
             if (!searchText.empty()) {
                 searchText.pop_back();
+                startPage = 0;
                 layoutStartMenu();
                 dirty = true;
             }
@@ -444,6 +455,7 @@ void Manager::onKeyPress(XKeyEvent& ev) {
         }
         if (printable) {
             searchText.append(buf, size_t(n));
+            startPage = 0;
             layoutStartMenu();
             dirty = true;
         }
@@ -778,17 +790,36 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
         return;
     }
     if (startOpen) {
+        // The wheel flips Launchpad pages.
+        if (button == Button4 || button == Button5) {
+            const int next = startPage + (button == Button5 ? 1 : -1);
+            if (next >= 0 && next < startPageCount) {
+                startPage = next;
+                layoutStartMenu();
+                dirty = true;
+            }
+            return;
+        }
         if (button == Button1) {
+            for (size_t p = 0; p < appDotRects.size(); ++p) {
+                if (!appDotRects[p].contains(x, y)) continue;
+                startPage = int(p);
+                layoutStartMenu();
+                dirty = true;
+                return;
+            }
             for (size_t i = 0; i < appRects.size(); ++i) {
                 if (!appRects[i].contains(x, y)) continue;
-                if (i < appFiltered.size() && appFiltered[i] < apps.size()) {
-                    launchApp(apps[appFiltered[i]].exec);
+                const size_t gi = startPageBase + i;
+                if (gi < appFiltered.size() && appFiltered[gi] < apps.size()) {
+                    launchApp(apps[appFiltered[gi]].exec);
                 }
                 closeOverlays();
                 return;
             }
-            if (startRect.contains(x, y)) return;  // a click inside the panel
+            if (searchRect.contains(x, y)) return;  // focus stays in the field
         }
+        // Anywhere else (the empty backdrop) dismisses, like macOS.
         closeOverlays();
         return;
     }

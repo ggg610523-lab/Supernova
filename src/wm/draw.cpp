@@ -412,26 +412,69 @@ void Manager::drawSnapPreview() {
 void Manager::layoutStartMenu() {
     appFiltered.clear();
     appRects.clear();
+    appDotRects.clear();
+    startPageBase = 0;
+    startPageSize = 0;
     for (size_t i = 0; i < apps.size(); ++i) {
         if (!searchText.empty() && !containsFold(apps[i].searchKey, searchText)) continue;
         appFiltered.push_back(i);
     }
-    const int w = std::min(screenW - 24, metrics::kStartW);
-    const int h = std::min(screenH - metrics::kTaskbarH - 24, metrics::kStartH);
-    startRect = Rect{(screenW - w) / 2, screenH - metrics::kTaskbarH - 12 - h, w, h};
-    searchRect = Rect{startRect.x + 24, startRect.y + 24, w - 48, 36};
 
-    const int cols = screenW < 560 ? 4 : 6;
-    const int cellW = (w - 48) / cols;
-    const int cellH = 70;
+    // The launcher owns everything above the taskbar; the taskbar stays put so
+    // its Start button can still toggle it.
+    const int taskbarTop = screenH - metrics::kTaskbarH;
+    startRect = Rect{0, 0, screenW, taskbarTop};
+
+    // Top-centred search field, like macOS Launchpad.
+    const int sw = std::min(400, screenW - 48);
+    const int sh = 34;
+    const int sy = std::max(18, taskbarTop / 14);
+    searchRect = Rect{(screenW - sw) / 2, sy, sw, sh};
+
+    // Grid: big squircles with a name under each, centred between the search
+    // field and the page dots.
+    const int icon = std::clamp(std::min(screenW, screenH) / 16, metrics::kLaunchIconMin,
+                                metrics::kLaunchIcon);
+    const int cellW = icon + icon / 2 + 24;
+    const int cellH = icon + metrics::kLaunchLabelH + metrics::kLaunchRowGap;
+    const int marginX = std::max(24, screenW / 12);
+    const int cols = std::max(3, std::min(7, (screenW - 2 * marginX) / cellW));
+
     const int gridTop = searchRect.bottom() + 22;
-    const int maxRows = std::max(1, (startRect.bottom() - gridTop - 12) / cellH);
-    const size_t maxTiles = size_t(cols) * size_t(maxRows);
-    for (size_t i = 0; i < appFiltered.size() && i < maxTiles; ++i) {
+    const int gridBottom = taskbarTop - metrics::kLaunchDotsH;
+    const int rows = std::max(1, (gridBottom - gridTop) / cellH);
+    startPageSize = size_t(cols) * size_t(rows);
+
+    const size_t total = appFiltered.size();
+    startPageCount = std::max(1, int((total + startPageSize - 1) / startPageSize));
+    if (startPage >= startPageCount) startPage = startPageCount - 1;
+    if (startPage < 0) startPage = 0;
+    startPageBase = size_t(startPage) * startPageSize;
+
+    // Centre the grid block; a short last page stays top-aligned inside it,
+    // exactly like Launchpad.
+    const int gridW = cols * cellW;
+    const int gridH = rows * cellH;
+    const int gx = (screenW - gridW) / 2;
+    const int gy = gridTop + ((gridBottom - gridTop) - gridH) / 2;
+    const size_t base = startPageBase;
+    const size_t onPage = total > base ? std::min(startPageSize, total - base) : 0;
+    for (size_t i = 0; i < onPage; ++i) {
         const int cx = int(i) % cols;
         const int cy = int(i) / cols;
-        appRects.push_back(Rect{startRect.x + 24 + cx * cellW, gridTop + cy * cellH, cellW - 8,
-                                cellH - 8});
+        appRects.push_back(Rect{gx + cx * cellW, gy + cy * cellH, cellW, cellH});
+    }
+
+    // Page dots, only with more than one page and while not searching (a search
+    // is always a single short list).
+    if (startPageCount > 1 && searchText.empty()) {
+        const int gap = 18;
+        const int span = (startPageCount - 1) * gap;
+        const int dx = (screenW - span) / 2;
+        const int dy = taskbarTop - metrics::kLaunchDotsH / 2 - 2;
+        for (int p = 0; p < startPageCount; ++p) {
+            appDotRects.push_back(Rect{dx + p * gap - 7, dy - 7, 14, 14});
+        }
     }
 }
 
@@ -440,42 +483,70 @@ void Manager::drawStartMenu() {
     const double eased = fluentEase(startAnim);
     if (eased <= 0.001) return;
     const float a = float(eased);
-    const int rise = int(std::lround((1.0 - eased) * 24.0));
-    const Rect panel{startRect.x, startRect.y + rise, startRect.w, startRect.h};
 
-    comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kFlyoutTint, 0.88f,
-                     theme::kShellBorder, a);
+    // Full-screen blurred wallpaper, darkened the way macOS dims the desktop.
+    comp.drawAcrylic(startRect, 0.f, theme::kLaunchTint, 0.16f, Color{0.f, 0.f, 0.f, 0.f}, a);
+    comp.drawRect(startRect, 0.f, theme::kLaunchDim, a);
 
-    const Rect search{searchRect.x, searchRect.y + rise, searchRect.w, searchRect.h};
-    comp.drawRect(search, 6.f, theme::kSearchBox, a);
-    drawSearchGlyph(Rect{search.x + 10, search.y, 20, search.h}, theme::kTextMuted);
-    const int textY = search.y + (search.h - 18) / 2;
-    if (searchText.empty()) {
-        drawTextAt("Search apps and settings", 13, Weight::Regular, theme::kTextDim,
-                   search.x + 34, textY);
-    } else {
-        drawTextAt(searchText, 13, Weight::Regular, theme::kText, search.x + 34, textY);
-    }
-
-    drawTextAt(searchText.empty() ? "Pinned" : "Best match", 12, Weight::Bold, theme::kTextMuted,
-               startRect.x + 24, searchRect.bottom() + 22 + rise);
-
-    for (size_t i = 0; i < appRects.size() && i < appFiltered.size(); ++i) {
-        Rect cell = appRects[i];
-        cell.y += rise;
-        if (cell.bottom() > panel.bottom()) break;
-        const AppEntry& e = apps[appFiltered[i]];
-        if (int(i) == hoverApp) comp.drawRect(cell, 5.f, theme::kItemHover, a);
-        const Rect icon{cell.x + (cell.w - 36) / 2, cell.y + 4, 36, 36};
-        if (!drawAppIcon(icon, e.icon, e.wmClass, 6.f, a)) {
-            drawAppTile(icon, e.name, 7.f, tileTint(e.name), false);
+    // Top-centred search pill.
+    comp.drawRect(searchRect, float(searchRect.h) * 0.5f, theme::kLaunchSearch, a);
+    drawSearchGlyph(Rect{searchRect.x + 12, searchRect.y, searchRect.h, searchRect.h},
+                    theme::kLaunchSearchText);
+    {
+        const std::string label = searchText.empty() ? std::string("Search") : searchText;
+        const Color col = searchText.empty() ? theme::kLaunchSearchText : theme::kText;
+        const TextTex t = text.get(label, 14, Weight::Regular);
+        if (t.tex) {
+            comp.drawText(t, Rect{searchRect.x + searchRect.h - 2,
+                                  searchRect.y + (searchRect.h - t.h) / 2, t.w, t.h},
+                          col, a);
         }
-        drawTextCentered(ellipsize(text, e.name, 11, cell.w - 8), 11, Weight::Regular, theme::kText,
-                         Rect{cell.x, icon.bottom() + 4, cell.w, 18});
     }
-    if (appRects.empty()) {
-        drawTextCentered("No apps match your search", 13, Weight::Regular, theme::kTextMuted,
-                         Rect{startRect.x, startRect.y + rise + 110, startRect.w, 40});
+
+    // Icons. During the open they scale up about their own centres, which never
+    // moves the hit rects (those stay the cells computed by layoutStartMenu).
+    const float pop = 0.90f + 0.10f * float(eased);
+    const int slot = std::clamp(std::min(screenW, screenH) / 16, metrics::kLaunchIconMin,
+                                metrics::kLaunchIcon);
+    for (size_t i = 0; i < appRects.size() && i < appFiltered.size(); ++i) {
+        const Rect cell = appRects[i];
+        const AppEntry& e = apps[appFiltered[startPageBase + i]];
+        const int drawn = int(std::lround(slot * pop));
+        const int ix = cell.x + (cell.w - drawn) / 2;
+        const int iy = cell.y + (slot - drawn) / 2;
+        const Rect box{ix, iy, drawn, drawn};
+        if (int(i) == hoverApp) {
+            const int pad = std::max(4, drawn / 8);
+            comp.drawRect(Rect{ix - pad, iy - pad, drawn + 2 * pad, drawn + 2 * pad},
+                          float(drawn) * 0.30f, theme::kLaunchHover, a);
+        }
+        if (!drawAppIcon(box, e.icon, e.wmClass, float(drawn) * 0.24f, a)) {
+            drawAppTile(box, e.name, float(drawn) * 0.24f, tileTint(e.name), false);
+        }
+        const TextTex t = text.get(ellipsize(text, e.name, 12, cell.w - 12), 12, Weight::Regular);
+        if (!t.tex) continue;
+        const int lx = cell.x + (cell.w - t.w) / 2;
+        const int ly = cell.y + slot + 6;
+        // A one pixel shadow keeps the white label legible over a light patch.
+        comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, theme::kLaunchLabelShadow, a);
+        comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kLaunchLabel, a);
+    }
+
+    if (appFiltered.empty()) {
+        drawTextCentered("No apps match \u201c" + searchText + "\u201d", 15, Weight::Regular,
+                         theme::kLaunchSearchText,
+                         Rect{0, searchRect.bottom() + 40, screenW, 40});
+    }
+
+    // Page dots.
+    for (size_t p = 0; p < appDotRects.size(); ++p) {
+        const bool active = int(p) == startPage;
+        const bool hot = int(p) == startHoverDot;
+        const int r = active ? 4 : 3;
+        const Rect& d = appDotRects[p];
+        const int cx = d.x + d.w / 2, cy = d.y + d.h / 2;
+        comp.drawRect(Rect{cx - r, cy - r, 2 * r, 2 * r}, float(r),
+                      (active || hot) ? theme::kLaunchDotActive : theme::kLaunchDot, a);
     }
 }
 

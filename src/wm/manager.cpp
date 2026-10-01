@@ -619,6 +619,19 @@ void Manager::updateHoverStates(int px, int py) {
             hoverApp = newApp;
             changed = true;
         }
+        int newDot = -1;
+        if (newApp < 0) {
+            for (size_t p = 0; p < appDotRects.size(); ++p) {
+                if (appDotRects[p].contains(px, py)) {
+                    newDot = int(p);
+                    break;
+                }
+            }
+        }
+        if (newDot != startHoverDot) {
+            startHoverDot = newDot;
+            changed = true;
+        }
     }
 
     if (ccOpen) {
@@ -638,6 +651,8 @@ void Manager::updateHoverStates(int px, int py) {
     int wantedCursor = edge ? edgeCursorKind(edge) : (overTaskbar ? 5 : 0);
     // A Control Centre control is a button, so it gets the hand cursor.
     if (ccOpen && ccHover >= 0 && size_t(ccHover) < ccControls.size()) wantedCursor = 5;
+    // Launchpad tiles and page dots are clickable too.
+    if (startOpen && (hoverApp >= 0 || startHoverDot >= 0)) wantedCursor = 5;
     if (wantedCursor != cursorShown) setCursor(wantedCursor);
 
     // Caption buttons: the top-most window whose frame covers the point wins.
@@ -702,6 +717,8 @@ void Manager::closeOverlays() {
     altTabIndex = 0;
     searchText.clear();
     hoverApp = -1;
+    startHoverDot = -1;
+    startPage = 0;
     contextClient = nullptr;
     contextItems.clear();
     ccHover = -1;
@@ -1290,6 +1307,8 @@ void Manager::openStartMenu() {
     startOpen = true;
     searchText.clear();
     hoverApp = -1;
+    startHoverDot = -1;
+    startPage = 0;
     layoutStartMenu();
     grabPointer();
     XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);

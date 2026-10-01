@@ -98,6 +98,20 @@ inline constexpr Color kCcSliderTrack = rgb(0xFFFFFF, 0.16f);
 inline constexpr Color kCcSliderFill = rgb(0xFFFFFF, 0.92f);
 inline constexpr Color kCcLabel = rgb(0xFFFFFF, 0.70f);
 
+// --- Launchpad (macOS) ----------------------------------------------------
+// A full-screen blurred wallpaper with large squircles, a top search pill and
+// page dots. Deliberately its own skin: white labels on the photo, no Fluent
+// panel chrome.
+inline constexpr Color kLaunchTint = rgb(0x14141A, 1.0f);      // acrylic tint over the blur
+inline constexpr Color kLaunchDim = rgb(0x000000, 0.26f);      // extra darkening wash
+inline constexpr Color kLaunchSearch = rgb(0xFFFFFF, 0.16f);   // search field pill
+inline constexpr Color kLaunchSearchText = rgb(0xFFFFFF, 0.60f);
+inline constexpr Color kLaunchLabel = rgb(0xFFFFFF, 0.95f);
+inline constexpr Color kLaunchLabelShadow = rgb(0x000000, 0.60f);
+inline constexpr Color kLaunchHover = rgb(0xFFFFFF, 0.10f);
+inline constexpr Color kLaunchDot = rgb(0xFFFFFF, 0.32f);
+inline constexpr Color kLaunchDotActive = rgb(0xFFFFFF, 0.95f);
+
 }  // namespace theme
 
 namespace metrics {
@@ -134,6 +148,13 @@ constexpr int kCcButton = 64;     // circular inner button diameter
 constexpr int kCcSliderRadius = 22;  // brightness / volume pill corners
 constexpr int kCcPanelRadius = 22;
 constexpr int kCcMaxScale = 100;  // percent; shrinks to fit small screens
+
+// --- Launchpad (macOS) ----------------------------------------------------
+constexpr int kLaunchIcon = 64;      // app icon edge at 100%
+constexpr int kLaunchIconMin = 46;   // floor when the screen is small
+constexpr int kLaunchRowGap = 20;    // vertical gap between icon rows
+constexpr int kLaunchLabelH = 18;    // label strip under each icon
+constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
 
 }  // namespace metrics
 

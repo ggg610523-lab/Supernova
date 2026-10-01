@@ -445,9 +445,15 @@ private:
     std::vector<AppEntry> apps;
     std::string searchText;
     Rect startRect, searchRect;
-    std::vector<Rect> appRects;
+    std::vector<Rect> appRects;      // cells of the *current* page
     std::vector<size_t> appFiltered;
+    std::vector<Rect> appDotRects;   // page-indicator hit targets
     int hoverApp = -1;
+    int startHoverDot = -1;
+    int startPage = 0;
+    int startPageCount = 1;
+    size_t startPageBase = 0;        // filtered index of appRects[0]
+    size_t startPageSize = 0;        // cells per page
     std::vector<Rect> taskViewRects;
     Time lastClickTime = 0;
     Client* lastClickClient = nullptr;
