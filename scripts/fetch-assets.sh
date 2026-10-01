@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Fetches the two bundled assets the shell uses by default and renders them into
+# Fetches the bundled assets the shell uses by default and renders them into
 # assets/ so win11wm has no runtime dependency on git, rsvg or a font
 # installation:
 #
 #   assets/fonts/MuternVF.ttf            the UI font (variable, wght axis)
 #   assets/icons/<name>.png              Reversal icon theme, rasterised flat
+#   assets/wallpaper/wallpaper.png       the background photo, transcoded
 #
 # Everything here is idempotent and skips work that is already done. Nothing is
 # installed outside this checkout and no font cache is touched.
@@ -12,13 +13,14 @@
 # Usage:
 #   scripts/fetch-assets.sh              fetch what is missing
 #   scripts/fetch-assets.sh --force      re-download and re-render everything
-#   scripts/fetch-assets.sh --icons-only / --fonts-only
+#   scripts/fetch-assets.sh --icons-only / --fonts-only / --wallpaper-only
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETS="${WIN11WM_ASSETS:-$REPO_ROOT/assets}"
 ICONS="$ASSETS/icons"
 FONTS="$ASSETS/fonts"
+WALLPAPER="$ASSETS/wallpaper"
 
 REVERSAL_REPO="https://github.com/yeyushengfan258/Reversal-icon-theme.git"
 REVERSAL_REF="master"
@@ -47,12 +49,14 @@ ALIASES=(
 FORCE=0
 WANT_ICONS=1
 WANT_FONTS=1
+WANT_WALLPAPER=1
 for arg in "$@"; do
   case "$arg" in
     --force) FORCE=1 ;;
-    --icons-only) WANT_FONTS=0 ;;
-    --fonts-only) WANT_ICONS=0 ;;
-    -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --icons-only) WANT_FONTS=0; WANT_WALLPAPER=0 ;;
+    --fonts-only) WANT_ICONS=0; WANT_WALLPAPER=0 ;;
+    --wallpaper-only) WANT_ICONS=0; WANT_FONTS=0 ;;
+    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -310,14 +314,71 @@ fetch_fonts() {
   say "font: MuternVF.ttf -> $target"
 }
 
+# ------------------------------------------------------------------ wallpaper
+# The background photo ships as a JPEG, but the shell only reads PNG (see
+# src/wm/png.cpp), so it is transcoded once into wallpaper.png. The long edge is
+# capped: the shell uploads this straight to a GPU texture, and the 7680x4320
+# original would cost ~130MB of VRAM for no visible gain.
+wallpaper_source() {
+  local f
+  for f in "$WALLPAPER"/wallpaper.* "$WALLPAPER"/*.jpg "$WALLPAPER"/*.jpeg \
+           "$WALLPAPER"/*.png; do
+    [[ -f "$f" || -L "$f" ]] || continue
+    [[ "${f##*/}" == wallpaper.png* ]] && continue  # our own output
+    printf '%s\n' "$f"
+    return 0
+  done
+  return 1
+}
+
+fetch_wallpaper() {
+  local src; src="$(wallpaper_source || true)"
+  if [[ -z "$src" ]]; then
+    say "wallpaper: no source image in $WALLPAPER"
+    return 0
+  fi
+  local out="$WALLPAPER/wallpaper.png"
+  if [[ -s "$out" && $FORCE -eq 0 && "$out" -nt "$src" ]]; then
+    say "wallpaper: already up to date"
+    return 0
+  fi
+
+  # The temp name keeps a .png suffix (and the writers are told PNG explicitly)
+  # so ImageMagick cannot silently encode the JPEG into our output file.
+  local max=3840 ok=0 tmp="$out.tmp.png"
+  if have magick; then
+    magick "$src" -auto-orient -resize "${max}x${max}>" -strip "PNG:$tmp" 2>/dev/null && ok=1
+  elif have convert; then
+    convert "$src" -auto-orient -resize "${max}x${max}>" -strip "PNG:$tmp" 2>/dev/null && ok=1
+  elif have ffmpeg; then
+    ffmpeg -y -loglevel error -i "$src" \
+           -vf "scale='min($max,iw)':-2" -frames:v 1 "$tmp" 2>/dev/null && ok=1
+  fi
+
+  # Guard the actual bytes, not just the exit status: a JPEG renamed .png would
+  # defeat the whole point of transcoding.
+  if [[ $ok -eq 0 || ! -s "$tmp" ]] ||
+     [[ "$(head -c 8 "$tmp" | od -An -tx1 | tr -d ' \n')" != "89504e470d0a1a0a" ]]; then
+    rm -f "$tmp"
+    say "warning: could not convert $src to PNG (need ImageMagick or ffmpeg);"
+    say "         the shell will fall back to its procedural wallpaper"
+    return 1
+  fi
+  mv -f "$tmp" "$out"
+  say "wallpaper: $src -> $out"
+}
+
 if [[ $WANT_FONTS -eq 1 ]]; then fetch_fonts || true; fi
 if [[ $WANT_ICONS -eq 1 ]]; then fetch_icons || true; fi
+if [[ $WANT_WALLPAPER -eq 1 ]]; then fetch_wallpaper || true; fi
 
-# A stamp lets run.sh skip this entirely on every later start.
-if [[ -s "$FONTS/MuternVF.ttf" || -d "$ICONS" ]]; then
-  printf 'fonts=%s\nicons=%s\n' \
+# A stamp lets run.sh skip this entirely on every later start. `wallpaper=` is
+# tracked explicitly so run.sh can notice a checkout made before it existed.
+if [[ -s "$FONTS/MuternVF.ttf" || -d "$ICONS" || -d "$WALLPAPER" ]]; then
+  printf 'fonts=%s\nicons=%s\nwallpaper=%s\n' \
     "$([[ -s "$FONTS/MuternVF.ttf" ]] && echo ok || echo missing)" \
     "$(find "$ICONS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ')" \
+    "$([[ -s "$WALLPAPER/wallpaper.png" ]] && echo ok || echo missing)" \
     > "$ASSETS/.stamp"
 fi
 say "done"

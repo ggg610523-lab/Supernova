@@ -64,7 +64,61 @@ void Manager::render() {
     if (opts->stats) drawStats();
 }
 
-void Manager::drawDesktop() { comp.drawWallpaper(); }
+// The desktop grid lays out top-to-bottom and then starts a new column to the
+// right, which is the order Windows fills its desktop in.
+void Manager::layoutDesktopIcons() {
+    desktopIconRects.clear();
+    const int cellW = 92, cellH = 92, gapX = 6, gapY = 2;
+    const int marginX = 10, marginY = 10;
+    const int usableH = screenH - metrics::kTaskbarH - marginY;
+    const int rows = std::max(1, (usableH + gapY) / (cellH + gapY));
+    for (size_t i = 0; i < desktopItems.size(); ++i) {
+        const int col = int(i) / rows;
+        const int row = int(i) % rows;
+        desktopIconRects.push_back(Rect{marginX + col * (cellW + gapX),
+                                        marginY + row * (cellH + gapY), cellW, cellH});
+    }
+}
+
+// Everything sitting on the user's Desktop folder: a folder, a dropped file or
+// a .desktop launcher. A click selects, a double click opens (input.cpp).
+void Manager::drawDesktopIcons() {
+    if (desktopIconRects.size() != desktopItems.size()) layoutDesktopIcons();
+    for (size_t i = 0; i < desktopItems.size() && i < desktopIconRects.size(); ++i) {
+        const DesktopItem& item = desktopItems[i];
+        const Rect cell = desktopIconRects[i];
+        const bool selected = int(i) == selectedDesktopIcon;
+        const bool hovered = int(i) == hoverDesktopIcon;
+        if (selected || hovered) {
+            const Color fill =
+                selected ? Color{theme::kAccent.r, theme::kAccent.g, theme::kAccent.b, 0.30f}
+                         : theme::kItemHover;
+            comp.drawRect(Rect{cell.x + 2, cell.y + 2, cell.w - 4, cell.h - 4}, 6.f, fill);
+        }
+        const Rect icon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
+        // The item's own icon first, then a generic one, then a letter tile.
+        const char* fallback = item.isDir ? "folder" : "text-plain";
+        if (!drawAppIcon(icon, item.icon, std::string(), 6.f, 1.0f) &&
+            !drawAppIcon(icon, fallback, std::string(), 6.f, 1.0f)) {
+            drawAppTile(icon, item.name, 8.f, tileTint(item.name), hovered);
+        }
+        const std::string label = ellipsize(text, item.name, 11, cell.w - 8);
+        if (label.empty()) continue;
+        const TextTex t = text.get(label, 11, Weight::Regular);
+        if (!t.tex) continue;
+        const int lx = cell.x + (cell.w - t.w) / 2;
+        const int ly = icon.bottom() + 6;
+        // Desktop labels sit on a photo, so a one pixel dark drop shadow keeps
+        // them legible over a light patch of wallpaper.
+        comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.65f}, 1.0f);
+        comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kText, 1.0f);
+    }
+}
+
+void Manager::drawDesktop() {
+    comp.drawWallpaper();
+    drawDesktopIcons();
+}
 
 void Manager::drawTextAt(const std::string& s, int px, Weight w, const Color& c, int x, int y) {
     if (s.empty()) return;

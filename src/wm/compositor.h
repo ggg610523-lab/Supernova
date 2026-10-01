@@ -64,9 +64,10 @@ public:
     Compositor& operator=(const Compositor&) = delete;
 
     // Creates the overlay window and the GL context. `width`/`height` are the
-    // screen size; `wantVsync` requests a swap interval of 1.
+    // screen size; `wantVsync` requests a swap interval of 1. `wallpaperPath` is
+    // the background PNG (may be empty: the procedural backdrop is used then).
     bool init(Display* dpy, int screen, int width, int height, bool wantVsync,
-              std::string* error);
+              const std::string& wallpaperPath, std::string* error);
     void shutdown();
 
     bool ready() const { return ready_; }
@@ -153,7 +154,9 @@ private:
     GLint uBlurDir_ = -1, uWallRes_ = -1;
     float proj_[16] = {};
 
-    // Wallpaper plus its blurred half-resolution copy (the acrylic source).
+    // Wallpaper (a decoded photo when one is available, otherwise the
+    // procedural bake) plus its blurred half-resolution acrylic source.
+    std::string wallpaperPath_;
     GLuint wallTex_ = 0, wallFbo_ = 0;
     GLuint halfA_ = 0, halfB_ = 0;
     GLuint halfFboA_ = 0, halfFboB_ = 0;

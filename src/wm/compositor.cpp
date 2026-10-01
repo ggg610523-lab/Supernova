@@ -1,7 +1,10 @@
 #include "compositor.h"
 
+#include "png.h"
+
 #include <X11/extensions/Xcomposite.h>
 
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -302,6 +305,39 @@ bool linkProgram(const char* vsSrc, const char* fsSrc, GLuint* out, std::string*
     return true;
 }
 
+// Centre-crops a decoded image to `outW:outH`'s aspect ratio, so a 16:9 photo
+// fills a 16:10 screen the way Windows' "Fill" does rather than stretching. The
+// cropped texture is then drawn straight onto the screen, which also keeps the
+// blurred acrylic/Mica source in the same geometry as what is displayed.
+void coverCrop(std::vector<unsigned char>* rgba, int* w, int* h, int outW, int outH) {
+    if (!rgba || !w || !h || *w <= 0 || *h <= 0 || outW <= 0 || outH <= 0) return;
+    const double src = double(*w) / double(*h);
+    const double dst = double(outW) / double(outH);
+    if (std::fabs(src - dst) < 1e-3) return;
+
+    int cw = *w, ch = *h, cx = 0, cy = 0;
+    if (src > dst) {  // too wide: keep full height, trim the sides
+        cw = int(std::lround(double(*h) * dst));
+        if (cw < 1) cw = 1;
+        if (cw > *w) cw = *w;
+        cx = (*w - cw) / 2;
+    } else {          // too tall: keep full width, trim top and bottom
+        ch = int(std::lround(double(*w) / dst));
+        if (ch < 1) ch = 1;
+        if (ch > *h) ch = *h;
+        cy = (*h - ch) / 2;
+    }
+
+    std::vector<unsigned char> out(size_t(cw) * size_t(ch) * 4u);
+    for (int y = 0; y < ch; ++y) {
+        const unsigned char* s = rgba->data() + (size_t(y + cy) * size_t(*w) + size_t(cx)) * 4u;
+        std::memcpy(out.data() + size_t(y) * size_t(cw) * 4u, s, size_t(cw) * 4u);
+    }
+    *rgba = std::move(out);
+    *w = cw;
+    *h = ch;
+}
+
 // Column major ortho with y pointing *down*, so screen pixels and GL pixels
 // agree (0,0 == top left, exactly like X11).
 void orthoMatrix(float* m, int w, int h) {
@@ -369,12 +405,13 @@ void Compositor::shutdown() {
 }
 
 bool Compositor::init(Display* dpy, int screen, int width, int height, bool wantVsync,
-                      std::string* error) {
+                      const std::string& wallpaperPath, std::string* error) {
     dpy_ = dpy;
     screen_ = screen;
     width_ = width > 1 ? width : 1;
     height_ = height > 1 ? height : 1;
     vsyncWanted_ = wantVsync;
+    wallpaperPath_ = wallpaperPath;
 
     int evBase = 0, errBase = 0;
     if (!XCompositeQueryExtension(dpy_, &evBase, &errBase)) {
@@ -397,19 +434,28 @@ GLXFBConfig Compositor::fbcForVisual(VisualID visualId, int depth) {
     }
     int n = 0;
     GLXFBConfig* cfgs = glXGetFBConfigs(dpy_, screen_, &n);
-    GLXFBConfig found = nullptr;
-    for (int i = 0; cfgs && i < n && !found; ++i) {
+    GLXFBConfig exact = nullptr, loose = nullptr;
+    for (int i = 0; cfgs && i < n; ++i) {
         int vid = 0, bufferSize = 0, bindRgb = 0, bindRgba = 0;
         if (glXGetFBConfigAttrib(dpy_, cfgs[i], GLX_VISUAL_ID, &vid) != 0) continue;
         if (VisualID(vid) != visualId) continue;
-        glXGetFBConfigAttrib(dpy_, cfgs[i], GLX_BUFFER_SIZE, &bufferSize);
         glXGetFBConfigAttrib(dpy_, cfgs[i], GLX_BIND_TO_TEXTURE_RGB_EXT, &bindRgb);
         glXGetFBConfigAttrib(dpy_, cfgs[i], GLX_BIND_TO_TEXTURE_RGBA_EXT, &bindRgba);
         if (!bindRgb && !bindRgba) continue;
-        if (depth > 0 && bufferSize != depth) continue;
-        found = cfgs[i];
+        // The visual id already pins the visual's depth, so the buffer size is
+        // only a preference. It has to be: Mesa exposes the depth 24 root
+        // visual (0x4d) exclusively through *32 bit* buffer configs -- the
+        // alpha channel rides in the extra byte -- so an exact depth match
+        // finds nothing and no window could ever be bound as a texture.
+        glXGetFBConfigAttrib(dpy_, cfgs[i], GLX_BUFFER_SIZE, &bufferSize);
+        if (!loose) loose = cfgs[i];
+        if (bufferSize == depth) {
+            exact = cfgs[i];
+            break;
+        }
     }
     if (cfgs) XFree(cfgs);
+    GLXFBConfig found = exact ? exact : loose;
     fbcCache_.emplace_back(visualId, found);
     return found;
 }
@@ -597,8 +643,11 @@ bool Compositor::buildShaders(std::string* error) {
     return true;
 }
 
-// Bakes the procedural wallpaper into a texture and derives the half resolution
-// blurred copy that every acrylic surface and every Mica caption samples.
+// Bakes the wallpaper into a texture and derives the half resolution blurred
+// copy that every acrylic surface and every Mica caption samples. The photo at
+// `wallpaperPath_` (assets/wallpaper/wallpaper.png, transcoded from the bundled
+// JPEG by scripts/fetch-assets.sh) wins when it decodes; the procedural shader
+// is the fallback, so a checkout without the asset still gets a background.
 bool Compositor::buildWallpaper(std::string* error) {
     const auto makeTexture = [this](GLuint* tex, int w, int h) {
         glGenTextures(1, tex);
@@ -616,23 +665,42 @@ bool Compositor::buildWallpaper(std::string* error) {
         *status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     };
 
-    makeTexture(&wallTex_, width_, height_);
     int status = 0;
-    makeFbo(&wallFbo_, wallTex_, &status);
-    if (status != GL_FRAMEBUFFER_COMPLETE) {
-        if (error) *error = "failed to create the wallpaper framebuffer";
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        return false;
-    }
+    std::vector<unsigned char> rgba;
+    int imgW = 0, imgH = 0;
+    const bool photo = !wallpaperPath_.empty() &&
+                       loadPng(wallpaperPath_, &rgba, &imgW, &imgH) && imgW > 0 && imgH > 0;
+    if (photo) {
+        // Fill the screen without distortion, then hand the pixels to the GPU.
+        coverCrop(&rgba, &imgW, &imgH, width_, height_);
+        uploadTexture(&wallTex_, rgba.data(), imgW, imgH);
+        if (!wallTex_) {
+            if (error) *error = "failed to upload the wallpaper texture";
+            return false;
+        }
+        log("wallpaper: %s (%dx%d)", wallpaperPath_.c_str(), imgW, imgH);
+    } else {
+        if (!wallpaperPath_.empty())
+            log("wallpaper: %s unreadable, using the procedural backdrop",
+                wallpaperPath_.c_str());
+        makeTexture(&wallTex_, width_, height_);
+        makeFbo(&wallFbo_, wallTex_, &status);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            if (error) *error = "failed to create the wallpaper framebuffer";
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return false;
+        }
 
-    glBindVertexArray(vao_);
-    glDisable(GL_BLEND);
-    glViewport(0, 0, width_, height_);
-    glUseProgram(wallProg_);
-    glUniformMatrix4fv(glGetUniformLocation(wallProg_, "uProj"), 1, GL_FALSE, proj_);
-    glUniform4f(glGetUniformLocation(wallProg_, "uRect"), 0.f, 0.f, float(width_), float(height_));
-    glUniform2f(uWallRes_, float(width_), float(height_));
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(vao_);
+        glDisable(GL_BLEND);
+        glViewport(0, 0, width_, height_);
+        glUseProgram(wallProg_);
+        glUniformMatrix4fv(glGetUniformLocation(wallProg_, "uProj"), 1, GL_FALSE, proj_);
+        glUniform4f(glGetUniformLocation(wallProg_, "uRect"), 0.f, 0.f, float(width_),
+                    float(height_));
+        glUniform2f(uWallRes_, float(width_), float(height_));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
 
     halfW_ = width_ / 2 > 1 ? width_ / 2 : 1;
     halfH_ = height_ / 2 > 1 ? height_ / 2 : 1;
@@ -698,6 +766,13 @@ bool Compositor::buildWallpaper(std::string* error) {
 bool Compositor::tfiBind(GLuint tex) {
     for (const auto& kv : bound_) {
         if (kv.first == tex) {
+            // glXBindTexImageEXT replaces the contents of *the texture that is
+            // currently bound on the active unit*, not of `tex`. Binding first
+            // is therefore mandatory: otherwise the client's pixels land in
+            // whatever was bound before -- in practice the wallpaper, which
+            // was why opening a window painted the app over the backdrop.
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
             glXBindTexImageEXT(dpy_, kv.second.glxPix, GLX_FRONT_EXT, nullptr);
             return true;
         }
@@ -742,6 +817,10 @@ GLuint Compositor::bindPixmap(Pixmap pixmap, VisualID visualId, int depth, int w
         glXDestroyPixmap(dpy_, glxPix);
         return 0;
     }
+    // Same reasoning as tfiBind(): the pixmap attaches to the texture bound on
+    // the active unit, so pin both before the bind/release pair that gives the
+    // texture its storage.
+    glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);

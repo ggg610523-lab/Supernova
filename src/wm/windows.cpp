@@ -182,11 +182,60 @@ void Manager::readWindowType(Client* c) {
     // are not decorated either.
     c->managed = !c->isDock && !c->isDesktop && !c->isMenu && !c->isSplash;
     c->captionH = c->managed ? metrics::kCaptionH : 0;
+    // Force a re-read: readDecorations() owns the frameless decision, and the
+    // caption height above just reset it.
+    c->frameless = false;
+    readDecorations(c);
     c->skipTaskbar = skipTaskbar || c->isDock || c->isDesktop;
     c->skipPager = skipPager || c->skipTaskbar;
     c->fullscreen = windowHasAtom(dpy, c->id, A.netWmState, A.stateFullscreen);
     c->maximizedH = windowHasAtom(dpy, c->id, A.netWmState, A.stateMaximizedHorz);
     c->maximizedV = windowHasAtom(dpy, c->id, A.netWmState, A.stateMaximizedVert);
+}
+
+void Manager::readDecorations(Client* c) {
+    if (!c) return;
+    struct PropMwmHints {
+        unsigned long flags;
+        unsigned long functions;
+        unsigned long decorations;
+        long input_mode;
+        unsigned long status;
+    };
+    constexpr unsigned long kHintsDecorations = 1L << 1;
+    constexpr unsigned long kDecorAll = 1L << 0;
+    constexpr unsigned long kDecorTitle = 1L << 3;
+
+    PropMwmHints hints{};
+    Atom type = None;
+    int format = 0;
+    unsigned long count = 0, after = 0;
+    unsigned char* data = nullptr;
+    if (XGetWindowProperty(dpy, c->id, A.motifHints, 0, 5, False, A.motifHints, &type, &format,
+                           &count, &after, &data) == Success &&
+        data && format == 32 && count >= 3) {
+        hints.flags = *reinterpret_cast<unsigned long*>(data);
+        hints.functions = *reinterpret_cast<unsigned long*>(data + sizeof(long));
+        hints.decorations = *reinterpret_cast<unsigned long*>(data + 2 * sizeof(long));
+    }
+    if (data) XFree(data);
+
+    // Only an explicit request counts. MWM_DECOR_ALL means "give me everything",
+    // so a window is frameless when it asks for decorations and clears both the
+    // catch-all and the title bar. This is what GTK does for undecorated
+    // windows (Electron, Tauri and Electrobun apps all draw their own title bar).
+    const bool wantsNone =
+        (hints.flags & kHintsDecorations) && (hints.decorations & (kDecorAll | kDecorTitle)) == 0;
+    const bool frameless = wantsNone && c->managed;
+
+    if (frameless == c->frameless) return;
+    c->frameless = frameless;
+    if (!c->fullscreen) c->captionH = frameless ? 0 : metrics::kCaptionH;
+    if (c->managed && c->mapped) {
+        applyFrame(c, true);
+        syncClientGeometry(c);
+    }
+    dirty = true;
 }
 
 void Manager::readNormalHints(Client* c) {

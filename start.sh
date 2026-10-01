@@ -74,8 +74,12 @@ command -v xdpyinfo >/dev/null || die "xdpyinfo is not installed"
 [[ -n "$HOST_DISPLAY" ]] || die "no host display: pass --host :0 or export DISPLAY"
 DISPLAY="$HOST_DISPLAY" xdpyinfo >/dev/null 2>&1 || die "cannot reach host display $HOST_DISPLAY"
 
+# NOTE: awk must drain the whole stream. Closing the pipe early (e.g. with
+# `exit`) would SIGPIPE xdpyinfo and, under `set -o pipefail -e`, abort the
+# script the moment the result is assigned to a variable.
 host_size() { DISPLAY="$HOST_DISPLAY" xdpyinfo 2>/dev/null |
-    awk '/dimensions:/ { print $2; exit }'; }
+    awk '/dimensions:/ && !found { width = $2; found = 1 }
+         END { if (found) print width }'; }
 
 # ------------------------------------------------------------------ arguments
 xwayland_args=()
@@ -187,10 +191,17 @@ if ! wait_for_server; then
 fi
 
 nestsize() { DISPLAY=":$DISPLAY_NUM" xdpyinfo 2>/dev/null |
-    awk '/dimensions:/ { print $2; exit }'; }
+    awk '/dimensions:/ && !found { width = $2; found = 1 }
+         END { if (found) print width }'; }
 
 # ----------------------------------------------------------------- start wm #
-DISPLAY=":$DISPLAY_NUM" WIN11WM_ASSETS="$ASSETS" "$WM_BIN" "${WM_ARGS[@]}" &
+# Clients must talk X11 to this private server. A Wayland session in the parent
+# environment would otherwise win: toolkits (kitty, GTK, Qt) probe
+# $WAYLAND_DISPLAY first and the app would open on the host desktop instead of
+# in here. Xwayland itself keeps the variable -- it needs it to reach the host
+# compositor -- so only the WM (and everything it spawns) is scrubbed.
+env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
+    DISPLAY=":$DISPLAY_NUM" WIN11WM_ASSETS="$ASSETS" "$WM_BIN" "${WM_ARGS[@]}" &
 WM_PID=$!
 
 if ((WAIT_FOR_WM)); then
@@ -213,7 +224,9 @@ fi
 
 if [[ -n "$CLIENT" ]]; then
     sleep 1
-    DISPLAY=":$DISPLAY_NUM" setsid bash -c "$CLIENT" >/dev/null 2>&1 &
+    # Same scrub as the WM: --client apps are X11 clients of this server too.
+    env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=":$DISPLAY_NUM" \
+        setsid bash -c "$CLIENT" >/dev/null 2>&1 &
 fi
 
 # Keep the script alive while the X server runs; both die together on Ctrl-C.

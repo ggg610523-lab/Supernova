@@ -152,6 +152,8 @@ void Manager::onPropertyNotify(XPropertyEvent& ev) {
     } else if (a == A.netWmWindowType) {
         readWindowType(c);
         dirty = true;
+    } else if (a == A.motifHints) {
+        readDecorations(c);
     } else if (a == A.wmNormalHints) {
         readNormalHints(c);
     } else if (a == A.netWmOpacity) {
@@ -791,7 +793,58 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
         return;
     }
 
+    // The desktop icons are painted on the wallpaper, below every window and
+    // below our own chrome, so this is the only path that reaches them.
+    if (button == Button1 && handleDesktopPress(x, y, time)) return;
     handleChromePress(x, y, button, time);
+}
+
+// A desktop icon behaves the way Windows' does: the first click selects, a
+// second click on the same icon within the double click window opens it, and a
+// click on bare wallpaper clears the selection.
+bool Manager::handleDesktopPress(int x, int y, Time time) {
+    for (size_t i = 0; i < desktopIconRects.size(); ++i) {
+        if (!desktopIconRects[i].contains(x, y)) continue;
+        const int index = int(i);
+        const bool doubleClick = lastDesktopClick == index && time >= lastDesktopClickTime &&
+                                 time - lastDesktopClickTime < 400;
+        lastDesktopClick = index;
+        lastDesktopClickTime = time;
+        selectedDesktopIcon = index;
+        hoverDesktopIcon = index;
+        if (doubleClick && index < int(desktopItems.size())) {
+            lastDesktopClick = -1;
+            selectedDesktopIcon = -1;
+            openDesktopItem(desktopItems[size_t(index)]);
+        }
+        dirty = true;
+        return true;
+    }
+    if (selectedDesktopIcon >= 0) {
+        selectedDesktopIcon = -1;
+        lastDesktopClick = -1;
+        dirty = true;
+    }
+    return false;
+}
+
+// Opens one desktop item: a launcher runs its Exec, anything else is handed to
+// the session's default handler (xdg-open), so folders open in the file manager
+// and files in whatever the desktop is configured to use.
+void Manager::openDesktopItem(const DesktopItem& item) {
+    if (!item.exec.empty()) {
+        launchApp(item.exec);
+        return;
+    }
+    if (item.path.empty()) return;
+    // Single quote the path for the shell launchApp runs it through.
+    std::string quoted = "'";
+    for (char ch : item.path) {
+        if (ch == '\'') quoted += "'\\''";
+        else quoted += ch;
+    }
+    quoted += "'";
+    launchApp("xdg-open " + quoted);
 }
 
 // Drag starts. The pointer grab we take here is what makes the drag stay

@@ -5,6 +5,7 @@
 #include <X11/keysym.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <poll.h>
 #include <unistd.h>
@@ -51,6 +52,9 @@ void Manager::shutdown() {
     ungrabPointer();
     XUngrabKeyboard(dpy, CurrentTime);
     comp.shutdown();
+    // Release the compositing manager selection before the window that owns it
+    // goes away, so clients do not keep talking to a dead compositor.
+    if (A.netWmCm) XSetSelectionOwner(dpy, A.netWmCm, None, CurrentTime);
     if (wmCheckWin) {
         XDestroyWindow(dpy, wmCheckWin);
         wmCheckWin = 0;
@@ -132,6 +136,16 @@ void Manager::setupRootProperties() {
     XChangeProperty(dpy, wmCheckWin, A.netWmName, A.utf8String, 8, PropModeReplace,
                     reinterpret_cast<const unsigned char*>(name.c_str()),
                     static_cast<int>(name.size()));
+
+    // Claim the compositing manager selection. Toolkits query its owner to
+    // decide whether an ARGB visual -- and with it their composited rendering
+    // path -- is available; a compositor that skips this leaves GTK announcing
+    // "no RGBA visual or compositor", falling back to a 24 bit visual and
+    // half-initialising WebKit based apps (Electrobun, Tauri).
+    char cmName[32];
+    std::snprintf(cmName, sizeof cmName, "_NET_WM_CM_S%d", screen);
+    A.netWmCm = XInternAtom(dpy, cmName, False);
+    if (A.netWmCm) XSetSelectionOwner(dpy, A.netWmCm, wmCheckWin, CurrentTime);
 
     const Atom supported[] = {
         A.netSupported,          A.netSupportingWmCheck,  A.netClientList,
@@ -275,14 +289,17 @@ int Manager::run(const Options& options) {
         log("%s", error.c_str());
         return 1;
     }
-    if (!comp.init(dpy, screen, screenW, screenH, options.vsync, &error)) {
+    // Bundled assets: the wallpaper photo, Reversal icons (rasterised by
+    // scripts/fetch-assets.sh) and the MuternVF variable font. All three are
+    // resolved before the compositor starts because it bakes the wallpaper as
+    // part of init; each degrades gracefully when absent.
+    assetDir = defaultAssetDir();
+    if (!comp.init(dpy, screen, screenW, screenH, options.vsync,
+                   assetDir + "/wallpaper/wallpaper.png", &error)) {
         log("compositor: %s", error.c_str());
         return 1;
     }
 
-    // Bundled assets: Reversal icons (rasterised by scripts/fetch-assets.sh) and
-    // the MuternVF variable font. Both degrade gracefully when absent.
-    assetDir = defaultAssetDir();
     icons.init(assetDir + "/icons");
     text.init(assetDir + "/fonts");
 
@@ -293,6 +310,10 @@ int Manager::run(const Options& options) {
     setupRootProperties();
     updateWorkArea();
     apps = scanApps();
+    // The desktop shows the session's real Desktop directory; layout is fixed, so
+    // it is computed once here and reused by every frame and hit test.
+    desktopItems = scanDesktop();
+    layoutDesktopIcons();
     scanExistingWindows();
     updateClientList();
 
@@ -313,6 +334,7 @@ int Manager::run(const Options& options) {
         comp.swapInterval(), text.family().c_str());
     log("canvas %dx%d, %zu managed window(s), %zu launcher entries", screenW, screenH,
         clients.size(), apps.size());
+    log("desktop: %zu item(s) from %s", desktopItems.size(), desktopDir().c_str());
     log("assets: %s", assetDir.c_str());
 
     lastTick = nowMs();
@@ -613,6 +635,23 @@ void Manager::updateHoverStates(int px, int py) {
             changed = true;
         }
     }
+
+    // Desktop icons highlight only over bare wallpaper: an icon covered by a
+    // window, the taskbar or an open flyout must never light up.
+    int newDesktop = -1;
+    if (!overlayOpen() && !overTaskbar && !dragClient && !clientAt(px, py)) {
+        for (size_t i = 0; i < desktopIconRects.size(); ++i) {
+            if (desktopIconRects[i].contains(px, py)) {
+                newDesktop = int(i);
+                break;
+            }
+        }
+    }
+    if (newDesktop != hoverDesktopIcon) {
+        hoverDesktopIcon = newDesktop;
+        changed = true;
+    }
+
     if (changed) dirty = true;
 }
 
@@ -768,6 +807,7 @@ void Manager::applyFrame(Client* c, bool animate) {
 
 void Manager::mapClient(Client* c) {
     if (!c || !c->alive) return;
+    readDecorations(c);
     // Redirect before the first map so the client's very first frame goes into
     // an offscreen pixmap instead of straight to the screen.
     if (!c->redirected && !c->isDock && !c->isDesktop) {
@@ -837,17 +877,20 @@ void Manager::raiseClient(Client* c) {
 void Manager::restack() {
     if (!comp.overlay()) return;
 
-    // XRestackWindows() expects the list *bottom first*, and it makes the group
-    // contiguous. Feeding it the list reversed (as this used to do) silently
-    // inverts the whole stack: the focused window ends up at the bottom, so its
-    // caption is covered by whatever is above it and clicks on the caption go
-    // to the wrong window.
+    // XRestackWindows() takes the list *top first*: the first window ends up on
+    // top of the group. (The obvious reading, bottom-first, is the trap -- it
+    // puts the overlay above every client, so clicks land on the compositor
+    // instead of the window under the pointer and mouse input dies session
+    // wide.) We therefore build the list top-down, ending with the overlay,
+    // which must stay at the very bottom: a click on a window's *content* has
+    // to reach that window, while clicks on the chrome we draw around it (the
+    // caption strip, the resize band) are not covered by the client and still
+    // reach us.
     std::vector<Window> order;
     order.reserve(clients.size() + 2);
-    order.push_back(comp.overlay());
-    // Desktops first, then docks, then everything we decorate: that is the order
-    // the user sees, and it keeps panels above the wallpaper but below windows.
-    for (const Pass pass : {Pass::Background, Pass::Managed, Pass::Top}) {
+    // Fullscreen windows we handed back to the server, then everything we
+    // decorate, then desktops; the overlay is appended last.
+    for (const Pass pass : {Pass::Top, Pass::Managed, Pass::Background}) {
         for (const auto& c : clients) {
             if (!c->mapped) continue;
             if (pass == Pass::Background && !c->isDesktop) continue;
@@ -857,6 +900,7 @@ void Manager::restack() {
             order.push_back(c->id);
         }
     }
+    order.push_back(comp.overlay());
     if (order.size() == 1) {
         XLowerWindow(dpy, comp.overlay());
         return;
@@ -1036,7 +1080,9 @@ void Manager::setFullscreen(Client* c, bool on) {
         c->frame = Rect{0, 0, screenW, screenH};
     } else {
         c->fullscreen = false;
-        c->captionH = metrics::kCaptionH;
+        // A client that asked to stay frameless keeps its own title bar when
+        // it comes back out of fullscreen too.
+        c->captionH = c->frameless ? 0 : metrics::kCaptionH;
         c->frame = clampRect(c->restore, Rect{0, 0, screenW, screenH});
     }
     applyFrame(c, true);

@@ -4,6 +4,8 @@ cmake-build-*/
 
 # generated asset bookkeeping
 assets/.stamp
+# wallpaper transcoded from assets/wallpaper/*.jpg by scripts/fetch-assets.sh
+assets/wallpaper/wallpaper.png
 
 # editor / OS noise
 *.swp

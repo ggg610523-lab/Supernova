@@ -11,6 +11,7 @@
 #include <fstream>
 #include <set>
 #include <sstream>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace wm {
@@ -70,10 +71,11 @@ struct DesktopEntry {
     bool noDisplay = false;
 };
 
-void parseDesktop(const std::string& path, std::vector<AppEntry>* out,
-                  std::set<std::string>* seen) {
+// Reads one .desktop file. Returns false unless it is a usable Application
+// entry (the same bar the Start menu applies), in which case `out` is filled.
+bool parseDesktopFile(const std::string& path, AppEntry* out) {
     std::ifstream in(path);
-    if (!in) return;
+    if (!in) return false;
 
     DesktopEntry e;
     bool inEntry = false;
@@ -109,16 +111,47 @@ void parseDesktop(const std::string& path, std::vector<AppEntry>* out,
         else if (key == "StartupWMClass") e.app.wmClass = lower(val);
     }
 
-    if (!e.typeApplication || e.hidden || e.noDisplay) return;
-    if (e.app.name.empty() || e.app.exec.empty()) return;
+    if (!e.typeApplication || e.hidden || e.noDisplay) return false;
+    if (e.app.name.empty() || e.app.exec.empty()) return false;
 
     if (!e.app.generic.empty()) e.app.generic += ' ';
     e.app.generic += comment;
     e.app.searchKey = lower(e.app.name + " " + e.app.generic);
+    *out = std::move(e.app);
+    return true;
+}
 
-    const std::string dedup = lower(e.app.name);
+void parseDesktop(const std::string& path, std::vector<AppEntry>* out,
+                  std::set<std::string>* seen) {
+    AppEntry app;
+    if (!parseDesktopFile(path, &app)) return;
+    const std::string dedup = lower(app.name);
     if (!seen->insert(dedup).second) return;
-    out->push_back(std::move(e.app));
+    out->push_back(std::move(app));
+}
+
+// A file's icon name, guessed from its extension. Only a guess: an icon theme
+// that ships nothing for the name simply falls back to a letter tile.
+std::string fileIcon(const std::string& name) {
+    const size_t dot = name.rfind('.');
+    const std::string ext = dot == std::string::npos ? std::string() : lower(name.substr(dot + 1));
+    if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" || ext == "webp" ||
+        ext == "bmp" || ext == "svg") {
+        return "image-x-generic";
+    }
+    if (ext == "pdf") return "application-pdf";
+    if (ext == "sh" || ext == "bash" || ext == "run" || ext == "appimage" || ext == "exe") {
+        return "application-x-executable";
+    }
+    if (ext == "mp4" || ext == "mkv" || ext == "webm" || ext == "avi" || ext == "mov") {
+        return "video-x-generic";
+    }
+    if (ext == "mp3" || ext == "flac" || ext == "ogg" || ext == "wav") return "audio-x-generic";
+    if (ext == "zip" || ext == "tar" || ext == "gz" || ext == "xz" || ext == "zst" ||
+        ext == "7z" || ext == "rar") {
+        return "package-x-generic";
+    }
+    return "text-plain";
 }
 
 std::vector<std::string> dataDirs() {
@@ -143,6 +176,82 @@ std::vector<std::string> dataDirs() {
 bool containsFold(const std::string& haystack, const std::string& needle) {
     if (needle.empty()) return true;
     return lower(haystack).find(lower(needle)) != std::string::npos;
+}
+
+std::string desktopDir() {
+    const char* home = std::getenv("HOME");
+    if (!home) return {};
+    // user-dirs.dirs wins when it exists: a session that has been localised into
+    // another language keeps its folders wherever that file says they are.
+    std::ifstream in(std::string(home) + "/.config/user-dirs.dirs");
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::string t = trim(line);
+        if (t.rfind("XDG_DESKTOP_DIR", 0) != 0) continue;
+        const size_t eq = t.find('=');
+        if (eq == std::string::npos) continue;
+        std::string v = trim(t.substr(eq + 1));
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+            v = v.substr(1, v.size() - 2);
+        }
+        // The file stores $HOME/Desktop rather than an absolute path.
+        if (v.rfind("$HOME", 0) == 0) v = std::string(home) + v.substr(5);
+        if (!v.empty()) return v;
+    }
+    return std::string(home) + "/Desktop";
+}
+
+std::vector<DesktopItem> scanDesktop() {
+    std::vector<DesktopItem> items;
+    const std::string dir = desktopDir();
+    if (dir.empty()) return items;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return items;
+
+    std::vector<std::string> names;
+    while (dirent* ent = readdir(d)) {
+        const char* n = ent->d_name;
+        // "." and ".." are hidden by definition; hidden files are not shown,
+        // which is what every desktop does.
+        if (n[0] == '.') continue;
+        names.emplace_back(n);
+    }
+    closedir(d);
+    std::sort(names.begin(), names.end());
+
+    for (const std::string& n : names) {
+        const std::string path = dir + "/" + n;
+        struct stat st {};
+        if (::stat(path.c_str(), &st) != 0) continue;
+        DesktopItem item;
+        item.path = path;
+        item.isDir = S_ISDIR(st.st_mode) != 0;
+
+        if (item.isDir) {
+            item.name = n;
+            item.icon = "folder";
+            items.push_back(std::move(item));
+            continue;
+        }
+        // An installer's launcher: show the entry's own name and icon, and run
+        // its Exec rather than handing the file to a viewer.
+        const size_t len = n.size();
+        if (len > 8 && n.compare(len - 8, 8, ".desktop") == 0) {
+            AppEntry app;
+            if (parseDesktopFile(path, &app)) {
+                item.name = app.name.empty() ? n.substr(0, len - 8) : app.name;
+                item.icon = app.icon;
+                item.exec = app.exec;
+                item.isDesktopEntry = true;
+                items.push_back(std::move(item));
+                continue;
+            }
+        }
+        item.name = n;
+        item.icon = fileIcon(n);
+        items.push_back(std::move(item));
+    }
+    return items;
 }
 
 std::vector<AppEntry> scanApps() {

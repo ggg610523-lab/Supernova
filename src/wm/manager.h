@@ -66,6 +66,7 @@ struct Atoms {
     X(netWmUserTime, "_NET_WM_USER_TIME")        X(netRestackWindow, "_NET_RESTACK_WINDOW") \
     X(netRequestFrameExtents, "_NET_REQUEST_FRAME_EXTENTS") X(netShowingDesktop, "_NET_SHOWING_DESKTOP") \
     X(netWmOpacity, "_NET_WM_OPACITY")           X(netWmBypassCompositor, "_NET_WM_BYPASS_COMPOSITOR") \
+    X(motifHints, "_MOTIF_WM_HINTS") \
     X(netWmOpaqueRegion, "_NET_WM_OPAQUE_REGION") X(netWmPing, "_NET_WM_PING") \
     X(netStartupId, "_NET_STARTUP_ID")           X(utf8String, "UTF8_STRING") \
     X(gtkFrameExtents, "_GTK_FRAME_EXTENTS")     X(gtkShowWindowMenu, "_GTK_SHOW_WINDOW_MENU") \
@@ -89,6 +90,9 @@ struct Atoms {
 #define WM_ATOM_DECL(name, str) Atom name{};
     WM_ATOM_LIST(WM_ATOM_DECL)
 #undef WM_ATOM_DECL
+    // _NET_WM_CM_S<n> is not a property: the compositing manager *claims* it as
+    // a selection, which is how toolkits discover that a compositor is running.
+    Atom netWmCm{};
     void init(Display* dpy) {
 #define WM_ATOM_INIT(name, str) name = XInternAtom(dpy, str, False);
         WM_ATOM_LIST(WM_ATOM_INIT)
@@ -104,6 +108,7 @@ struct Client {
     Rect frame;             // outer frame, screen coordinates
     Rect restore;           // geometry to return to from maximised / snapped
     int captionH = metrics::kCaptionH;
+    bool frameless = false;  // client asked for no decorations (_MOTIF_WM_HINTS)
     bool managed = false;   // false for override-redirect / dock / desktop windows
     bool alive = true;
     bool mapped = false;
@@ -216,6 +221,7 @@ private:
     void readTitle(Client* c);
     void readClassAndPid(Client* c);
     void readWindowType(Client* c);
+    void readDecorations(Client* c);
     void readNormalHints(Client* c);
     void readIcon(Client* c);
     void readStruts(Client* c);
@@ -333,6 +339,13 @@ private:
                      bool hovered);
     void drawWindowThumb(const WindowTex& tex, const Rect& dst, float radius, bool focused);
 
+    // ---- desktop icons (draw.cpp / input.cpp)
+    void layoutDesktopIcons();
+    void drawDesktopIcons();
+    // Returns true when the press landed on an icon (and was consumed).
+    bool handleDesktopPress(int x, int y, Time time);
+    void openDesktopItem(const DesktopItem& item);
+
     // ---- cursor helper (declared here to keep the cursor table together)
     void setCursor(int which);
     int cursorShown = 0;
@@ -394,6 +407,14 @@ private:
     bool hoverStart = false;
     bool hoverShowDesktop = false;
     bool hoverClock = false;
+
+    // ---- desktop icons (live contents of the session's Desktop directory)
+    std::vector<DesktopItem> desktopItems;
+    std::vector<Rect> desktopIconRects;
+    int hoverDesktopIcon = -1;
+    int selectedDesktopIcon = -1;
+    int lastDesktopClick = -1;
+    Time lastDesktopClickTime = 0;
 
     std::vector<AppEntry> apps;
     std::string searchText;
