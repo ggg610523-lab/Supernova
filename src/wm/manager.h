@@ -181,6 +181,11 @@ struct Client {
     // Opened from the tablet home screen: it fills the area between the status
     // bar and the home indicator, with the decorations stowed while it is up.
     bool tabletApp = false;
+    // iOS 26 zoom transition anchor (tablet mode only): the home-screen or dock
+    // icon the window grows out of on open and collapses back into on close or
+    // minimise. Desktop mode never reads it.
+    Rect tabletFrom;
+    bool tabletFromValid = false;
 };
 
 // Command line options.
@@ -454,6 +459,10 @@ private:
     // status bar and the home indicator stay tappable above and below it.
     void makeTabletApp(Client* c);
     void endTabletApp(Client* c);
+    // The icon rect a tablet window should zoom out of / collapse into: the
+    // home-screen entry that matches it, then the dock, then a spot above the
+    // home indicator when it has no icon on the grid.
+    Rect tabletIconRectFor(const Client* c) const;
     void tabletGoHome();               // minimise every open app, back to the grid
     // The iPhone X home-bar gesture, as Apple documents it: swipe up to go home,
     // swipe up and hold (or overshoot) for the app switcher, swipe sideways to

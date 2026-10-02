@@ -434,7 +434,11 @@ void Manager::tickAnimations(double now) {
         // magic-lamp warp reads minFade directly, so this is its timeline.
         const double minTarget = c->minimized ? 1.0 : 0.0;
         if (c->minFade != minTarget) {
-            const double step = dtMs / double(metrics::kMinimizeMs);
+            // Tablet apps collapse into their home-screen icon (iOS 26) instead
+            // of warping into a taskbar button, so they get their own duration.
+            const double minMs = c->tabletApp ? double(metrics::kTabletMinMs)
+                                              : double(metrics::kMinimizeMs);
+            const double step = dtMs / minMs;
             c->minFade = c->minFade < minTarget ? std::min(minTarget, c->minFade + step)
                                                 : std::max(minTarget, c->minFade - step);
             dirty = true;
@@ -1284,7 +1288,9 @@ void Manager::closeClient(Client* c) {
     c->closing = true;
     c->animFrom = c->drawFrame;
     c->animStart = nowMs();
-    c->animMs = metrics::kAnimMs;
+    // A tablet window zooms back into its icon on the way out, which reads
+    // better with the slightly longer iOS 26 timing than the Fluent pop.
+    c->animMs = c->tabletApp ? metrics::kTabletCloseMs : metrics::kAnimMs;
     c->closeDeadline = nowMs() + 2500.0;
     dirty = true;
 }

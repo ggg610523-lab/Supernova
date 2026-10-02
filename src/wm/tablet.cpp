@@ -24,6 +24,7 @@
 #include "manager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -245,7 +246,7 @@ void Manager::drawTabletHome() {
         layoutTabletHome();
 
     const int icon = tabletIconSize;
-    const float radius = float(icon) * 0.24f;
+    const float radius = float(icon) * metrics::kTabletIconRadius;
     // The jiggle: a slow sine per icon, out of phase, so edit mode reads at a
     // glance without any rotation primitive.
     const double wiggle = nowMs() / 150.0;
@@ -290,7 +291,7 @@ void Manager::drawTabletHome() {
         comp.drawAcrylic(tabletDockRect, dr, theme::kTabletDockGlass, 0.55f,
                          theme::kTabletDockBorder, a);
         const int dockIcon = tabletDockIconSize;
-        const float dockRadius = float(dockIcon) * 0.24f;
+        const float dockRadius = float(dockIcon) * metrics::kTabletIconRadius;
         for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
             const Rect box = tabletDockRects[i];
             const size_t hoverIndex = tabletHome.size() + i;
@@ -404,18 +405,55 @@ void Manager::makeTabletApp(Client* c) {
     const int h = std::max(metrics::kMinH, screenH - top - metrics::kTabletHomeBarZone);
     c->frame = Rect{0, top, screenW, h};
     c->drawFrame = c->frame;
+    // The iOS 26 zoom transition anchors on the icon the app was launched from.
+    // `animFrom == frame` keeps drawFrame still; drawClientSprite() morphs the
+    // sprite between this rect and the frame on its own.
+    c->tabletFrom = tabletIconRectFor(c);
+    c->tabletFromValid = true;
     c->animFrom = c->frame;
     c->animStart = nowMs();
-    c->animMs = 0;
+    c->animMs = metrics::kTabletOpenMs;
     syncClientGeometry(c);
     c->needsRepaint = true;
     dirty = true;
+}
+
+// The home-screen (or dock) icon a window belongs to, matched the way a launcher
+// matches: the WM_CLASS instance against the entry's StartupWMClass, then the
+// entry name against the window class or title. With no match the zoom runs out
+// of a squircle just above the home indicator, so every tablet window still gets
+// the transition instead of popping in.
+Rect Manager::tabletIconRectFor(const Client* c) const {
+    const auto low = [](std::string s) {
+        for (char& ch : s) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        return s;
+    };
+    const std::string key = c ? low(c->appName) : std::string();
+    const std::string title = c ? low(c->title) : std::string();
+    const auto matches = [&](const TabletEntry& e) {
+        if (!key.empty() && !e.wmClass.empty() && low(e.wmClass) == key) return true;
+        if (!key.empty() && low(e.name) == key) return true;
+        if (!title.empty() && low(e.name) == title) return true;
+        return false;
+    };
+    const int icon = std::max(metrics::kTabletIconMin, tabletIconSize);
+    for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
+        if (!matches(tabletHome[i])) continue;
+        const Rect& cell = tabletHomeRects[i];
+        return Rect{cell.x + (cell.w - icon) / 2, cell.y, icon, icon};
+    }
+    for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
+        if (matches(tabletDock[i])) return tabletDockRects[i];
+    }
+    return Rect{screenW / 2 - icon / 2,
+                screenH - metrics::kTabletHomeBarZone - icon - 8, icon, icon};
 }
 
 // Back to an ordinary decorated window for the desktop.
 void Manager::endTabletApp(Client* c) {
     if (!c || !c->tabletApp) return;
     c->tabletApp = false;
+    c->tabletFromValid = false;
     c->captionH = c->frameless ? 0 : metrics::kCaptionH;
     const Rect wa = workArea();
     Rect want = c->restore;

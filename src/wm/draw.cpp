@@ -433,36 +433,61 @@ void Manager::drawClientSprite(Client* c) {
 
     double opacity = 1.0;
     double scale = 1.0;
-
-    if (c->appear < 1.0) {
-        // Open: grow the last few percent while fading in (Fluent motion). A
-        // window born from a launch placeholder keeps its size so it is exactly
-        // the same size as the tile it is cross-fading with -- only the opacity
-        // does the transition.
-        const double t = fluentEase(c->appear);
-        opacity *= 0.25 + 0.75 * t;
-        scale = c->fromLaunch ? 1.0 : 0.93 + 0.07 * t;
-    }
-    // Magic lamp: while minimising (or restoring) the GPU warps the content
-    // into its taskbar icon, so the frame geometry is left alone and only the
-    // opacity fades -- late, so the funnel stays visible on the way in.
     double genie = 0.0;
     Rect genieIcon{};
-    if (c->minFade > 0.0) {
-        const double m = c->minFade;
-        genie = m;
-        genieIcon = Rect{screenW / 2 - 12, screenH - metrics::kTaskbarH, 24, 24};
-        for (const TaskItem& it : taskItems) {
-            if (it.client != c) continue;
-            genieIcon = Rect{it.rect.x + (it.rect.w - 24) / 2, it.rect.y + (it.rect.h - 24) / 2,
-                             24, 24};
-            break;
+    // Corner radius override for the tablet zoom, or <0 to use the usual one.
+    float radiusOverride = -1.f;
+
+    // iOS 26 zoom transition -- tablet mode only. A tablet window is a rect that
+    // morphs between the home-screen icon it was launched from and the full app
+    // frame, its corners easing from the icon squircle (24% of its edge) to the
+    // window radius as it grows. Opening decelerates out of the icon; closing
+    // and the swipe-up home gesture accelerate back into it and fade, so the
+    // icon underneath is revealed exactly where it left. This deliberately
+    // bypasses the Fluent pop and the magic-lamp warp used on the desktop.
+    const bool tabletZoom = c->tabletApp && c->tabletFromValid &&
+                            (c->appear < 1.0 || c->vanish > 0.0 || c->minFade > 0.0);
+    if (tabletZoom) {
+        const bool opening = c->appear < 1.0;
+        double p;
+        if (opening) p = clamp01(c->appear);
+        else if (c->closing && c->vanish > 0.0) p = clamp01(c->vanish);
+        else p = clamp01(c->minFade);
+        // 0 = collapsed into the icon, 1 = settled into the app frame.
+        const double t = opening ? easeOutCubic(p) : 1.0 - p * p * p;
+        f = lerpRect(c->tabletFrom, f, t);
+        const float iconR = float(c->tabletFrom.w) * metrics::kTabletIconRadius;
+        radiusOverride = iconR + (float(metrics::kRadius) - iconR) * float(t);
+        opacity = opening ? 1.0 : t;
+    } else {
+        if (c->appear < 1.0) {
+            // Open: grow the last few percent while fading in (Fluent motion). A
+            // window born from a launch placeholder keeps its size so it is exactly
+            // the same size as the tile it is cross-fading with -- only the opacity
+            // does the transition.
+            const double t = fluentEase(c->appear);
+            opacity *= 0.25 + 0.75 * t;
+            scale = c->fromLaunch ? 1.0 : 0.93 + 0.07 * t;
         }
-        opacity *= 1.0 - m * m;
-    }
-    if (c->vanish > 0.0) {
-        opacity *= 1.0 - c->vanish;
-        scale *= 1.0 - 0.06 * c->vanish;
+        // Magic lamp: while minimising (or restoring) the GPU warps the content
+        // into its taskbar icon, so the frame geometry is left alone and only the
+        // opacity fades -- late, so the funnel stays visible on the way in.
+        if (c->minFade > 0.0) {
+            const double m = c->minFade;
+            genie = m;
+            genieIcon = Rect{screenW / 2 - 12, screenH - metrics::kTaskbarH, 24, 24};
+            for (const TaskItem& it : taskItems) {
+                if (it.client != c) continue;
+                genieIcon = Rect{it.rect.x + (it.rect.w - 24) / 2,
+                                 it.rect.y + (it.rect.h - 24) / 2, 24, 24};
+                break;
+            }
+            opacity *= 1.0 - m * m;
+        }
+        if (c->vanish > 0.0) {
+            opacity *= 1.0 - c->vanish;
+            scale *= 1.0 - 0.06 * c->vanish;
+        }
     }
     if (opacity <= 0.01) return;
     if (scale < 1.0) {
@@ -477,7 +502,8 @@ void Manager::drawClientSprite(Client* c) {
     s.frame = f;
     s.captionH = c->captionH;
     s.maximized = c->maximizedH && c->maximizedV;
-    s.radius = (c->fullscreen || s.maximized) ? 0.f : float(metrics::kRadius);
+    s.radius = radiusOverride >= 0.f ? radiusOverride
+               : ((c->fullscreen || s.maximized) ? 0.f : float(metrics::kRadius));
     s.focused = (c == focused) && !c->closing;
     s.opacity = float(opacity);
     s.attention = float(c->attentionPulse) * 0.85f;

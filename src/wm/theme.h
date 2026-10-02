@@ -226,6 +226,15 @@ constexpr int kTabletHomeBarH = 5;
 // home indicator reaches the shell instead of the app covering the screen.
 constexpr int kTabletHomeBarZone = 30;
 constexpr int kTabletSplashMs = 1100;   // full splash transition
+// The corner factor of a home-screen squircle, shared by the drawn icons and
+// the iOS 26 zoom transition so a window's corners match the icon it grows from.
+constexpr float kTabletIconRadius = 0.24f;
+// Tablet-only app motion (iOS 26): the window zooms out of its home-screen icon
+// when it opens, and collapses back into it when it closes or is sent home.
+// Slightly slower than the Fluent pop because more distance is being covered.
+constexpr int kTabletOpenMs = 340;   // icon -> full app frame
+constexpr int kTabletCloseMs = 300;  // app frame -> icon, on close
+constexpr int kTabletMinMs = 300;    // app frame -> icon, on swipe-up home
 
 // --- desktop widgets (iOS 26) ---------------------------------------------
 constexpr int kWidgetRadius = 34;      // squircle corner at the small size
