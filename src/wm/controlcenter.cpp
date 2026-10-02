@@ -46,6 +46,8 @@ enum CcId {
     kCcDnd,
     kCcNight,
     kCcShowDesktop,
+    // 4x1: the desktop <-> tablet / mobile mode switch
+    kCcTablet,
     // 1x2
     kCcLock,
     kCcScreenshot,
@@ -109,18 +111,31 @@ void Manager::layoutControlCenter() {
     const int w = 2 * pad + cols * cell + (cols - 1) * gap;
     const int h = 2 * pad + rows * cell + (rows - 1) * gap;
 
-    // Anchored above the clock, nudged left so it is not hard against the edge.
-    int x = clockRect.right() - w - 4;
-    if (x + w > screenW - 4) x = screenW - w - 4;
-    if (x < 4) x = 4;
-    int y = screenH - metrics::kTaskbarH - 12 - h;
-    if (y < 4) y = 4;
-    ccRect = Rect{x, y, w, h};
-
-    // The panel zooms out of the clock, so remember the point under it, clamped
-    // to the panel so the origin is always inside the final rectangle.
-    ccAnchorX = clampi(clockRect.x + clockRect.w / 2, ccRect.x, ccRect.right());
-    ccAnchorY = clampi(clockRect.y + clockRect.h / 2, ccRect.y, ccRect.bottom());
+    if (tabletMode) {
+        // Tablet mode has no taskbar clock to hang off, so Control Centre drops
+        // out of the top-right corner instead, the way it does on iOS (swipe
+        // down from the top-right). It zooms out of that corner.
+        const int margin = std::max(10, screenW / 64);
+        int x = screenW - w - margin;
+        if (x < 4) x = 4;
+        int y = std::max(margin, metrics::kTabletStatusH - 10);
+        if (y + h > screenH - 4) y = std::max(4, screenH - 4 - h);
+        ccRect = Rect{x, y, w, h};
+        ccAnchorX = clampi(screenW - margin, ccRect.x, ccRect.right());
+        ccAnchorY = clampi(metrics::kTabletStatusH, ccRect.y, ccRect.bottom());
+    } else {
+        // Anchored above the clock, nudged left so it is not hard against the edge.
+        int x = clockRect.right() - w - 4;
+        if (x + w > screenW - 4) x = screenW - w - 4;
+        if (x < 4) x = 4;
+        int y = screenH - metrics::kTaskbarH - 12 - h;
+        if (y < 4) y = 4;
+        ccRect = Rect{x, y, w, h};
+        // The panel zooms out of the clock, so remember the point under it,
+        // clamped to the panel so the origin is always inside the rectangle.
+        ccAnchorX = clampi(clockRect.x + clockRect.w / 2, ccRect.x, ccRect.right());
+        ccAnchorY = clampi(clockRect.y + clockRect.h / 2, ccRect.y, ccRect.bottom());
+    }
 
     // A module spanning `span` cells, positioned at grid column/row.
     const auto cellRect = [&](int col, int row, int colspan, int rowspan) {
@@ -173,6 +188,7 @@ void Manager::layoutControlCenter() {
     add(cellRect(0, 3, 2, 1), kCcShowDesktop);
     add(cellRect(0, 4, 1, 1), kCcLock);
     add(cellRect(1, 4, 1, 1), kCcScreenshot);
+    add(cellRect(0, 5, 4, 1), kCcTablet);
 
     // --- launchers share the bottom row, which leaves exactly two slots ----
     for (int i = 0; i < kCcLauncherCount; ++i) {
@@ -294,6 +310,7 @@ void Manager::activateCcControl(int id) {
         }
         case kCcNight: sysctl.setNightLight(!s.nightLight); break;
         case kCcShowDesktop: toggleShowDesktop(); break;
+        case kCcTablet: setTabletMode(!tabletMode); break;
         case kCcLock: sysctl.lockSession(); break;
         case kCcScreenshot: sysctl.screenshot(); break;
         default:
@@ -586,6 +603,25 @@ void Manager::drawControlCenter() {
         if (!drawAppIcon(box, kLauncherIcons[i], kLauncherIcons[i], 0.f, a)) {
             drawAppTile(box, "?", float(box.w) * 0.30f, theme::kCcActive, false);
         }
+    }
+
+    // --- tablet / mobile mode ---------------------------------------------
+    // A full-width plate that turns systemBlue while the home screen is up, the
+    // way an iOS toggle reads. It is drawn with a device outline rather than a
+    // theme icon, so it never depends on the asset pipeline.
+    {
+        const Rect m = cellRect(0, 5, 4, 1);
+        const bool on = tabletMode;
+        plateC(m, on ? theme::kCcActive
+                     : mixColor(theme::kCcTile, theme::kCcTileHover, hoverAmt(kCcTablet, 0)),
+               metrics::kCcTileRadius * scale / 100);
+        const int d = int(m.h * 0.34);
+        const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
+        drawTabletGlyph(box, on ? theme::kCcActiveGlyph : theme::kCcGlyph, a);
+        const std::string label = on ? "Tablet mode: on" : "Tablet mode";
+        const int px = int(m.h * 0.20);
+        drawTextAt(label, px, Weight::Medium, theme::kCcLabel, box.right() + gap,
+                   m.y + (m.h - px * 3 / 2) / 2);
     }
 }
 

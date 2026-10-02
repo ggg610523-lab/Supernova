@@ -321,6 +321,17 @@ int Manager::run(const Options& options) {
     // Centre is already populated the first time the clock is clicked.
     sysctl.init();
 
+    // Kiosk / self-test aid: boot straight into the tablet home screen. There is
+    // nothing to transition from at start up, so this skips the splash.
+    if (const char* v = std::getenv("WIN11WM_TABLET")) {
+        if (v[0] == '1') {
+            tabletMode = true;
+            tabletAnim = 1.0;
+            applyTabletMode();
+            log("tablet mode: starting on the iOS-like home screen");
+        }
+    }
+
     // Unified replacement for the old SDL prototype's "--embed prog": the single
     // compositor launches the requested programs and they show up as normal
     // managed clients (no second compositor, no reparent hack). Queued until
@@ -463,6 +474,38 @@ void Manager::tickAnimations(double now) {
     // Control Centre: a slightly longer ease so the grid reads as rising out
     // of the taskbar rather than simply appearing.
     step(ccAnim, ccOpen ? 1.0 : 0.0, 210.0);
+    // Tablet / mobile mode: the splash fades in, the two shells are swapped
+    // while it fully covers the screen, and it fades back out onto the new one.
+    if (modeSwitching) {
+        const double p = clamp01((now - modeSwitchStart) / double(metrics::kTabletSplashMs));
+        if (p < 0.40) splashOpacity = p / 0.40;
+        else if (p < 0.60) splashOpacity = 1.0;
+        else splashOpacity = std::max(0.0, 1.0 - (p - 0.60) / 0.40);
+        if (!modeSwapped && p >= 0.5) {
+            modeSwapped = true;
+            tabletMode = modeSwitchTarget;
+            applyTabletMode();
+        }
+        if (p >= 1.0) {
+            modeSwitching = false;
+            tabletMode = modeSwitchTarget;
+            splashOpacity = 0.0;
+        }
+        dirty = true;
+    }
+    // Cross-fades the home screen (and the taskbar out) around the swap point.
+    step(tabletAnim, tabletMode ? 1.0 : 0.0, 300.0);
+    // Rearrange mode jiggles the icons, so it needs a frame every tick.
+    if (tabletEdit && tabletMode) dirty = true;
+    // iPhone X home bar: a swipe that pauses on the way up opens the app
+    // switcher. No motion event reports the pause (the finger is not moving),
+    // so the dwell is detected here.
+    if (tabletGesture && !tabletGestureSwipe && !tabletSwitcher &&
+        tabletGestureStartY - tabletGestureCurY > 40 &&
+        now - tabletGestureLastMove > 320.0) {
+        openTabletSwitcher();
+    }
+    step(tabletSwitcherAnim, tabletSwitcher ? 1.0 : 0.0, 220.0);
     // Always drain an in-flight probe, even with the panel closed, so a probe
     // that was running when it closed cannot leak its pipe. Only a live panel
     // asks for the periodic refresh.
@@ -488,8 +531,9 @@ void Manager::tickAnimations(double now) {
     tickFluidMotion(dtMs);
 
     // Widgets: repaint the analog clock when the wall second changes, and
-    // re-probe the battery every few seconds.
-    if (!widgets.empty()) {
+    // re-probe the battery every few seconds. The tablet status bar shows the
+    // clock too, so the second tick stays alive even without any widgets.
+    if (!widgets.empty() || tabletMode) {
         const time_t sec = time(nullptr);
         if (sec != lastClockSecond) {
             lastClockSecond = sec;
@@ -559,6 +603,11 @@ void Manager::tickFluidMotion(double dtMs) {
 
     // Control Centre controls (only while the panel is on screen).
     fade(ccHoverFade, ccOpen ? ccControls.size() : 0, ccOpen ? ccHover : -1);
+
+    // Tablet home / dock icons (only while the home screen is up).
+    fade(tabletIconHover,
+         tabletMode ? tabletHomeRects.size() + tabletDockRects.size() : 0,
+         tabletMode ? tabletHover : -1);
 
     // Caption buttons on every managed window.
     for (auto& cp : clients) {
@@ -692,6 +741,45 @@ void Manager::handleEvent(XEvent& ev) {
 // button hover, resize cursors. Anything that changes marks the frame dirty.
 void Manager::updateHoverStates(int px, int py) {
     bool changed = false;
+
+    // Tablet / mobile mode has its own hover surfaces: the widgets, the home and
+    // dock icons and the Control Centre panel. None of the desktop chrome --
+    // taskbar, captions, resize edges, desktop icons -- exists here.
+    if (tabletMode) {
+        const bool blocked = overlayOpen();
+        const int newWidget = blocked ? -1 : widgetAt(px, py);
+        if (newWidget != hoverWidget) {
+            hoverWidget = newWidget;
+            changed = true;
+        }
+        int newIcon = -1;
+        if (!blocked) {
+            for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
+                if (tabletHomeRects[i].contains(px, py)) {
+                    newIcon = int(i);
+                    break;
+                }
+            }
+            if (newIcon < 0) {
+                for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
+                    if (tabletDockRects[i].contains(px, py)) {
+                        newIcon = int(tabletHome.size() + i);
+                        break;
+                    }
+                }
+            }
+        }
+        if (newIcon != tabletHover) {
+            tabletHover = newIcon;
+            changed = true;
+        }
+        if (ccOpen) updateCcHover(px, py);
+        const int wanted = (newWidget >= 0 || newIcon >= 0 || (ccOpen && ccHover >= 0)) ? 5 : 0;
+        if (wanted != cursorShown) setCursor(wanted);
+        if (changed) dirty = true;
+        return;
+    }
+
     const int taskbarTop = screenH - metrics::kTaskbarH;
     const bool overTaskbar = py >= taskbarTop;
 
@@ -848,7 +936,7 @@ void Manager::updateHoverStates(int px, int py) {
 }
 
 bool Manager::overlayOpen() const {
-    return startOpen || taskViewOpen || altTabOpen || contextOpen || ccOpen;
+    return startOpen || taskViewOpen || altTabOpen || contextOpen || ccOpen || tabletSwitcher;
 }
 
 bool Manager::pointInOverlaySurface(int x, int y) const {
@@ -864,6 +952,7 @@ void Manager::closeOverlays() {
     const bool was = overlayOpen();
     const bool wasCc = ccOpen;
     startOpen = taskViewOpen = altTabOpen = contextOpen = ccOpen = false;
+    closeTabletSwitcher();
     altTabOrder.clear();
     altTabIndex = 0;
     searchText.clear();
@@ -1449,8 +1538,10 @@ void Manager::grabPointer() {
 
 void Manager::ungrabPointer() {
     if (!dpy || !comp.overlay()) return;
-    // An in-flight drag owns the pointer until it finishes.
-    if (dragClient || dragWidget >= 0) return;
+    // An in-flight drag owns the pointer until it finishes, and the app
+    // switcher keeps it until it closes so every click on a card is ours and
+    // never leaks through to the apps sitting behind it.
+    if (dragClient || dragWidget >= 0 || tabletSwitcher) return;
     XUngrabPointer(dpy, CurrentTime);
 }
 

@@ -44,6 +44,8 @@ void usage(const char* argv0) {
         "  Win+Shift+Left/Right    snap to a half without toggling\n"
         "  Win+Tab                 Task View\n"
         "  click the clock         Control Centre (iOS quick settings)\n"
+        "  Control Centre          \"Tablet mode\" switches to the iOS-like\n"
+        "                          home screen (dock, status bar, splash back)\n"
         "  Win+D / Win+M           show desktop\n"
         "  Win+1..9                activate the n-th taskbar window\n"
         "  Win+R                   Start menu (search focused)\n"

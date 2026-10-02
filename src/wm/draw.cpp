@@ -64,12 +64,20 @@ void Manager::render() {
     drawLaunches();
 
     drawSnapPreview();
-    drawTaskbar();
+    if (tabletAnim < 0.999) drawTaskbar();
     if (startOpen || startAnim > 0.0) drawStartMenu();
     if (taskViewOpen || taskViewAnim > 0.0) drawTaskView();
     if (altTabOpen || altTabAnim > 0.0) drawAltTab();
     if (contextOpen || contextAnim > 0.0) drawContextMenu();
+    // The iOS app switcher (swipe up and hold on the home bar) sits under the
+    // status bar and the home indicator.
+    if (tabletSwitcher || tabletSwitcherAnim > 0.0) drawTabletSwitcher();
+    // The tablet status bar and home indicator float above an open app, the way
+    // iOS keeps them over the app that is running.
+    if (tabletAnim > 0.001) drawTabletChrome();
     if (ccOpen || ccAnim > 0.0) drawControlCenter();
+    // The mode transition splash owns the whole screen, so it is painted last.
+    if (modeSwitching) drawTabletSplash();
     if (opts->stats) drawStats();
 }
 
@@ -303,7 +311,10 @@ void Manager::drawLaunches() {
 
 void Manager::drawDesktop() {
     comp.drawWallpaper();
-    drawDesktopIcons();
+    // Tablet mode replaces the desktop grid with the iOS home screen, but keeps
+    // the widgets (they stay usable) painted on top of it.
+    if (tabletAnim < 0.999) drawDesktopIcons();
+    if (tabletAnim > 0.001) drawTabletHome();
     drawWidgets();
 }
 

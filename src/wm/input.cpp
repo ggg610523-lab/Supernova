@@ -46,6 +46,13 @@ void Manager::onMapRequest(XMapRequestEvent& ev) {
     if (c->closing) return;
     if (!known) placeNewClient(c);
     mapClient(c);
+    // An app opened from the tablet home screen stays in tablet mode: it fills
+    // the display between the status bar and the home indicator.
+    if (tabletMode) {
+        makeTabletApp(c);
+        focusClient(c, true);
+        return;
+    }
     // If the user launched this from a desktop icon, grow the window out of that
     // placeholder rather than letting it pop in on top of it.
     if (!known) claimLaunch(c);
@@ -92,7 +99,8 @@ void Manager::onConfigureRequest(XConfigureRequestEvent& ev) {
         if (c->maxH > 0 && ch > c->maxH) ch = c->maxH;
         // A maximised, snapped or fullscreen window keeps the geometry we gave it.
         const bool locked =
-            c->fullscreen || (c->maximizedH && c->maximizedV) || c->snapZone != kSnapNone;
+            c->fullscreen || c->tabletApp || (c->maximizedH && c->maximizedV) ||
+            c->snapZone != kSnapNone;
         if (!locked) {
             c->frame.w = cw + 2 * metrics::kBorder;
             c->frame.h = ch + c->captionH + metrics::kBorder;
@@ -126,7 +134,7 @@ void Manager::onConfigureNotify(XConfigureEvent& ev) {
         c->pixW = c->pixH = 0;
         ensurePixmap(c);
     }
-    const bool weDriveIt = c->fullscreen || (c->maximizedH && c->maximizedV) ||
+    const bool weDriveIt = c->fullscreen || c->tabletApp || (c->maximizedH && c->maximizedV) ||
                            c->snapZone != kSnapNone || (dragClient == c && !dragIsMove);
     if (!weDriveIt && c->managed) {
         c->frame.w = ev.width + 2 * metrics::kBorder;
@@ -265,9 +273,11 @@ void Manager::onCrossing(XCrossingEvent& ev) {
         return;
     }
 // Pointer left our chrome: clear every hover so nothing looks stuck.
-if (hoverStart || hoverShowDesktop || hoverClock || hoverTaskIndex >= 0) {
+if (hoverStart || hoverShowDesktop || hoverClock || hoverTaskIndex >= 0 ||
+        tabletHover >= 0) {
         hoverStart = hoverShowDesktop = hoverClock = false;
         hoverTaskIndex = -1;
+        tabletHover = -1;
         dirty = true;
     }
     // A caption button pressed and then abandoned (pointer slid off the shell,
@@ -308,6 +318,29 @@ void Manager::onButtonPress(XButtonEvent& ev) {
     if (traceInput()) {
         log("press %s at (%d,%d) on 0x%lx mods 0x%x", buttonName(ev.button), x, y,
             static_cast<unsigned long>(ev.window), static_cast<unsigned>(ev.state));
+    }
+
+    // The mode transition splash swallows input while it plays so a stray click
+    // cannot land on a shell that is about to be replaced.
+    if (modeSwitching) return;
+    if (tabletMode) {
+        // The app switcher holds the pointer while it is up, so everything is
+        // a card interaction, whatever window the event names.
+        if (tabletSwitcher) {
+            handleTabletSwitcherPress(x, y, ev.button);
+            return;
+        }
+        // A press on an open tablet app is the app's: we only observe it for
+        // focus and raise. Clicks on the home screen, the status bar or the home
+        // indicator reach the overlay (the app is deliberately inset from both)
+        // and are ours.
+        if (ev.window != comp.overlay()) {
+            Client* c = find(ev.window);
+            if (c) handleClientPress(c, x, y, ev.button);
+            return;
+        }
+        handleTabletPress(x, y, ev.button, ev.time);
+        return;
     }
 
     // Alt+drag: the passive grab on the root delivers this even when the press
@@ -358,6 +391,18 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         log("release %s at (%d,%d) on 0x%lx", buttonName(ev.button), x, y,
             static_cast<unsigned long>(ev.window));
     }
+    if (tabletGesture) {
+        endTabletGesture();
+        return;
+    }
+    if (tabletSwitchDrag >= 0) {
+        endTabletSwitchDrag();
+        return;
+    }
+    if (tabletDragIcon >= 0) {
+        endTabletIconDrag();
+        return;
+    }
     if (dragClient) {
         endDrag(x, y);
         return;
@@ -395,6 +440,33 @@ void Manager::onMotion(XMotionEvent& ev) {
         log("motion to (%d,%d) on 0x%lx mods 0x%x%s", x, y, static_cast<unsigned long>(ev.window),
             static_cast<unsigned>(ev.state), dragClient ? " [dragging]" : "");
     }
+    if (tabletMode) {
+        // An in-flight drag -- a bottom-edge gesture, a switcher card, a home
+        // icon, a widget, a Control Centre slider -- keeps tracking; everything
+        // else is tablet hover.
+        if (tabletGesture) {
+            updateTabletGesture(x, y);
+            return;
+        }
+        if (tabletSwitchDrag >= 0) {
+            updateTabletSwitchDrag(x, y);
+            return;
+        }
+        if (tabletDragIcon >= 0) {
+            updateTabletIconDrag(x, y);
+            return;
+        }
+        if (dragWidget >= 0) {
+            updateWidgetDrag(x, y);
+            return;
+        }
+        if (ccDrag >= 0) {
+            updateCcDrag(x, y);
+            return;
+        }
+        updateHoverStates(x, y);
+        return;
+    }
     if (dragClient) {
         updateDrag(x, y);
         return;
@@ -413,6 +485,23 @@ void Manager::onMotion(XMotionEvent& ev) {
 void Manager::onKeyPress(XKeyEvent& ev) {
     const unsigned mods = ev.state & (ShiftMask | ControlMask | Mod1Mask | Mod4Mask);
     const KeySym sym = XLookupKeysym(&ev, 0);
+
+    // The tablet home screen has no keyboard shortcuts; Escape still leaves
+    // rearrange mode or dismisses Control Centre when it is open.
+    if (tabletMode) {
+        if (sym == XK_Escape) {
+            if (tabletSwitcher) {
+                closeTabletSwitcher();
+                tabletGoHome();
+            } else if (tabletEdit) {
+                tabletEdit = false;
+            } else {
+                closeOverlays();
+            }
+            dirty = true;
+        }
+        return;
+    }
 
     if (ccOpen) {
         // Any key press that is not a Control Centre interaction dismisses it.

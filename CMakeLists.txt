@@ -49,6 +49,7 @@ add_executable(win11wm
   src/wm/icons.cpp
   src/wm/png.cpp
   src/wm/widgets.cpp
+  src/wm/tablet.cpp
 )
 target_include_directories(win11wm PRIVATE src)
 target_compile_options(win11wm PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)

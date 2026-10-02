@@ -175,6 +175,12 @@ struct Client {
     bool fromLaunch = false;
     bool closing = false;
     double closeDeadline = 0.0;
+    // Hidden by tablet/mobile mode: minimised when the mode was entered so the
+    // window is neither painted nor clickable, then restored on the way out.
+    bool tabletHidden = false;
+    // Opened from the tablet home screen: it fills the area between the status
+    // bar and the home indicator, with the decorations stowed while it is up.
+    bool tabletApp = false;
 };
 
 // Command line options.
@@ -422,6 +428,55 @@ private:
     // Corner grip of a widget, for the resize cursor / press test.
     Rect widgetGripRect(const Widget& w) const;
 
+    // ---- tablet / mobile mode (tablet.cpp)
+    // An iOS-like home screen: status bar with the date and time, a grid of
+    // squircle app icons, a glass dock and the iPhone X home indicator. The
+    // desktop windows are hidden while it is up and only the widgets and the
+    // Control Centre stay reachable. Switching plays a full-screen splash.
+    struct TabletEntry {
+        std::string name;
+        std::string icon;
+        std::string wmClass;
+        std::string exec;  // non-empty: run this
+        std::string path;  // otherwise hand the path to xdg-open
+    };
+    void setTabletMode(bool on);       // starts the splash transition
+    void applyTabletMode();            // swap, at the splash midpoint
+    void buildTabletEntries();         // the ordered home/dock lists, once
+    void layoutTabletHome();           // dock/home entries and their rects
+    void drawTabletHome();             // wallpaper overlay: icons, dock, edit pill
+    void drawTabletChrome();           // status bar + home indicator, over the app
+    void drawTabletSplash();           // the desktop <-> tablet transition
+    void drawTabletGlyph(const Rect& box, const Color& c, float opacity);
+    bool handleTabletPress(int x, int y, unsigned button, Time time);
+    void openTabletEntry(const TabletEntry& e);
+    // An app opened from the home screen keeps tablet mode and is inset so the
+    // status bar and the home indicator stay tappable above and below it.
+    void makeTabletApp(Client* c);
+    void endTabletApp(Client* c);
+    void tabletGoHome();               // minimise every open app, back to the grid
+    // The iPhone X home-bar gesture, as Apple documents it: swipe up to go home,
+    // swipe up and hold (or overshoot) for the app switcher, swipe sideways to
+    // step between apps, and swipe a card up inside the switcher to quit it.
+    std::vector<Client*> tabletAppList() const;  // open tablet apps, bottom..top
+    bool handleTabletGesturePress(int x, int y);
+    void updateTabletGesture(int x, int y);
+    void endTabletGesture();
+    void switchTabletApp(int dir);
+    void openTabletSwitcher();
+    void closeTabletSwitcher();
+    void layoutTabletSwitcher();
+    void drawTabletSwitcher();
+    bool handleTabletSwitcherPress(int x, int y, unsigned button);
+    void updateTabletSwitchDrag(int x, int y);
+    void endTabletSwitchDrag();
+    // Home-screen rearrangement: the icons are dragged between grid cells and
+    // the widgets are moved and resized exactly as they are on the desktop.
+    bool handleTabletIconPress(int x, int y);
+    void beginTabletIconDrag(int index, int x, int y);
+    void updateTabletIconDrag(int x, int y);
+    void endTabletIconDrag();
+
     // ---- cursor helper (declared here to keep the cursor table together)
     void setCursor(int which);
     int cursorShown = 0;
@@ -552,6 +607,47 @@ private:
     std::vector<std::string> ccLaunchers;  // exec strings for the launcher row
     SystemControls sysctl;
     bool dnd = false;                  // Do Not Disturb, enforced by the WM
+
+    // ---- tablet / mobile mode
+    bool tabletMode = false;          // the mode the shell has settled into
+    double tabletAnim = 0.0;          // 0 = desktop, 1 = tablet
+    bool modeSwitching = false;       // a splash transition is playing
+    bool modeSwapped = false;         // the swap has been applied
+    bool modeSwitchTarget = false;    // value tabletMode takes at the midpoint
+    double modeSwitchStart = 0.0;
+    double splashOpacity = 0.0;       // splash scrim, 0..1
+    std::vector<TabletEntry> tabletHome;
+    std::vector<TabletEntry> tabletDock;
+    std::vector<Rect> tabletHomeRects;
+    std::vector<Rect> tabletDockRects;
+    std::vector<double> tabletIconHover;  // per home + dock icon
+    Rect tabletStatusRect, tabletDockRect, tabletHomeBarRect, tabletEditRect;
+    int tabletIconSize = metrics::kTabletIcon;
+    int tabletDockIconSize = metrics::kTabletDockIcon;
+    int tabletHover = -1;
+    bool tabletEntriesBuilt = false;  // the lists survive a reorder
+    bool tabletEdit = false;          // rearrange mode (jiggling icons)
+    int tabletDragIcon = -1;          // icon being dragged, -1 when none
+    int tabletDragTarget = -1;        // grid cell it would drop into
+    Point tabletDragGrab;
+    Rect tabletDragRect;
+
+    // ---- iPhone X home-bar gesture
+    bool tabletGesture = false;       // a swipe from the bottom edge is running
+    int tabletGestureStartX = 0, tabletGestureStartY = 0;
+    int tabletGestureCurX = 0, tabletGestureCurY = 0;
+    double tabletGestureLastMove = 0.0;  // for the "swipe up and hold" dwell
+    bool tabletGestureSwipe = false;     // horizontal: step between apps
+
+    // ---- app switcher (swipe a card up to quit, tap to open)
+    bool tabletSwitcher = false;
+    double tabletSwitcherAnim = 0.0;
+    std::vector<Client*> tabletSwitchOrder;  // live, filtered each frame
+    std::vector<Rect> tabletSwitchRects;
+    int tabletSwitchDrag = -1;         // card being swiped up, -1 when none
+    int tabletSwitchFromY = 0;         // pointer y when the swipe began
+    int tabletSwitchTravel = 0;        // current upward travel in pixels
+    Rect tabletSwitchDragRect;
 
     // ---- loop bookkeeping
     const Options* opts = nullptr;    // Queued --exec commands: launched once, right after the first present(),

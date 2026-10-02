@@ -119,6 +119,29 @@ inline constexpr Color kLaunchHover = rgb(0xFFFFFF, 0.10f);
 inline constexpr Color kLaunchDot = rgb(0xFFFFFF, 0.32f);
 inline constexpr Color kLaunchDotActive = rgb(0xFFFFFF, 0.95f);
 
+// --- tablet / mobile mode (iOS home screen) -------------------------------
+// A third skin: the iPhone/iPad home screen. White labels and a status bar sit
+// straight on the (blurred) wallpaper, the dock is a heavily translucent glass
+// pill, and the only chrome is the black home indicator bar.
+inline constexpr Color kTabletStatusText = rgb(0xFFFFFF);
+inline constexpr Color kTabletStatusSub = rgb(0xFFFFFF, 0.78f);
+inline constexpr Color kTabletLabel = rgb(0xFFFFFF);
+inline constexpr Color kTabletLabelShadow = rgb(0x000000, 0.55f);
+inline constexpr Color kTabletIconHover = rgb(0xFFFFFF, 0.14f);
+inline constexpr Color kTabletDockGlass = rgb(0x16161C, 0.30f);   // acrylic tint over the blur
+inline constexpr Color kTabletDockBorder = rgb(0xFFFFFF, 0.22f);
+inline constexpr Color kTabletDockHover = rgb(0xFFFFFF, 0.12f);
+inline constexpr Color kTabletHomeBar = rgb(0xFFFFFF, 0.92f);
+inline constexpr Color kTabletHomeBarShadow = rgb(0x000000, 0.28f);
+inline constexpr Color kTabletEditPill = rgb(0x14141A, 0.55f);
+inline constexpr Color kTabletEditPillBorder = rgb(0xFFFFFF, 0.22f);
+inline constexpr Color kTabletEditPillHover = rgb(0xFFFFFF, 0.14f);
+inline constexpr Color kTabletSplash = rgb(0x0A0A0F, 0.96f);
+inline constexpr Color kTabletSplashLabel = rgb(0xFFFFFF);
+inline constexpr Color kTabletSplashSub = rgb(0xFFFFFF, 0.55f);
+inline constexpr Color kTabletSplashTrack = rgb(0xFFFFFF, 0.16f);
+inline constexpr Color kTabletSplashFill = rgb(0xFFFFFF, 0.94f);
+
 // --- desktop widgets (iOS 26 "Liquid Glass") ------------------------------
 // Squircles of dark glass sitting directly on the wallpaper. The clock dial and
 // the battery ring stay white/orange/status-tinted, the way iOS tints widget
@@ -164,11 +187,13 @@ constexpr int kStartW = 620;
 constexpr int kStartH = 620;
 constexpr int kFlyoutRadius = 8;
 
-// --- Control Centre (iOS 18: 4 columns x 5 rows) --------------------------
+// --- Control Centre (iOS 18: 4 columns x 6 rows) --------------------------
 // The reference layout is a 4x5 grid of circular spots with 15pt gutters, 18pt
-// tile corners and 15pt tile padding; the inner buttons are 54pt circles.
+// tile corners and 15pt tile padding; the inner buttons are 54pt circles. We
+// spend one extra row on the Tablet-mode toggle, which is this shell's own
+// control rather than one iOS ships.
 constexpr int kCcCols = 4;
-constexpr int kCcRows = 5;
+constexpr int kCcRows = 6;
 constexpr int kCcCell = 76;       // one grid cell
 constexpr int kCcGap = 15;        // grid gap
 constexpr int kCcPad = 16;        // panel padding
@@ -184,6 +209,23 @@ constexpr int kLaunchIconMin = 46;   // floor when the screen is small
 constexpr int kLaunchRowGap = 20;    // vertical gap between icon rows
 constexpr int kLaunchLabelH = 18;    // label strip under each icon
 constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
+
+// --- tablet / mobile mode (iOS home screen) -------------------------------
+// The status bar is 44pt on an iPhone X (52 here to leave room for the Dynamic
+// Island), the home indicator is the 134x5pt gesture bar, and the dock is a
+// full-width glass pill holding up to five squircles.
+constexpr int kTabletStatusH = 52;
+constexpr int kTabletIcon = 68;         // app icon edge at 100%
+constexpr int kTabletIconMin = 48;
+constexpr int kTabletCellW = 106;       // icon + label cell
+constexpr int kTabletCellH = 108;
+constexpr int kTabletDockIcon = 62;
+constexpr int kTabletHomeBarW = 144;    // the iPhone X home indicator
+constexpr int kTabletHomeBarH = 5;
+// The band along the bottom edge kept clear of app windows, so a tap on the
+// home indicator reaches the shell instead of the app covering the screen.
+constexpr int kTabletHomeBarZone = 30;
+constexpr int kTabletSplashMs = 1100;   // full splash transition
 
 // --- desktop widgets (iOS 26) ---------------------------------------------
 constexpr int kWidgetRadius = 34;      // squircle corner at the small size
