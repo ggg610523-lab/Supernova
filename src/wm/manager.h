@@ -207,6 +207,7 @@ struct Options {
 // The window manager + shell.
 class Manager {
 public:
+    // Plain data for one grid cell, declared next to DesktopItem in apps.h.
     Manager() = default;
     ~Manager();
     Manager(const Manager&) = delete;
@@ -438,22 +439,32 @@ private:
     // squircle app icons, a glass dock and the iPhone X home indicator. The
     // desktop windows are hidden while it is up and only the widgets and the
     // Control Centre stay reachable. Switching plays a full-screen splash.
-    struct TabletEntry {
-        std::string name;
-        std::string icon;
-        std::string wmClass;
-        std::string exec;  // non-empty: run this
-        std::string path;  // otherwise hand the path to xdg-open
-    };
     void setTabletMode(bool on);       // starts the splash transition
     void applyTabletMode();            // swap, at the splash midpoint
     void buildTabletEntries();         // the ordered home/dock lists, once
+    void saveTabletLayout();           // write the arrangement the user left
+    bool loadTabletLayout();           // read it back; false when there is none
     void layoutTabletHome();           // dock/home entries and their rects
-    void drawTabletHome();             // wallpaper overlay: icons, dock, edit pill
+    void layoutTabletFolder();         // the open folder's sheet and 3x3 cells
+    void closeTabletFolder();          // fold the open folder back into its icon
+    void openTabletFolder(int index);  // zoom a folder's icon out into its sheet
+    // iOS names a new folder after what it thinks is in it. There is no category
+    // database here, so the honest version is the shared word of its apps, and
+    // "Folder" when they share nothing.
+    static std::string suggestFolderName(const std::vector<TabletEntry>& apps);
+    void drawTabletHome();             // wallpaper overlay: icons and dock
+    void drawTabletFolderView();       // the dimmed backdrop and open folder sheet
+    void drawTabletRename();           // the rename field, while one is open
     void drawTabletChrome();           // status bar + home indicator, over the app
     void drawTabletSplash();           // the desktop <-> tablet transition
     void drawTabletGlyph(const Rect& box, const Color& c, float opacity);
     bool handleTabletPress(int x, int y, unsigned button, Time time);
+    // A tap is acted on when the button comes back up, not when it goes down, so
+    // that a press held still is still available to become a drag or a long press.
+    void handleTabletRelease(int x, int y, unsigned button, Time time);
+    // The dock or grid icon under a point, or -1. A widget card can be sitting on
+    // top of one, so this decides which of the two a press belongs to.
+    int tabletIconAt(int x, int y) const;
     void openTabletEntry(const TabletEntry& e);
     // An app opened from the home screen keeps tablet mode and is inset so the
     // status bar and the home indicator stay tappable above and below it.
@@ -482,9 +493,17 @@ private:
     // Home-screen rearrangement: the icons are dragged between grid cells and
     // the widgets are moved and resized exactly as they are on the desktop.
     bool handleTabletIconPress(int x, int y);
+    // A drag can be lifted from the grid, from the dock, or from a page of an open
+    // folder, and released over any of them; endTabletIconDrag() resolves it.
     void beginTabletIconDrag(int index, int x, int y);
+    void beginTabletDockDrag(int index, int x, int y);
+    void beginTabletFolderDrag(int cell, int x, int y);
     void updateTabletIconDrag(int x, int y);
     void endTabletIconDrag();
+    // A drop helper, a private member rather than a file static because it names
+    // the nested entry type. It reports true when the folder is left empty, so the
+    // caller can delete it the way iOS does.
+    static bool tabletFolderRemove(std::vector<TabletEntry>& apps, const TabletEntry& app);
 
     // ---- cursor helper (declared here to keep the cursor table together)
     void setCursor(int which);
@@ -669,21 +688,65 @@ private:
     bool modeSwitchTarget = false;    // value tabletMode takes at the midpoint
     double modeSwitchStart = 0.0;
     double splashOpacity = 0.0;       // splash scrim, 0..1
-    std::vector<TabletEntry> tabletHome;
+    std::vector<TabletItem> tabletHome;
     std::vector<TabletEntry> tabletDock;
     std::vector<Rect> tabletHomeRects;
     std::vector<Rect> tabletDockRects;
     std::vector<double> tabletIconHover;  // per home + dock icon
-    Rect tabletStatusRect, tabletDockRect, tabletHomeBarRect, tabletEditRect;
+    Rect tabletStatusRect, tabletDockRect, tabletHomeBarRect;
     int tabletIconSize = metrics::kTabletIcon;
     int tabletDockIconSize = metrics::kTabletDockIcon;
     int tabletHover = -1;
+    // Last pointer position, kept because the long press is decided on a tick
+    // rather than by an event, so it needs to know where the pointer has got to.
+    int pointerX = 0, pointerY = 0;
     bool tabletEntriesBuilt = false;  // the lists survive a reorder
-    bool tabletEdit = false;          // rearrange mode (jiggling icons)
+    bool tabletEdit = false;          // rearrange mode, entered by a long press
+
+    // --- app folders ---------------------------------------------------------
+    int tabletFolderOpen = -1;      // grid index of the folder on screen, -1 none
+    int tabletFolderLast = -1;      // the one still fading out, so closing eases
+    int tabletFolderPage = 0;       // which nine of its apps are shown
+    double tabletFolderAnim = 0.0;  // 0 closed, 1 fully open
+    Rect tabletFolderPanel;          // the open folder's rounded sheet
+    std::vector<Rect> tabletFolderRects;  // the 3x3 mini cells on this page
+    int tabletFolderPageCount = 1;
+
+    // --- dragging an icon ----------------------------------------------------
     int tabletDragIcon = -1;          // icon being dragged, -1 when none
     int tabletDragTarget = -1;        // grid cell it would drop into
     Point tabletDragGrab;
     Rect tabletDragRect;
+    // Where the drag came from, because the drop is resolved against all of them:
+    // a grid cell, the dock, or a page of an open folder.
+    int tabletDragDockIndex = -1;     // dock slot it was lifted from
+    bool tabletDragFromDock = false;
+    bool tabletDragFromFolder = false;
+    // What it is currently over, all of them tested in priority order on release.
+    int tabletDragOverFolder = -1;    // folder icon: the app joins that folder
+    int tabletDragOverApp = -1;       // app icon: the two of them make a new folder
+    bool tabletDragOverDock = false;
+    int tabletDragDockSlot = -1;      // which dock slot, so the drop lands there
+    int tabletDragInside = -1;        // mini cell of the open folder
+
+    // --- press and hold ------------------------------------------------------
+    // A dwell turns a press into a long press, which is how the home screen is
+    // rearranged without hunting for a button: hold an icon and it lifts,
+    // hold the background and the whole screen starts jiggling.
+    long tabletPressAt = 0;
+    Point tabletPressPos;
+    int tabletPressItem = -1;         // grid cell under the press, -1 background
+    int tabletPressDock = -1;         // dock slot under the press
+    int tabletFolderPressCell = -1;   // mini cell under the press, in an open folder
+    bool tabletLongPressFired = false;
+    void updateTabletLongPress();     // turns a held press into a long press
+    void beginTabletRename(int index); // long press on a folder
+
+    // --- renaming a folder ---------------------------------------------------
+    // Captured from the keyboard the same way the Start menu's search box is, so
+    // no on-screen keyboard is needed: type, Return to commit, Escape to cancel.
+    int tabletRenameItem = -1;
+    std::string tabletRenameText;
 
     // ---- iPhone X home-bar gesture
     bool tabletGesture = false;       // a swipe from the bottom edge is running

@@ -336,7 +336,7 @@ void makeDirs(const std::string& path) {
 // Write via a sibling temp file and rename over the target, so a crash halfway
 // through leaves the previous file intact instead of a truncated one. Creates the
 // config directory if it is missing.
-bool writeFileAtomic(const std::string& path, const std::string& text) {
+bool writeFileAtomicImpl(const std::string& path, const std::string& text) {
     const size_t slash = path.rfind('/');
     if (slash != std::string::npos) makeDirs(path.substr(0, slash));
     const std::string tmp = path + ".tmp";
@@ -368,6 +368,177 @@ std::string configFile(const char* leaf) {
 
 }  // namespace
 
+std::string configPath(const char* leaf) { return configFile(leaf); }
+
+bool writeFileAtomic(const std::string& path, const std::string& text) {
+    return writeFileAtomicImpl(path, text);
+}
+
+namespace {
+
+// Tabs and newlines are the field and record separators in the saved layout, so
+// they cannot survive inside a name or a path. Same treatment the taskbar pins
+// get, for the same reason.
+std::string layoutField(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+    }
+    return out;
+}
+
+// The saved form of one app: a full snapshot of the entry, so a folder keeps
+// working -- and keeps its icon -- even if the .desktop file it came from is
+// gone. exec non-empty means "run this", empty means "hand path to xdg-open".
+std::string layoutRecord(const char* kind, const TabletEntry& e) {
+    std::ostringstream t;
+    t << kind << '\t' << layoutField(e.name) << '\t' << layoutField(e.exec) << '\t'
+      << layoutField(e.path) << '\t' << layoutField(e.icon) << '\t'
+      << layoutField(e.wmClass) << '\n';
+    return t.str();
+}
+
+TabletEntry layoutEntry(const std::vector<std::string>& f) {
+    TabletEntry e;
+    if (f.size() > 1) e.name = f[1];
+    if (f.size() > 2) e.exec = f[2];
+    if (f.size() > 3) e.path = f[3];
+    if (f.size() > 4) e.icon = f[4];
+    if (f.size() > 5) e.wmClass = f[5];
+    return e;
+}
+
+std::vector<std::string> splitFields(const std::string& line) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : line) {
+        if (c == '\t') {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+}  // namespace
+
+TabletLayout loadTabletLayoutFile() {
+    TabletLayout layout;
+    const std::string path = configFile("tablet-layout");
+    if (path.empty()) return layout;
+    std::ifstream in(path);
+    if (!in) return layout;
+
+    // A folder is a header followed by its apps, so it is read into `pending` and
+    // flushed when the next header -- or the end of the file -- turns up.
+    TabletItem pending;
+    bool inFolder = false;
+    auto flush = [&] {
+        if (!inFolder) return;
+        // Two apps is what makes a folder a folder; anything less goes back on the
+        // grid as plain icons rather than being kept as a folder of one.
+        if (pending.folder.apps.size() >= 2) {
+            layout.home.push_back(pending);
+        } else {
+            for (const TabletEntry& e : pending.folder.apps) {
+                TabletItem item;
+                item.app = e;
+                layout.home.push_back(std::move(item));
+            }
+        }
+        pending = TabletItem{};
+        inFolder = false;
+    };
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        const std::vector<std::string> f = splitFields(line);
+        const std::string& kind = f[0];
+        if (kind == "folder" && f.size() > 1) {
+            flush();
+            pending.isFolder = true;
+            pending.folder.name = f[1];
+            inFolder = true;
+        } else if (kind == "in" && inFolder) {
+            pending.folder.apps.push_back(layoutEntry(f));
+        } else if (kind == "dock" && f.size() > 3) {
+            flush();
+            if (int(layout.dock.size()) < metrics::kTabletDockMax)
+                layout.dock.push_back(layoutEntry(f));
+        } else if (kind == "app" && f.size() > 3) {
+            flush();
+            TabletItem item;
+            item.app = layoutEntry(f);
+            layout.home.push_back(std::move(item));
+        }
+    }
+    flush();
+
+    // An app in both places would show twice on one screen, which is exactly what
+    // the dock is there to prevent, so a repeat is dropped from the grid.
+    for (size_t i = 0; i < layout.home.size();) {
+        const TabletEntry& first =
+            layout.home[i].isFolder ? layout.home[i].folder.apps.front() : layout.home[i].app;
+        const bool alsoInDock = std::any_of(
+            layout.dock.begin(), layout.dock.end(), [&](const TabletEntry& d) {
+                return d.name == first.name && d.exec == first.exec && d.path == first.path;
+            });
+        if (!alsoInDock) {
+            ++i;
+            continue;
+        }
+        if (!layout.home[i].isFolder) {
+            layout.home.erase(layout.home.begin() + long(i));
+            continue;
+        }
+        // Only the front app of the folder is the duplicate; the rest are their own
+        // business. If that empties the folder it dissolves back into plain icons.
+        TabletItem& slot = layout.home[i];
+        slot.folder.apps.erase(slot.folder.apps.begin());
+        if (slot.folder.apps.size() < 2) {
+            const std::vector<TabletEntry> rest = slot.folder.apps;
+            layout.home.erase(layout.home.begin() + long(i));
+            for (const TabletEntry& e : rest) {
+                TabletItem item;
+                item.app = e;
+                layout.home.insert(layout.home.begin() + long(i), std::move(item));
+                ++i;
+            }
+        }
+    }
+    return layout;
+}
+
+bool saveTabletLayoutFile(const TabletLayout& layout) {
+    const std::string path = configFile("tablet-layout");
+    if (path.empty()) {
+        log("cannot save the tablet layout: no XDG_CONFIG_HOME or HOME");
+        return false;
+    }
+    std::ostringstream text;
+    text << "# win11wm tablet home screen\n";
+    for (const TabletEntry& e : layout.dock) text << layoutRecord("dock", e);
+    for (const TabletItem& item : layout.home) {
+        if (item.isFolder) {
+            text << "folder\t" << layoutField(item.folder.name) << '\n';
+            for (const TabletEntry& e : item.folder.apps) text << layoutRecord("in", e);
+        } else {
+            text << layoutRecord("app", item.app);
+        }
+    }
+    if (!writeFileAtomicImpl(path, text.str())) {
+        log("cannot write the tablet layout to %s", path.c_str());
+        return false;
+    }
+    log("saved the tablet layout (%zu dock, %zu home) to %s", layout.dock.size(),
+        layout.home.size(), path.c_str());
+    return true;
+}
+
 std::string pinnedPath() { return configFile("pinned"); }
 
 int loadTaskbarHeight() {
@@ -391,7 +562,7 @@ void saveTaskbarHeight(int height) {
         log("cannot save taskbar height: no XDG_CONFIG_HOME or HOME");
         return;
     }
-    if (!writeFileAtomic(path, std::to_string(height) + "\n")) {
+    if (!writeFileAtomicImpl(path, std::to_string(height) + "\n")) {
         log("cannot write taskbar height to %s", path.c_str());
         return;
     }
@@ -440,7 +611,7 @@ void savePinned(const PinnedList& pins) {
         text << pinField(e.name) << '\t' << pinField(e.exec) << '\t' << pinField(e.icon) << '\t'
              << pinField(e.wmClass) << '\t' << (e.terminal ? '1' : '0') << '\n';
     }
-    if (!writeFileAtomic(path, text.str())) {
+    if (!writeFileAtomicImpl(path, text.str())) {
         log("cannot write taskbar pins to %s", path.c_str());
         return;
     }

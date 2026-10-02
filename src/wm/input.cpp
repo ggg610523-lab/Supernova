@@ -399,8 +399,28 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         endTabletSwitchDrag();
         return;
     }
-    if (tabletDragIcon >= 0) {
-        endTabletIconDrag();
+    if (tabletMode && ev.window == comp.overlay()) {
+        // A card drag and a Control Centre slider drag are grabbed on this same
+        // overlay window, so their release lands here rather than further down.
+        // They have to be ended here as well: miss one and the grab is never
+        // released, so the card or the slider follows the pointer forever and the
+        // home screen stops responding to anything else.
+        if (dragWidget >= 0) {
+            endWidgetDrag();
+            return;
+        }
+        if (ccDrag >= 0) {
+            updateCcDrag(x, y);
+            endCcDrag();
+            return;
+        }
+        // Any of the three lift sources ends the same way, and a release that did
+        // not start a lift is a tap on the home screen.
+        if (tabletDragIcon >= 0 || tabletDragFromDock || tabletDragFromFolder) {
+            endTabletIconDrag();
+            return;
+        }
+        handleTabletRelease(x, y, ev.button, ev.time);
         return;
     }
     if (taskbarResizeY >= 0) {
@@ -446,6 +466,10 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
 
 void Manager::onMotion(XMotionEvent& ev) {
     const int x = ev.x_root, y = ev.y_root;
+    // Kept for the long press, which is decided on a tick rather than by an event
+    // and so has to know where the pointer has got to.
+    pointerX = x;
+    pointerY = y;
     if (traceInput() && (dragClient || ev.state)) {
         log("motion to (%d,%d) on 0x%lx mods 0x%x%s", x, y, static_cast<unsigned long>(ev.window),
             static_cast<unsigned>(ev.state), dragClient ? " [dragging]" : "");
@@ -462,7 +486,9 @@ void Manager::onMotion(XMotionEvent& ev) {
             updateTabletSwitchDrag(x, y);
             return;
         }
-        if (tabletDragIcon >= 0) {
+        // Any of the three lift sources -- a grid cell, the dock, or a page of an
+        // open folder -- is one drag, and only a grid icon has an index of its own.
+        if (tabletDragIcon >= 0 || tabletDragFromDock || tabletDragFromFolder) {
             updateTabletIconDrag(x, y);
             return;
         }
@@ -512,8 +538,58 @@ void Manager::onKeyPress(XKeyEvent& ev) {
     // The tablet home screen has no keyboard shortcuts; Escape still leaves
     // rearrange mode or dismisses Control Centre when it is open.
     if (tabletMode) {
+        // A folder rename is modal and needs the keyboard: type a name, Return to
+        // save, Escape to abandon it. Captured the same way as the Start menu's
+        // search box, so no on-screen keyboard is required.
+        if (tabletRenameItem >= 0 && tabletRenameItem < int(tabletHome.size())) {
+            if (sym == XK_Escape) {
+                tabletRenameItem = -1;
+                tabletRenameText.clear();
+                closeTabletFolder();
+                dirty = true;
+                return;
+            }
+            if (sym == XK_Return || sym == XK_KP_Enter) {
+                TabletItem& slot = tabletHome[size_t(tabletRenameItem)];
+                if (slot.isFolder) {
+                    // An emptied name falls back to the suggestion rather than
+                    // leaving the folder blank.
+                    slot.folder.name =
+                        tabletRenameText.empty() ? suggestFolderName(slot.folder.apps)
+                                                 : tabletRenameText;
+                }
+                tabletRenameItem = -1;
+                tabletRenameText.clear();
+                closeTabletFolder();
+                saveTabletLayout();
+                dirty = true;
+                return;
+            }
+            if (sym == XK_BackSpace) {
+                if (!tabletRenameText.empty()) {
+                    tabletRenameText.pop_back();
+                    dirty = true;
+                }
+                return;
+            }
+            char buf[16] = {0};
+            const int n = XLookupString(&ev, buf, sizeof buf - 1, nullptr, nullptr);
+            bool printable = n > 0;
+            for (int i = 0; i < n && printable; ++i) {
+                const unsigned char ch = static_cast<unsigned char>(buf[i]);
+                if (ch < 0x20 || ch == 0x7F) printable = false;
+            }
+            if (printable) {
+                // Bounded, so a held-down key cannot grow the name without limit.
+                if (tabletRenameText.size() < 40) tabletRenameText.append(buf, size_t(n));
+                dirty = true;
+            }
+            return;
+        }
         if (sym == XK_Escape) {
-            if (tabletSwitcher) {
+            if (tabletFolderOpen >= 0) {
+                closeTabletFolder();
+            } else if (tabletSwitcher) {
                 closeTabletSwitcher();
                 tabletGoHome();
             } else if (tabletEdit) {

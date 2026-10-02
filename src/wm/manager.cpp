@@ -406,6 +406,10 @@ void Manager::loop() {
         // battery every few seconds. Wake often enough to service them.
         int timeout = opts->stats ? 400 : -1;
         if (!widgets.empty() && (timeout < 0 || 250 < timeout)) timeout = 250;
+        // A press on the home screen is waiting to turn into a long press, and the
+        // hold is judged on a timer, so the loop has to wake often enough for it to
+        // land on time instead of a whole poll interval late.
+        if (tabletPressAt != 0) timeout = 16;
         poll(&p, 1, timeout);
         if (opts->stats) dirty = true;
     }
@@ -416,6 +420,25 @@ void Manager::tickAnimations(double now) {
     lastTick = now;
     if (dt <= 0.0 || dt > 0.1) dt = 1.0 / 60.0;  // ignore stalls and the first frame
     const double dtMs = dt * 1000.0;
+
+    // The home screen's long press is a timer, not an event, so it is serviced here.
+    if (tabletAnim > 0.5) updateTabletLongPress();
+
+    // The open folder eases in and out, and the sheet is laid out as it moves so
+    // its cells are always where they are painted.
+    if (tabletFolderOpen >= 0) {
+        if (approach(tabletFolderAnim, 1.0, dtMs, 220.0)) dirty = true;
+    } else if (tabletFolderAnim > 0.0) {
+        if (approach(tabletFolderAnim, 0.0, dtMs, 180.0)) dirty = true;
+        // The faded-out sheet's geometry goes only once it is invisible, so it is
+        // still there to draw on the way down.
+        if (tabletFolderAnim <= 0.0) {
+            tabletFolderLast = -1;
+            tabletFolderRects.clear();
+            tabletFolderPanel = Rect{};
+            tabletFolderPageCount = 1;
+        }
+    }
 
     for (auto& cp : clients) {
         Client* c = cp.get();

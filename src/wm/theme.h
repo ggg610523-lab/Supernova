@@ -133,9 +133,9 @@ inline constexpr Color kTabletDockBorder = rgb(0xFFFFFF, 0.22f);
 inline constexpr Color kTabletDockHover = rgb(0xFFFFFF, 0.12f);
 inline constexpr Color kTabletHomeBar = rgb(0xFFFFFF, 0.92f);
 inline constexpr Color kTabletHomeBarShadow = rgb(0x000000, 0.28f);
-inline constexpr Color kTabletEditPill = rgb(0x14141A, 0.55f);
-inline constexpr Color kTabletEditPillBorder = rgb(0xFFFFFF, 0.22f);
-inline constexpr Color kTabletEditPillHover = rgb(0xFFFFFF, 0.14f);
+inline constexpr Color kTabletFolderBack = rgb(0xFFFFFF, 0.16f);   // the squircle behind a folder's mini icons
+inline constexpr Color kTabletFolderHover = rgb(0xFFFFFF, 0.30f);   // drop target: an icon over a folder
+inline constexpr Color kTabletFolderSheet = rgb(0x1C1C22, 0.82f);   // the open folder's rounded sheet
 inline constexpr Color kTabletSplash = rgb(0x0A0A0F, 0.96f);
 inline constexpr Color kTabletSplashLabel = rgb(0xFFFFFF);
 inline constexpr Color kTabletSplashSub = rgb(0xFFFFFF, 0.55f);
@@ -249,6 +249,12 @@ constexpr int kTabletIconMin = 48;
 constexpr int kTabletCellW = 106;       // icon + label cell
 constexpr int kTabletCellH = 108;
 constexpr int kTabletDockIcon = 62;
+constexpr int kTabletDockMax = 4;        // iOS caps the dock at four
+constexpr int kTabletLongPressMs = 450;  // hold this long to rearrange
+// A folder shows nine apps at a time in a 3x3, both in the closed icon and in the
+// open sheet, exactly as iOS lays one out.
+constexpr int kTabletFolderPerPage = 9;
+constexpr int kTabletFolderMiniMax = 72;
 constexpr int kTabletHomeBarW = 144;    // the iPhone X home indicator
 constexpr int kTabletHomeBarH = 5;
 // The band along the bottom edge kept clear of app windows, so a tap on the

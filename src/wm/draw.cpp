@@ -157,8 +157,9 @@ void Manager::animateDesktopIconReflow(double dtMs) {
     }
 }
 
-// Everything sitting on the user's Desktop folder: a folder, a dropped file or
+
 // a .desktop launcher. A click selects, a double click opens (input.cpp).
+// Everything sitting on the user's Desktop folder: a folder, a dropped file or
 void Manager::drawDesktopIcons() {
     if (desktopIconRects.size() != desktopItems.size() ||
         desktopIconDraw.size() != desktopItems.size())

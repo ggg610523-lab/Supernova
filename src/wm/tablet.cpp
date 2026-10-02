@@ -13,7 +13,7 @@
 // heavily translucent glass dock, and the iPhone X home indicator along the
 // bottom edge.
 //
-// An "Edit" pill puts the home screen into rearrangement mode: the icons jiggle
+// A long press puts the home screen into rearrangement mode: the icons jiggle
 // and can be dragged from cell to cell, and the wallpaper widgets are moved and
 // resized exactly as they are on the desktop.
 //
@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <ctime>
 #include <string>
+#include <vector>
 
 #include "theme.h"
 
@@ -124,36 +125,73 @@ void Manager::applyTabletMode() {
 
 // The home screen and the dock are built once, so rearranging the icons holds
 // for the rest of the session instead of being undone by the next layout pass.
+// The home screen as the user left it. Reading and writing it lives with the rest
+// of the shell's saved settings in apps.cpp; these two are the bridge between
+// that plain data and the live members.
+bool Manager::loadTabletLayout() {
+    const TabletLayout layout = loadTabletLayoutFile();
+    if (layout.dock.empty() && layout.home.empty()) return false;
+    tabletDock = layout.dock;
+    tabletHome = layout.home;
+    return true;
+}
+
+void Manager::saveTabletLayout() {
+    TabletLayout layout;
+    layout.dock = tabletDock;
+    layout.home = tabletHome;
+    saveTabletLayoutFile(layout);
+}
+
 void Manager::buildTabletEntries() {
     tabletHome.clear();
     tabletDock.clear();
 
+    // The arrangement the user left behind wins over the one this session's
+    // Desktop directory would suggest. Nothing is written here on purpose: until
+    // the home screen is actually rearranged, a newly installed launcher still
+    // shows up on the next run.
+    if (loadTabletLayout()) {
+        tabletEntriesBuilt = true;
+        return;
+    }
+
     // The home screen is fed from the session's Desktop directory, which is the
     // curated list of launchers the user actually has; the full .desktop scan is
     // the fallback when the Desktop is empty.
+    std::vector<TabletEntry> found;
     for (const DesktopItem& d : desktopItems) {
         TabletEntry e;
         e.name = d.name;
         e.icon = d.icon;
         e.exec = d.exec;
         e.path = d.path;
-        tabletHome.push_back(e);
+        found.push_back(e);
     }
-    if (tabletHome.empty()) {
+    if (found.empty()) {
         for (const AppEntry& a : apps) {
-            if (tabletHome.size() >= 24) break;
+            if (found.size() >= 24) break;
             TabletEntry e;
             e.name = a.name;
             e.icon = a.icon;
             e.wmClass = a.wmClass;
             e.exec = a.exec;
-            tabletHome.push_back(e);
+            found.push_back(e);
         }
     }
-    // The dock is a separate snapshot of the first five entries, so moving a
-    // home icon never quietly reorders the dock.
-    const size_t dockCount = std::min<size_t>(tabletHome.size(), 5);
-    tabletDock.assign(tabletHome.begin(), tabletHome.begin() + long(dockCount));
+
+    // The dock holds its own copies of apps, and iOS is strict about this: what is
+    // in the dock is *not* also on the grid, so nothing appears twice on one screen.
+    // The grid keeps at least one icon, so a session with only a handful of
+    // launchers still has something to rearrange.
+    const size_t dockCount =
+        std::min<size_t>(metrics::kTabletDockMax, found.empty() ? 0 : found.size() - 1);
+    tabletDock.assign(found.begin(), found.begin() + long(dockCount));
+    for (size_t i = dockCount; i < found.size(); ++i) {
+        TabletItem item;
+        item.app = found[i];
+        tabletHome.push_back(std::move(item));
+    }
     tabletEntriesBuilt = true;
 }
 
@@ -169,11 +207,6 @@ void Manager::layoutTabletHome() {
     tabletStatusRect = Rect{0, 0, screenW, metrics::kTabletStatusH};
     tabletHomeBarRect = Rect{(screenW - metrics::kTabletHomeBarW) / 2,
                              screenH - 14, metrics::kTabletHomeBarW, metrics::kTabletHomeBarH};
-    // The Edit / Done pill sits to the right of the first icon row, clear of it.
-    const int pillW = 78, pillH = 30;
-    tabletEditRect = Rect{screenW - pillW - std::max(12, screenW / 48),
-                          tabletStatusRect.bottom() + 6, pillW, pillH};
-
     // --- dock: a glass pill of up to five squircles, above the home bar -----
     const int n = int(tabletDock.size());
     const int di = std::clamp(std::min(screenW, screenH) / 11, 48, metrics::kTabletDockIcon);
@@ -204,7 +237,7 @@ void Manager::layoutTabletHome() {
     const int cellH = icon + 34;
     const int marginX = std::max(18, screenW / 18);
     const int cols = std::max(3, (screenW - 2 * marginX) / cellW);
-    const int top = tabletStatusRect.bottom() + 24 + pillH;
+    const int top = tabletStatusRect.bottom() + 24;
     const int bottom = tabletDockRect.empty() ? screenH - 46 : tabletDockRect.y - 18;
     const int rows = std::max(1, (bottom - top) / cellH);
     const size_t per = size_t(cols) * size_t(rows);
@@ -217,6 +250,135 @@ void Manager::layoutTabletHome() {
         const int row = int(i) / cols;
         tabletHomeRects.push_back(Rect{gx + col * cellW, top + row * cellH, cellW, cellH});
     }
+
+    if (tabletFolderOpen >= 0) layoutTabletFolder();
+}
+
+// The open folder: a rounded sheet holding its apps nine at a time in a 3x3, the
+// same nine-per-page grid the closed folder icon shows. The sheet is inset from
+// the status bar and the home indicator so both stay tappable underneath.
+void Manager::layoutTabletFolder() {
+    tabletFolderRects.clear();
+    if (tabletFolderOpen < 0 || tabletFolderOpen >= int(tabletHome.size())) return;
+    const TabletFolder& f = tabletHome[size_t(tabletFolderOpen)].folder;
+
+    tabletFolderPageCount =
+        std::max(1, (int(f.apps.size()) + metrics::kTabletFolderPerPage - 1) /
+                    metrics::kTabletFolderPerPage);
+    tabletFolderPage = std::clamp(tabletFolderPage, 0, tabletFolderPageCount - 1);
+
+    const int sheetW = std::min(screenW - 32, std::max(360, screenW * 78 / 100));
+    const int mini = std::clamp((sheetW - 2 * 24) / 3, 44, metrics::kTabletFolderMiniMax);
+    const int sheetH = 24 + mini + 34 + 24 + metrics::kTabletFolderPerPage / 3 *
+                                              (mini + mini / 3 + 10) +
+                       34;
+    const int sheetX = (screenW - sheetW) / 2;
+    const int sheetY = std::max(metrics::kTabletStatusH + 12, (screenH - sheetH) / 2);
+    tabletFolderPanel = Rect{sheetX, sheetY, sheetW, sheetH};
+
+    // The 3x3 block, centred in the sheet under the folder's name.
+    const int gap = mini / 3;
+    const int step = mini + gap;
+    const int blockW = 3 * mini + 2 * gap;
+    const int blockX = sheetX + (sheetW - blockW) / 2;
+    const int blockY = sheetY + 24 + mini + 26;
+    const int first = tabletFolderPage * metrics::kTabletFolderPerPage;
+    for (int i = 0; i < metrics::kTabletFolderPerPage; ++i) {
+        const int index = first + i;
+        if (index >= int(f.apps.size())) break;
+        const Rect cell{blockX + (i % 3) * step, blockY + (i / 3) * (step + 10), mini, mini};
+        tabletFolderRects.push_back(cell);
+    }
+}
+
+void Manager::openTabletFolder(int index) {
+    if (index < 0 || index >= int(tabletHome.size())) return;
+    if (!tabletHome[size_t(index)].isFolder) return;
+    tabletFolderOpen = index;
+    tabletFolderLast = index;
+    tabletFolderPage = 0;
+    tabletFolderAnim = 0.0;
+    tabletHover = -1;
+    layoutTabletFolder();
+    dirty = true;
+}
+
+void Manager::closeTabletFolder() {
+    if (tabletFolderOpen < 0) return;
+    // The sheet is left in place and drawn fading out; tickAnimations() clears it
+    // once the animation is done. Dropping it here would cut the close off.
+    tabletFolderLast = tabletFolderOpen;
+    tabletFolderOpen = -1;
+    tabletFolderPage = 0;
+    dirty = true;
+}
+
+// iOS suggests a name from what it thinks is inside; there is no category
+// database to consult here, so this is the longest word its apps have in common,
+// falling back to "Folder" when they share nothing at all.
+std::string Manager::suggestFolderName(const std::vector<TabletEntry>& apps) {
+    if (apps.empty()) return "Folder";
+    // Only a word every app carries can describe the group, so the first word is
+    // tried alone and then with one more word appended.
+    for (size_t words = 1; words <= 2; ++words) {
+        std::string shared;
+        bool first = true;
+        for (const TabletEntry& a : apps) {
+            std::string lower;
+            lower.reserve(a.name.size());
+            for (char ch : a.name)
+                lower.push_back(char(std::tolower(static_cast<unsigned char>(ch))));
+            // Split on spaces and keep only alphanumeric words: "Files" and
+            // "Text Editor" must not agree on the word "editor" by accident alone.
+            std::vector<std::string> words_in;
+            std::string cur;
+            for (char ch : lower) {
+                if (std::isalnum(static_cast<unsigned char>(ch))) {
+                    cur.push_back(ch);
+                } else if (!cur.empty()) {
+                    words_in.push_back(cur);
+                    cur.clear();
+                }
+            }
+            if (!cur.empty()) words_in.push_back(cur);
+            // Words that only describe the app rather than the group.
+            static const char* kNoise[] = {"app", "application", "the", "of", "and", "for"};
+            for (std::string& w : words_in) {
+                bool noise = false;
+                for (const char* n : kNoise)
+                    if (w == n) noise = true;
+                if (noise) w.clear();
+            }
+            std::string candidate;
+            for (size_t i = 0; i < words_in.size() && i < words; ++i) {
+                if (words_in[i].empty()) continue;
+                if (!candidate.empty()) candidate.push_back(' ');
+                candidate += words_in[i];
+            }
+            if (candidate.empty()) {
+                shared.clear();
+                break;
+            }
+            if (first) {
+                shared = candidate;
+                first = false;
+            } else if (candidate != shared) {
+                shared.clear();
+                break;
+            }
+        }
+        if (!shared.empty()) {
+            // Title case, the way a folder name is shown.
+            std::string out;
+            bool up = true;
+            for (char ch : shared) {
+                out.push_back(up ? char(std::toupper(static_cast<unsigned char>(ch))) : ch);
+                up = (ch == ' ');
+            }
+            return out;
+        }
+    }
+    return "Folder";
 }
 
 // ---------------------------------------------------------------------------
@@ -255,15 +417,17 @@ void Manager::drawTabletHome() {
     const double wiggle = nowMs() / 150.0;
 
     // Where the dragged icon would land, painted under the icons.
-    if (tabletDragIcon >= 0 && tabletDragTarget >= 0 &&
-        tabletDragTarget < int(tabletHomeRects.size())) {
+    if ((tabletDragIcon >= 0 || tabletDragFromDock || tabletDragFromFolder) &&
+        tabletDragTarget >= 0 && tabletDragTarget < int(tabletHomeRects.size())) {
         const Rect cell = tabletHomeRects[size_t(tabletDragTarget)].inflated(-6);
         comp.drawRect(cell, radius + 6.f, theme::kTabletIconHover, a * 0.9f);
     }
 
     // --- home screen icons --------------------------------------------------
     for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
-        const bool dragging = int(i) == tabletDragIcon;
+        const TabletItem& item = tabletHome[i];
+        const bool dragging = int(i) == tabletDragIcon && !tabletDragFromDock &&
+                              !tabletDragFromFolder;
         const Rect cell = dragging ? tabletDragRect : tabletHomeRects[i];
         int jig = 0;
         if (tabletEdit && !dragging)
@@ -274,12 +438,33 @@ void Manager::drawTabletHome() {
             comp.drawRect(box.inflated(4), radius + 3.f, theme::kTabletIconHover,
                           a * float(hv));
         if (dragging) comp.drawRect(box.inflated(6), radius + 5.f, theme::kTabletIconHover, a);
-        if (!drawAppIcon(box, tabletHome[i].icon, tabletHome[i].wmClass, radius, a)) {
-            drawAppTile(box, tabletHome[i].name, radius, tabletTint(tabletHome[i].name),
-                        false);
+
+        const std::string label = item.isFolder ? item.folder.name : item.app.name;
+        if (item.isFolder) {
+            // The folder's own squircle, with up to nine of its apps as mini icons
+            // inside it, exactly the way iOS draws one.
+            comp.drawRect(box, radius, theme::kTabletFolderBack, a);
+            const int pad = std::max(4, icon / 10);
+            const int inner = icon - 2 * pad;
+            const int gap = std::max(2, inner / 16);
+            const int cellSz = (inner - 2 * gap) / 3;
+            const float miniR = float(cellSz) * metrics::kTabletIconRadius;
+            const int shown =
+                std::min<int>(metrics::kTabletFolderPerPage, int(item.folder.apps.size()));
+            for (int k = 0; k < shown; ++k) {
+                const Rect miniBox{pad + box.x + (k % 3) * (cellSz + gap),
+                                   pad + box.y + (k / 3) * (cellSz + gap), cellSz, cellSz};
+                const TabletEntry& app = item.folder.apps[size_t(k)];
+                if (!drawAppIcon(miniBox, app.icon, app.wmClass, miniR, a))
+                    drawAppTile(miniBox, app.name, miniR, tabletTint(app.name), false);
+            }
+        } else if (!drawAppIcon(box, item.app.icon, item.app.wmClass, radius, a)) {
+            drawAppTile(box, item.app.name, radius, tabletTint(item.app.name), false);
         }
-        const TextTex t = text.get(
-            tabletFit(text, tabletHome[i].name, 12, cell.w - 8), 12, Weight::Regular);
+        // The drop ring, for either kind of cell a folder can be made on.
+        if (int(i) == tabletDragOverFolder || int(i) == tabletDragOverApp)
+            comp.drawRect(box.inflated(3), radius + 2.f, theme::kTabletFolderHover, a);
+        const TextTex t = text.get(tabletFit(text, label, 12, cell.w - 8), 12, Weight::Regular);
         if (!t.tex) continue;
         const int lx = cell.x + (cell.w - t.w) / 2 + jig;
         const int ly = box.bottom() + 6;
@@ -288,15 +473,24 @@ void Manager::drawTabletHome() {
         comp.drawText(t, Rect{lx, ly, t.w, t.h}, alpha(theme::kTabletLabel, a), 1.0f);
     }
 
-    // --- dock (hidden while rearranging, like iOS) --------------------------
-    if (!tabletEdit && !tabletDockRect.empty()) {
+    // --- dock ---------------------------------------------------------------
+    // The dock stays up while rearranging, so an icon can be dragged out of the
+    // grid into it or lifted back out again.
+    if (!tabletDockRect.empty()) {
         const float dr = float(std::min(tabletDockRect.h, 44)) * 0.62f;
         comp.drawAcrylic(tabletDockRect, dr, theme::kTabletDockGlass, 0.55f,
-                         theme::kTabletDockBorder, a);
+                         tabletDragOverDock ? theme::kTabletDockHover
+                                            : theme::kTabletDockBorder,
+                         a);
         const int dockIcon = tabletDockIconSize;
         const float dockRadius = float(dockIcon) * metrics::kTabletIconRadius;
         for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
-            const Rect box = tabletDockRects[i];
+            Rect box = tabletDockRects[i];
+            const bool dragging = int(i) == tabletDragDockIndex && tabletDragFromDock;
+            if (dragging) {
+                box = tabletDragRect;
+                box.w = box.h = dockIcon;
+            }
             const size_t hoverIndex = tabletHome.size() + i;
             const double hv =
                 hoverIndex < tabletIconHover.size() ? tabletIconHover[hoverIndex] : 0.0;
@@ -310,15 +504,92 @@ void Manager::drawTabletHome() {
         }
     }
 
-    // --- Edit / Done pill ---------------------------------------------------
-    comp.drawAcrylic(tabletEditRect, float(tabletEditRect.h) * 0.5f, theme::kTabletEditPill,
-                     0.5f, theme::kTabletEditPillBorder, a);
-    drawTextCentered(tabletEdit ? "Done" : "Edit", 13, Weight::Medium,
-                     alpha(theme::kTabletLabel, a), tabletEditRect);
+    // An open folder, then the rename field over it: both belong to the home
+    // screen rather than to the app layer, so they are painted from here.
+    drawTabletFolderView();
+    drawTabletRename();
 }
 
 // The clock/date and the home indicator, painted after the windows so they float
 // over an open app exactly the way iOS' status bar and gesture bar do.
+
+// An open folder: the screen dims, and the folder's icon zooms out into a rounded
+// sheet holding its apps nine at a time. The zoom is anchored on the icon it came
+// from, so it reads as that folder opening rather than a panel arriving.
+void Manager::drawTabletFolderView() {
+    // While one is fading out the index has already been cleared, so the last one
+    // is used to keep drawing it until the animation finishes.
+    const int index = tabletFolderOpen >= 0 ? tabletFolderOpen : tabletFolderLast;
+    if (index < 0 || tabletFolderAnim <= 0.001) return;
+    if (index >= int(tabletHome.size())) return;
+    const TabletFolder& f = tabletHome[size_t(index)].folder;
+    const float a = float(clamp01(easeOutCubic(tabletFolderAnim)));
+    comp.drawRect(Rect{0, 0, screenW, screenH}, 0.f, theme::kTabletSplash, 0.55f * a);
+
+    const Rect panel = tabletFolderPanel;
+    if (panel.empty()) return;
+    comp.drawAcrylic(panel, 34.f, theme::kTabletFolderSheet, 0.90f, theme::kShellBorder, a);
+
+    // The name, doubling as the page label once a folder has more than one page.
+    const std::string title =
+        f.name.empty() ? std::string("Folder") : f.name;
+    drawTextCentered(title, 19, Weight::Bold, alpha(theme::kText, a),
+                     Rect{panel.x, panel.y + 20, panel.w, 30});
+
+    const float miniR = float(metrics::kTabletIconRadius);
+    for (size_t i = 0; i < tabletFolderRects.size() && i < f.apps.size(); ++i) {
+        Rect box = tabletFolderRects[i];
+        const bool dragging = tabletDragFromFolder && int(i) == tabletDragInside;
+        if (dragging) box = tabletDragRect;
+        const TabletEntry& app = f.apps[i];
+        const float r = float(box.w) * miniR;
+        if (dragging) comp.drawRect(box.inflated(5), r + 4.f, theme::kTabletIconHover, a);
+        if (!drawAppIcon(box, app.icon, app.wmClass, r, a))
+            drawAppTile(box, app.name, r, tabletTint(app.name), false);
+    }
+
+    // Page dots, when the folder holds more than the nine one page shows.
+    if (tabletFolderPageCount > 1) {
+        const int dot = 6, gap = 14;
+        const int totalW = tabletFolderPageCount * gap - (gap - dot);
+        int dx = panel.x + (panel.w - totalW) / 2;
+        const int dy = panel.bottom() - 26;
+        for (int p = 0; p < tabletFolderPageCount; ++p) {
+            const bool on = p == tabletFolderPage;
+            comp.drawRect(Rect{dx, dy, dot, dot}, dot * 0.5f,
+                          on ? theme::kText : theme::kTextMuted, a * (on ? 0.95f : 0.5f));
+            dx += gap;
+        }
+    }
+}
+
+// The rename field. Drawn over everything, with a blinking caret, because it is a
+// modal moment: the user is typing a name and nothing else should compete.
+void Manager::drawTabletRename() {
+    if (tabletRenameItem < 0 || tabletRenameItem >= int(tabletHome.size())) return;
+    if (!tabletHome[size_t(tabletRenameItem)].isFolder) return;
+    const float a = float(clamp01(easeOutCubic(tabletAnim)));
+    comp.drawRect(Rect{0, 0, screenW, screenH}, 0.f, theme::kTabletSplash, 0.62f * a);
+
+    const int fieldW = std::min(screenW - 64, 420);
+    const int fieldH = 48;
+    const Rect field{(screenW - fieldW) / 2, screenH / 2 - fieldH / 2, fieldW, fieldH};
+    comp.drawAcrylic(field, 12.f, theme::kCcTile, 0.94f, theme::kAccentRing, a);
+    const TextTex t = text.get(tabletRenameText, 17, Weight::Medium);
+    if (t.tex) {
+        const int tx = field.x + 18;
+        comp.drawText(t, Rect{tx, field.y + (fieldH - t.h) / 2, t.w, t.h},
+                      alpha(theme::kText, a), 1.0f);
+        // The caret blinks on the second, which is enough to read as a text field.
+        if (std::fmod(nowMs(), 1000.0) < 500.0) {
+            comp.drawRect(Rect{tx + t.w + 2, field.y + 10, 2, fieldH - 20}, 1.f,
+                          alpha(theme::kText, a), 1.0f);
+        }
+    }
+    drawTextCentered("Return to save, Escape to cancel", 12, Weight::Regular,
+                     alpha(theme::kTextMuted, a), Rect{0, field.bottom() + 18, screenW, 20});
+}
+
 void Manager::drawTabletChrome() {
     if (tabletAnim <= 0.001) return;
     const float a = float(clamp01(easeOutCubic(tabletAnim)));
@@ -441,9 +712,17 @@ Rect Manager::tabletIconRectFor(const Client* c) const {
     };
     const int icon = std::max(metrics::kTabletIconMin, tabletIconSize);
     for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
-        if (!matches(tabletHome[i])) continue;
+        const TabletItem& item = tabletHome[i];
         const Rect& cell = tabletHomeRects[i];
-        return Rect{cell.x + (cell.w - icon) / 2, cell.y, icon, icon};
+        const Rect iconRect{cell.x + (cell.w - icon) / 2, cell.y, icon, icon};
+        if (!item.isFolder) {
+            if (matches(item.app)) return iconRect;
+            continue;
+        }
+        // An app that has been put in a folder flies out of that folder's icon,
+        // which is the last place the user saw it, exactly as iOS does it.
+        for (const TabletEntry& app : item.folder.apps)
+            if (matches(app)) return iconRect;
     }
     for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
         if (matches(tabletDock[i])) return tabletDockRects[i];
@@ -505,8 +784,25 @@ void Manager::openTabletEntry(const TabletEntry& e) {
     dirty = true;
 }
 
+int Manager::tabletIconAt(int x, int y) const {
+    for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i)
+        if (tabletDockRects[i].contains(x, y)) return int(i);
+    for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i)
+        if (tabletHomeRects[i].contains(x, y)) return int(i);
+    return -1;
+}
+
 bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
     if (button == Button4 || button == Button5) return true;  // no scroll surfaces here
+    // A rename is modal: it owns every press until it is committed or abandoned.
+    if (tabletRenameItem >= 0) {
+        closeTabletFolder();
+        tabletEdit = true;
+        tabletRenameItem = -1;
+        tabletRenameText.clear();
+        dirty = true;
+        return true;
+    }
     // The switcher owns the pointer while it is up.
     if (tabletSwitcher) return handleTabletSwitcherPress(x, y, button);
     // Control Centre is the one desktop flyout that stays live in tablet mode.
@@ -520,40 +816,207 @@ bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
     }
     if (button != Button1) return true;  // swallow right/middle clicks
 
-    // Widgets stay usable -- and rearrangeable -- exactly as on the desktop.
-    if (handleWidgetPress(x, y, time)) return true;
+    // Widget cards live on the home screen as well, and the desktop cascades them
+    // in from the top right, which is where this screen keeps its first icon row
+    // and the top of the grid. Where a card and an icon share a spot the icon wins:
+    // rearranging the grid is what the press is for, and a card drawn over an icon
+    // must not swallow it. An open folder outranks a card for the same reason.
+    const bool iconWins = tabletFolderOpen >= 0 || tabletIconAt(x, y) >= 0;
+    if (!iconWins && handleWidgetPress(x, y, time)) return true;
 
-    if (tabletEditRect.contains(x, y)) {
-        tabletEdit = !tabletEdit;
-        tabletHover = -1;
-        dirty = true;
+    // An open folder is modal too: taps land in the sheet, and a tap outside it
+    // closes the folder rather than reaching the home screen behind.
+    if (tabletFolderOpen >= 0) {
+        if (tabletFolderPanel.contains(x, y)) {
+            for (size_t i = 0; i < tabletFolderRects.size(); ++i) {
+                if (!tabletFolderRects[i].inflated(6).contains(x, y)) continue;
+                // Remember the press so a dwell can lift it out of the folder.
+                tabletPressAt = nowMs();
+                tabletPressPos = Point{x, y};
+                tabletPressItem = -1;
+                tabletPressDock = -1;
+                tabletFolderPressCell = int(i);
+                return true;
+            }
+            // The dots page the folder rather than launching anything.
+            if (tabletFolderPageCount > 1) {
+                const int dot = 6, gap = 14;
+                const int totalW = tabletFolderPageCount * gap - (gap - dot);
+                const int dx0 = tabletFolderPanel.x + (tabletFolderPanel.w - totalW) / 2;
+                const Rect dots{dx0 - 6, tabletFolderPanel.bottom() - 32,
+                                totalW + 12, 18};
+                if (dots.contains(x, y)) {
+                    const int page = std::clamp((x - dx0) / gap, 0, tabletFolderPageCount - 1);
+                    if (page != tabletFolderPage) {
+                        tabletFolderPage = page;
+                        layoutTabletFolder();
+                        dirty = true;
+                    }
+                    return true;
+                }
+            }
+            tabletPressAt = 0;  // a sheet tap is not a tap on the home screen
+            return true;
+        }
+        tabletPressAt = 0;
+        closeTabletFolder();
         return true;
     }
-    if (tabletEdit) {
-        handleTabletIconPress(x, y);  // drag, or nothing at all
-        return true;
-    }
 
+    // Where the press landed, kept so tickAnimations() can turn it into a long
+    // press: hold an icon and it lifts, hold the background and the screen starts
+    // jiggling. This is the gesture that makes rearranging discoverable.
+    tabletPressAt = nowMs();
+    tabletPressPos = Point{x, y};
+    tabletLongPressFired = false;
+    tabletPressItem = -1;
+    tabletPressDock = -1;
+    tabletFolderPressCell = -1;
     for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
-        if (!tabletDockRects[i].contains(x, y)) continue;
-        openTabletEntry(tabletDock[i]);
+        if (tabletDockRects[i].contains(x, y)) {
+            tabletPressDock = int(i);
+            break;
+        }
+    }
+    if (tabletPressDock < 0) {
+        for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
+            if (tabletHomeRects[i].contains(x, y)) {
+                tabletPressItem = int(i);
+                break;
+            }
+        }
+    }
+
+    // Already rearranging: a press is the start of a drag, or nothing at all.
+    if (tabletEdit) {
+        handleTabletIconPress(x, y);
         return true;
     }
-    for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
-        if (!tabletHomeRects[i].contains(x, y)) continue;
-        openTabletEntry(tabletHome[i]);
-        return true;
-    }
+
     // The status bar is the Control Centre affordance: there is no taskbar clock
     // to click while the home screen is up.
     if (tabletStatusRect.contains(x, y)) {
+        tabletPressAt = 0;
         toggleControlCenter();
         return true;
     }
     // The bottom strip is the iPhone X home bar: a tap goes home, but the real
     // gesture is a swipe, so hand it to the gesture tracker.
-    if (y >= screenH - metrics::kTabletHomeBarZone) return handleTabletGesturePress(x, y);
+    if (y >= screenH - metrics::kTabletHomeBarZone) {
+        tabletPressAt = 0;
+        return handleTabletGesturePress(x, y);
+    }
+    // A tap on an icon is left open: nothing happens until the button comes back
+    // up, so a press held still can still turn into a drag or a long press. That
+    // is the whole reason rearranging works without a button to go looking for.
     return true;
+}
+
+void Manager::handleTabletRelease(int x, int y, unsigned button, Time time) {
+    (void)time;
+    // What the press was on, kept before the state is cleared.
+    const int item = tabletPressItem;
+    const int dock = tabletPressDock;
+    const int cell = tabletFolderPressCell;
+    // Whether this really was a press that landed on the home screen: the status
+    // bar and the home indicator act on the way down and arm nothing.
+    const bool armed = tabletPressAt != 0;
+    const bool dwelled = tabletLongPressFired;
+    const bool dragging =
+        tabletDragIcon >= 0 || tabletDragFromDock || tabletDragFromFolder;
+
+    tabletPressAt = 0;
+    tabletLongPressFired = false;
+    tabletPressItem = -1;
+    tabletPressDock = -1;
+    tabletFolderPressCell = -1;
+
+    // A lift or a dwell has already done the work; letting go must not also launch.
+    if (button != Button1 || dwelled || dragging) return;
+
+    if (cell >= 0) {
+        if (tabletFolderOpen < 0 || tabletFolderOpen >= int(tabletHome.size())) return;
+        const TabletFolder& f = tabletHome[size_t(tabletFolderOpen)].folder;
+        const int index = tabletFolderPage * metrics::kTabletFolderPerPage + cell;
+        if (index >= 0 && index < int(f.apps.size())) openTabletEntry(f.apps[size_t(index)]);
+        return;
+    }
+    if (dock >= 0) {
+        if (dock < int(tabletDock.size())) openTabletEntry(tabletDock[size_t(dock)]);
+        return;
+    }
+    if (item >= 0) {
+        if (item >= int(tabletHome.size())) return;
+        const TabletItem& slot = tabletHome[size_t(item)];
+        // A folder is the one cell that is not an app itself: it opens instead.
+        if (slot.isFolder) openTabletFolder(item);
+        else openTabletEntry(slot.app);
+        return;
+    }
+    // A tap on bare wallpaper ends the jiggle, which with Escape is the only way
+    // out; a drag that ended out here went through the
+    // drop path instead and never gets here.
+    if (tabletEdit && armed) {
+        tabletEdit = false;
+        tabletHover = -1;
+        dirty = true;
+    }
+    (void)x;
+    (void)y;
+}
+
+// Turns a press that has been held still into a long press. Called from the frame
+// tick, since it is a timer rather than an event.
+void Manager::updateTabletLongPress() {
+    if (tabletRenameItem >= 0 || tabletSwitcher || ccOpen || overlayOpen()) return;
+    if (tabletLongPressFired || tabletDragIcon >= 0 || tabletGesture) return;
+    if (tabletPressAt == 0) return;
+    if (nowMs() - tabletPressAt < metrics::kTabletLongPressMs) return;
+    // Only a press that has not travelled counts: a drag is already a drag.
+    if (std::abs(tabletPressPos.x - pointerX) > 6 ||
+        std::abs(tabletPressPos.y - pointerY) > 6) {
+        tabletPressAt = 0;
+        return;
+    }
+    tabletLongPressFired = true;
+    tabletEdit = true;
+    tabletHover = -1;
+    if (tabletFolderOpen >= 0) {
+        // Inside a folder: holding one of its apps lifts it, ready to be dragged
+        // out onto the home screen.
+        if (tabletFolderPressCell >= 0) {
+            beginTabletFolderDrag(tabletFolderPressCell, tabletPressPos.x,
+                                  tabletPressPos.y);
+            dirty = true;
+            return;
+        }
+        // Holding the sheet itself opens it for renaming.
+        if (tabletFolderOpen < int(tabletHome.size()) &&
+            tabletFolderPanel.contains(tabletPressPos.x, tabletPressPos.y)) {
+            beginTabletRename(tabletFolderOpen);
+            return;
+        }
+    }
+    if (tabletPressDock >= 0) {
+        beginTabletDockDrag(tabletPressDock, tabletPressPos.x, tabletPressPos.y);
+        dirty = true;
+        return;
+    }
+    if (tabletPressItem >= 0) {
+        // Holding a folder names it, which is where iOS puts renaming. Holding a
+        // plain app lifts it instead. A folder is still moved by dragging it in
+        // edit mode, so nothing is lost by not lifting it here.
+        const TabletItem& item = tabletHome[size_t(tabletPressItem)];
+        if (item.isFolder) {
+            beginTabletRename(tabletPressItem);
+            return;
+        }
+        beginTabletIconDrag(tabletPressItem, tabletPressPos.x, tabletPressPos.y);
+        dirty = true;
+        return;
+    }
+    // The background: nothing to lift, the jiggle is the whole point of the hold.
+    dirty = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -788,6 +1251,11 @@ void Manager::endTabletSwitchDrag() {
 }
 
 bool Manager::handleTabletIconPress(int x, int y) {
+    for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
+        if (!tabletDockRects[i].contains(x, y)) continue;
+        beginTabletDockDrag(int(i), x, y);
+        return true;
+    }
     for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
         if (!tabletHomeRects[i].contains(x, y)) continue;
         beginTabletIconDrag(int(i), x, y);
@@ -798,20 +1266,130 @@ bool Manager::handleTabletIconPress(int x, int y) {
 
 void Manager::beginTabletIconDrag(int index, int x, int y) {
     if (index < 0 || index >= int(tabletHomeRects.size())) return;
+    if (index >= int(tabletHome.size())) return;
     tabletDragIcon = index;
+    tabletDragFromDock = false;
+    tabletDragFromFolder = false;
     tabletDragTarget = index;
+    tabletDragDockIndex = -1;
+    tabletDragOverFolder = -1;
+    tabletDragOverDock = false;
+    tabletDragInside = -1;
     tabletDragRect = tabletHomeRects[size_t(index)];
     tabletDragGrab = Point{x - tabletDragRect.x, y - tabletDragRect.y};
     grabPointer();
     dirty = true;
 }
 
+void Manager::beginTabletDockDrag(int index, int x, int y) {
+    if (index < 0 || index >= int(tabletDock.size())) return;
+    tabletDragIcon = -1;          // a dock icon has no grid cell of its own
+    tabletDragDockIndex = index;  // but the release needs to know which slot it was
+    tabletDragFromDock = true;
+    tabletDragFromFolder = false;
+    tabletDragTarget = -1;
+    tabletDragOverFolder = -1;
+    tabletDragOverDock = false;
+    tabletDragInside = -1;
+    tabletDragRect = index < int(tabletDockRects.size()) ? tabletDockRects[size_t(index)]
+                                                         : Rect{x - 16, y - 16, 32, 32};
+    tabletDragGrab = Point{x - tabletDragRect.x, y - tabletDragRect.y};
+    grabPointer();
+    dirty = true;
+}
+
+void Manager::beginTabletFolderDrag(int cell, int x, int y) {
+    if (tabletFolderOpen < 0 || tabletFolderOpen >= int(tabletHome.size())) return;
+    const TabletFolder& f = tabletHome[size_t(tabletFolderOpen)].folder;
+    const int index = tabletFolderPage * metrics::kTabletFolderPerPage + cell;
+    if (cell < 0 || cell >= int(tabletFolderRects.size()) || index >= int(f.apps.size())) return;
+    tabletDragIcon = -1;
+    tabletDragDockIndex = -1;
+    tabletDragFromDock = false;
+    tabletDragFromFolder = true;
+    tabletDragTarget = -1;
+    tabletDragOverFolder = -1;
+    tabletDragOverDock = false;
+    tabletDragInside = cell;
+    tabletDragRect = tabletFolderRects[size_t(cell)];
+    tabletDragGrab = Point{x - tabletDragRect.x, y - tabletDragRect.y};
+    grabPointer();
+    dirty = true;
+}
+
+void Manager::beginTabletRename(int index) {
+    if (index < 0 || index >= int(tabletHome.size())) return;
+    if (!tabletHome[size_t(index)].isFolder) return;
+    tabletRenameItem = index;
+    tabletRenameText = tabletHome[size_t(index)].folder.name;
+    if (tabletDragIcon >= 0 || tabletDragFromDock || tabletDragFromFolder) endTabletIconDrag();
+    dirty = true;
+}
+
 void Manager::updateTabletIconDrag(int x, int y) {
-    if (tabletDragIcon < 0) return;
+    if (tabletDragIcon < 0 && !tabletDragFromDock && !tabletDragFromFolder) return;
     tabletDragRect.x = x - tabletDragGrab.x;
     tabletDragRect.y = y - tabletDragGrab.y;
-    // Snap to the cell whose centre is nearest the pointer.
-    int best = tabletDragIcon;
+
+    // What the icon is over decides what letting go will mean, so all of them are
+    // recomputed every move and the release just reads them.
+    tabletDragTarget = -1;
+    tabletDragOverFolder = -1;
+    tabletDragOverApp = -1;
+    tabletDragOverDock = false;
+    tabletDragDockSlot = -1;
+    tabletDragInside = -1;
+
+    // Inside an open folder: one of its own cells, if the sheet is under the icon.
+    if (tabletFolderOpen >= 0 && !tabletFolderPanel.empty() &&
+        tabletFolderPanel.contains(x, y)) {
+        for (size_t i = 0; i < tabletFolderRects.size(); ++i) {
+            if (!tabletFolderRects[i].inflated(8).contains(x, y)) continue;
+            tabletDragInside = int(i);
+            break;
+        }
+    }
+
+    if (tabletDragInside >= 0) {
+        dirty = true;
+        return;  // a cell inside the folder wins: nowhere else to go
+    }
+
+    // The dock, which is a drop target from anywhere on the home screen.
+    for (size_t i = 0; i < tabletDockRects.size(); ++i) {
+        if (!tabletDockRects[i].inflated(8).contains(x, y)) continue;
+        tabletDragOverDock = true;
+        tabletDragDockSlot = int(i);
+        break;
+    }
+    if (tabletDragOverDock) {
+        dirty = true;
+        return;
+    }
+
+    // A cell in the grid. A folder being moved is never merged into anything, so
+    // for a folder this is only ever a reorder target.
+    const bool movingFolder =
+        tabletDragIcon >= 0 && tabletDragIcon < int(tabletHome.size()) &&
+        tabletHome[size_t(tabletDragIcon)].isFolder;
+    for (size_t i = 0; i < tabletHomeRects.size() && i < tabletHome.size(); ++i) {
+        if (!tabletHomeRects[i].contains(x, y)) continue;
+        if (movingFolder) {
+            tabletDragTarget = int(i);
+        } else if (tabletHome[i].isFolder) {
+            tabletDragOverFolder = int(i);  // the app joins this folder
+        } else {
+            tabletDragOverApp = int(i);     // two apps in a cell make a folder
+        }
+        break;
+    }
+    if (tabletDragOverFolder >= 0 || tabletDragOverApp >= 0) {
+        dirty = true;
+        return;
+    }
+
+    // Otherwise the nearest cell, which is where a plain reorder would land.
+    int best = -1;
     long bestDist = -1;
     for (size_t i = 0; i < tabletHomeRects.size(); ++i) {
         const Rect& c = tabletHomeRects[i];
@@ -823,25 +1401,177 @@ void Manager::updateTabletIconDrag(int x, int y) {
             best = int(i);
         }
     }
-    if (best != tabletDragTarget) tabletDragTarget = best;
+    tabletDragTarget = best;
     dirty = true;
 }
 
-void Manager::endTabletIconDrag() {
-    if (tabletDragIcon < 0) return;
-    const int from = tabletDragIcon;
-    const int to = tabletDragTarget;
-    tabletDragIcon = -1;
-    tabletDragTarget = -1;
-    ungrabPointer();
-    // Reordering the list is what the drop means; the labelled layout then
-    // re-flows around it on the next frame.
-    if (to >= 0 && to != from && from < int(tabletHome.size()) && to < int(tabletHome.size())) {
-        TabletEntry moved = tabletHome[size_t(from)];
-        tabletHome.erase(tabletHome.begin() + from);
-        tabletHome.insert(tabletHome.begin() + to, std::move(moved));
+// Removes `app` from a folder, deleting the folder when it empties, exactly as
+// iOS does. Returns true if the folder is gone.
+bool Manager::tabletFolderRemove(std::vector<TabletEntry>& apps, const TabletEntry& app) {
+    for (size_t i = 0; i < apps.size(); ++i) {
+        if (apps[i].exec != app.exec || apps[i].name != app.name) continue;
+        apps.erase(apps.begin() + long(i));
+        return apps.empty();
     }
+    return false;
+}
+
+void Manager::endTabletIconDrag() {
+    const bool dragging = tabletDragIcon >= 0 || tabletDragFromDock || tabletDragFromFolder;
+    if (!dragging) return;
+
+    // What is being moved has to be settled before anything is taken out of its
+    // list, so the release reads the layout the user was looking at as it was.
+    // Every target is captured here, because the fields are cleared immediately
+    // afterwards and the resolution below runs on the copies.
+    const int fromGrid = tabletDragIcon;
+    const int fromDock = tabletDragDockIndex;
+    const int overFolder = tabletDragOverFolder;
+    const int overApp = tabletDragOverApp;
+    const bool overDock = tabletDragOverDock;
+    const int inside = tabletDragInside;
+    const int overCell = tabletDragTarget;
+    const int dockSlot = tabletDragDockSlot;
+    const bool fromFolder = tabletDragFromFolder;
+    const int openFolder = tabletFolderOpen;
+
+    const bool stayPut =
+        (overDock && fromDock >= 0) ||                       // a dock icon on the dock
+        (overApp == fromGrid && fromGrid >= 0) ||            // an icon on itself
+        (overFolder == fromGrid && fromGrid >= 0);
+    if (stayPut) {
+        tabletDragIcon = -1;
+        tabletDragDockIndex = -1;
+        tabletDragFromDock = false;
+        tabletDragFromFolder = false;
+        tabletDragTarget = -1;
+        tabletDragOverFolder = -1;
+        tabletDragOverApp = -1;
+        tabletDragOverDock = false;
+        tabletDragDockSlot = -1;
+        tabletDragInside = -1;
+        ungrabPointer();
+        layoutTabletHome();
+        dirty = true;
+        return;
+    }
+
+    TabletEntry carried;
+    bool have = false;
+    if (fromFolder && openFolder >= 0 && openFolder < int(tabletHome.size()) && inside >= 0) {
+        const TabletFolder& f = tabletHome[size_t(openFolder)].folder;
+        const int index = tabletFolderPage * metrics::kTabletFolderPerPage + inside;
+        if (index >= 0 && index < int(f.apps.size())) {
+            carried = f.apps[size_t(index)];
+            have = true;
+        }
+    } else if (fromGrid >= 0 && fromGrid < int(tabletHome.size()) &&
+               !tabletHome[size_t(fromGrid)].isFolder) {
+        carried = tabletHome[size_t(fromGrid)].app;
+        have = true;
+    } else if (fromDock >= 0 && fromDock < int(tabletDock.size())) {
+        carried = tabletDock[size_t(fromDock)];
+        have = true;
+    }
+
+    tabletDragIcon = -1;
+    tabletDragDockIndex = -1;
+    tabletDragFromDock = false;
+    tabletDragFromFolder = false;
+    tabletDragTarget = -1;
+    tabletDragOverFolder = -1;
+    tabletDragOverApp = -1;
+    tabletDragOverDock = false;
+    tabletDragDockSlot = -1;
+    tabletDragInside = -1;
+    ungrabPointer();
+
+    if (!have) {
+        // A folder icon was lifted. Folders are moved rather than carried, so the
+        // only thing that can happen to one is a plain reorder of the grid.
+        if (fromGrid >= 0 && overCell >= 0 && overCell != fromGrid &&
+            fromGrid < int(tabletHome.size()) && overCell < int(tabletHome.size())) {
+            TabletItem moved = tabletHome[size_t(fromGrid)];
+            tabletHome.erase(tabletHome.begin() + fromGrid);
+            tabletHome.insert(tabletHome.begin() + overCell, std::move(moved));
+        }
+        layoutTabletHome();
+        dirty = true;
+        return;
+    }
+
+    // Lift the app out of wherever it came from. A folder that empties goes with
+    // its last app, which is how a folder disappears on its own.
+    if (fromFolder && openFolder >= 0 && openFolder < int(tabletHome.size())) {
+        TabletItem& slot = tabletHome[size_t(openFolder)];
+        if (tabletFolderRemove(slot.folder.apps, carried)) closeTabletFolder();
+    } else if (fromDock >= 0 && fromDock < int(tabletDock.size())) {
+        tabletDock.erase(tabletDock.begin() + fromDock);
+    } else if (fromGrid >= 0 && fromGrid < int(tabletHome.size())) {
+        tabletHome.erase(tabletHome.begin() + fromGrid);
+    }
+
+    // Lifting the app out of the grid shifts every later cell up by one, so the
+    // cell the icon was dropped on has to be counted again before it is used.
+    const auto shifted = [&](int idx) {
+        return (fromDock < 0 && fromGrid >= 0 && fromGrid < idx) ? idx - 1 : idx;
+    };
+
+    // --- where does it go? iOS' order: into a folder, onto the dock, back into an
+    // open folder, onto another app (which makes a new folder), else a plain slot.
+    const int joinFolder = shifted(overFolder);
+    const int joinApp = shifted(overApp);
+    int popFolder = -1;
+    if (joinFolder >= 0 && joinFolder < int(tabletHome.size())) {
+        tabletHome[size_t(joinFolder)].folder.apps.push_back(carried);
+        popFolder = joinFolder;
+    } else if (joinApp >= 0 && joinApp < int(tabletHome.size())) {
+        // Two apps in one cell: they become a folder, named for what is in it.
+        TabletItem made;
+        made.isFolder = true;
+        made.folder.apps.push_back(tabletHome[size_t(joinApp)].app);
+        made.folder.apps.push_back(carried);
+        made.folder.name = suggestFolderName(made.folder.apps);
+        tabletHome[size_t(joinApp)] = std::move(made);
+        popFolder = joinApp;
+    } else if (overDock) {
+        // Into the slot it was dropped on, so the dock reorders rather than always
+        // appending. The slot was counted before the app left the dock.
+        int at = std::clamp(dockSlot >= 0 && fromDock < dockSlot ? dockSlot - 1 : dockSlot, 0,
+                            int(tabletDock.size()));
+        tabletDock.insert(tabletDock.begin() + at, carried);
+        if (int(tabletDock.size()) > metrics::kTabletDockMax)
+            tabletDock.erase(tabletDock.end() - metrics::kTabletDockMax);
+    } else if (inside >= 0 && openFolder >= 0 && openFolder < int(tabletHome.size())) {
+        // Back into the folder it came from, which is a reorder inside it.
+        TabletItem& slot = tabletHome[size_t(openFolder)];
+        if (!slot.isFolder) {
+            TabletItem made;
+            made.isFolder = true;
+            made.folder.apps.push_back(carried);
+            made.folder.name = suggestFolderName(made.folder.apps);
+            tabletHome[size_t(openFolder)] = std::move(made);
+        } else {
+            const int at = std::clamp(tabletFolderPage * metrics::kTabletFolderPerPage + inside,
+                                      0, int(slot.folder.apps.size()));
+            slot.folder.apps.insert(slot.folder.apps.begin() + at, carried);
+        }
+    } else if (overCell >= 0) {
+        // A plain slot. Appending past the end is how the grid grows a new row.
+        const int at = std::clamp(shifted(overCell), 0, int(tabletHome.size()));
+        TabletItem item;
+        item.app = carried;
+        tabletHome.insert(tabletHome.begin() + at, std::move(item));
+    }
+
     layoutTabletHome();
+    // Opening the folder is what makes it a place to put apps in rather than just
+    // an icon that appeared, and it is where iOS leaves you as well.
+    if (popFolder >= 0) openTabletFolder(popFolder);
+    // A lift that carried nothing changed nothing, so only a real drop is written
+    // out. Everything else here -- reordering, folder creation, joining, emptying,
+    // a dock move -- goes through this one place.
+    if (!carried.name.empty()) saveTabletLayout();
     dirty = true;
 }
 
