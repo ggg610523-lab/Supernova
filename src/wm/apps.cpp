@@ -1,5 +1,6 @@
 #include "apps.h"
 
+#include "theme.h"
 #include "util.h"
 
 #include <algorithm>
@@ -291,6 +292,159 @@ void launchApp(const std::string& exec) {
         _exit(127);
     }
     log("launched: %s", exec.c_str());
+}
+
+// ---------------------------------------------------------------- taskbar pins
+namespace {
+
+// One pin per line, fields tab separated in the order of AppEntry: name, exec,
+// icon, wmClass, terminal. Tabs are the only thing a .desktop string could
+// contain that would break the line format, so they are squeezed out on write.
+std::string pinField(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+    }
+    return out;
+}
+
+std::vector<std::string> splitTabs(const std::string& line) {
+    std::vector<std::string> out;
+    size_t a = 0;
+    while (true) {
+        const size_t tab = line.find('\t', a);
+        if (tab == std::string::npos) {
+            out.push_back(line.substr(a));
+            return out;
+        }
+        out.push_back(line.substr(a, tab - a));
+        a = tab + 1;
+    }
+}
+
+// mkdir -p: $HOME/.config is not guaranteed to exist on a fresh account, and a
+// single mkdir() cannot create a whole chain of missing parents.
+void makeDirs(const std::string& path) {
+    for (size_t i = 1; i <= path.size(); ++i) {
+        if (i < path.size() && path[i] != '/') continue;
+        const std::string dir = path.substr(0, i);
+        if (dir.empty() || isDirectory(dir)) continue;
+        ::mkdir(dir.c_str(), 0700);
+    }
+}
+
+// Write via a sibling temp file and rename over the target, so a crash halfway
+// through leaves the previous file intact instead of a truncated one. Creates the
+// config directory if it is missing.
+bool writeFileAtomic(const std::string& path, const std::string& text) {
+    const size_t slash = path.rfind('/');
+    if (slash != std::string::npos) makeDirs(path.substr(0, slash));
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) return false;
+        out << text;
+        if (!out) return false;
+    }
+    return ::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+// $XDG_CONFIG_HOME/win11wm/<leaf>, else $HOME/.config/win11wm/<leaf>. Empty when
+// neither variable names an absolute path, which is the only way these settings
+// cannot be stored at all.
+std::string configFile(const char* leaf) {
+    std::string base;
+    if (const char* env = std::getenv("XDG_CONFIG_HOME")) {
+        if (env[0] == '/') base = env;
+    }
+    if (base.empty()) {
+        if (const char* home = std::getenv("HOME")) {
+            if (home[0] == '/') base = std::string(home) + "/.config";
+        }
+    }
+    if (base.empty()) return {};
+    return base + "/win11wm/" + leaf;
+}
+
+}  // namespace
+
+std::string pinnedPath() { return configFile("pinned"); }
+
+int loadTaskbarHeight() {
+    const std::string path = configFile("taskbar-height");
+    if (path.empty()) return metrics::kTaskbarDefaultH;
+    std::ifstream in(path);
+    int height = 0;
+    // Unreadable, unparsable or out-of-range -- including a value left by a build
+    // with different limits -- falls back to the default. A bad setting must never
+    // be the reason the WM comes up wrong.
+    if (!(in >> height) || height < metrics::kTaskbarMinH || height > metrics::kTaskbarMaxH) {
+        return metrics::kTaskbarDefaultH;
+    }
+    return height;
+}
+
+void saveTaskbarHeight(int height) {
+    if (height < metrics::kTaskbarMinH || height > metrics::kTaskbarMaxH) return;
+    const std::string path = configFile("taskbar-height");
+    if (path.empty()) {
+        log("cannot save taskbar height: no XDG_CONFIG_HOME or HOME");
+        return;
+    }
+    if (!writeFileAtomic(path, std::to_string(height) + "\n")) {
+        log("cannot write taskbar height to %s", path.c_str());
+        return;
+    }
+    log("saved taskbar height %d to %s", height, path.c_str());
+}
+
+std::vector<AppEntry> loadPinned() {
+    PinnedList pins;
+    const std::string path = pinnedPath();
+    if (path.empty()) return pins;
+    std::ifstream in(path);
+    if (!in) return pins;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::vector<std::string> f = splitTabs(line);
+        // name and exec are the only fields a pin cannot work without; the rest
+        // are the icon and the class used to recognise the app's windows.
+        if (f.size() < 2 || f[0].empty() || f[1].empty()) continue;
+        AppEntry e;
+        e.name = f[0];
+        e.exec = f[1];
+        if (f.size() > 2) e.icon = f[2];
+        if (f.size() > 3) e.wmClass = f[3];
+        if (f.size() > 4) e.terminal = f[4] == "1";
+        e.searchKey = lower(e.name);
+        // The same launcher twice: a hand-edited file, or a write from an older
+        // WM that did not know about pinning. First line wins.
+        const bool dup = std::any_of(pins.begin(), pins.end(), [&](const AppEntry& p) {
+            return p.exec == e.exec;
+        });
+        if (dup) continue;
+        pins.push_back(e);
+    }
+    return pins;
+}
+
+void savePinned(const PinnedList& pins) {
+    const std::string path = pinnedPath();
+    if (path.empty()) {
+        log("cannot save taskbar pins: no XDG_CONFIG_HOME or HOME");
+        return;
+    }
+    std::ostringstream text;
+    for (const AppEntry& e : pins) {
+        text << pinField(e.name) << '\t' << pinField(e.exec) << '\t' << pinField(e.icon) << '\t'
+             << pinField(e.wmClass) << '\t' << (e.terminal ? '1' : '0') << '\n';
+    }
+    if (!writeFileAtomic(path, text.str())) {
+        log("cannot write taskbar pins to %s", path.c_str());
+        return;
+    }
+    log("saved %zu taskbar pin(s) to %s", pins.size(), path.c_str());
 }
 
 }  // namespace wm

@@ -71,6 +71,9 @@ Color alpha(const Color& c, float a) { return Color{c.r, c.g, c.b, c.a * a}; }
 // become the home screen.
 void Manager::setTabletMode(bool on) {
     if (modeSwitching || tabletMode == on) return;
+    // The splash swallows input until it finishes, so a drag in flight would never
+    // see its release. Call it off here rather than lose the reorder silently.
+    if (pinDrag >= 0) endPinDrag(false);
     modeSwitching = true;
     modeSwapped = false;
     modeSwitchTarget = on;

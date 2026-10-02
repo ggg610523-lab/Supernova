@@ -126,7 +126,7 @@ void Manager::initWidgets() {
 void Manager::addWidget(WidgetKind kind) {
     const int w = kind == WidgetKind::Clock ? metrics::kWidgetClock : metrics::kWidgetBatteryW;
     const int h = kind == WidgetKind::Clock ? metrics::kWidgetClock : metrics::kWidgetBatteryH;
-    const int bottom = screenH - metrics::kTaskbarH;
+    const int bottom = screenH - metrics::taskbarH;
     int x = screenW - w - metrics::kWidgetPad;
     int y = metrics::kWidgetPad;
     // Cascade down/left past the widgets already on screen.
@@ -184,7 +184,7 @@ void Manager::beginWidgetDrag(int index, int x, int y, bool resize) {
 void Manager::updateWidgetDrag(int x, int y) {
     if (dragWidget < 0 || dragWidget >= int(widgets.size())) return;
     Widget& w = widgets[dragWidget];
-    const int bottom = screenH - metrics::kTaskbarH;
+    const int bottom = screenH - metrics::taskbarH;
     if (!widgetResizing) {
         w.rect.x = std::clamp(x - widgetGrab.x, 0, std::max(0, screenW - w.rect.w));
         w.rect.y = std::clamp(y - widgetGrab.y, 0, std::max(0, bottom - w.rect.h));

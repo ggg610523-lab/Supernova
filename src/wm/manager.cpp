@@ -5,6 +5,7 @@
 #include <X11/keysym.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <poll.h>
@@ -308,8 +309,12 @@ int Manager::run(const Options& options) {
     if (!keyError.empty()) log("warning: %s", keyError.c_str());
 
     setupRootProperties();
+    // The bar comes up at the thickness it was dragged to last time. Read before
+    // the work area is published, since the work area is the screen minus the bar.
+    metrics::taskbarH = loadTaskbarHeight();
     updateWorkArea();
     apps = scanApps();
+    pinned = loadPinned();
     // The desktop shows the session's real Desktop directory; layout is fixed, so
     // it is computed once here and reused by every frame and hit test.
     desktopItems = scanDesktop();
@@ -350,6 +355,7 @@ int Manager::run(const Options& options) {
     log("canvas %dx%d, %zu managed window(s), %zu launcher entries", screenW, screenH,
         clients.size(), apps.size());
     log("desktop: %zu item(s) from %s", desktopItems.size(), desktopDir().c_str());
+    if (!pinned.empty()) log("taskbar: %zu pinned launcher(s)", pinned.size());
     log("assets: %s", assetDir.c_str());
 
     lastTick = nowMs();
@@ -576,6 +582,8 @@ void Manager::tickFluidMotion(double dtMs) {
     if (approach(startHoverAnim, hoverStart ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
     if (approach(showDesktopHoverAnim, hoverShowDesktop ? 1.0 : 0.0, dtMs, kHoverMs))
         dirty = true;
+    // The button being carried eases up out of the bar and settles back on drop.
+    if (approach(pinDragLift, pinDragMoved ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
 
     // Launchpad tiles (only while the overlay is on screen) and its page dots.
     fade(appHover, startOpen ? appRects.size() : 0, startOpen ? hoverApp : -1);
@@ -784,7 +792,7 @@ void Manager::updateHoverStates(int px, int py) {
         return;
     }
 
-    const int taskbarTop = screenH - metrics::kTaskbarH;
+    const int taskbarTop = screenH - metrics::taskbarH;
     const bool overTaskbar = py >= taskbarTop;
 
     bool newStart = false, newShowDesktop = false, newClock = false;
@@ -872,10 +880,17 @@ void Manager::updateHoverStates(int px, int py) {
         changed = true;
     }
     int wantedCursor = edge ? edgeCursorKind(edge) : (overTaskbar ? 5 : 0);
+    // A launcher being carried is a horizontal drag, so it shows the horizontal
+    // resize arrow wherever the pointer wanders to.
+    if (pinDragMoved) wantedCursor = 1;
     // A Control Centre control is a button, so it gets the hand cursor.
     if (ccOpen && ccHover >= 0 && size_t(ccHover) < ccControls.size()) wantedCursor = 5;
     // Launchpad tiles and page dots are clickable too.
     if (startOpen && (hoverApp >= 0 || startHoverDot >= 0)) wantedCursor = 5;
+    // The taskbar's edge resizes the bar, so it gets the up/down arrow. Last, because
+    // it has to hold even with an overlay open, and because a drag in flight has to
+    // keep its arrow once the pointer has wandered off the edge.
+    if (taskbarResizeY >= 0 || taskbarGripAt(px, py)) wantedCursor = 2;
     if (wantedCursor != cursorShown) setCursor(wantedCursor);
 
     // Caption buttons: the top-most window whose frame covers the point wins.
@@ -996,7 +1011,7 @@ void Manager::updateClientList() {
 
 Rect Manager::workArea() const {
     Rect wa{0, 0, screenW, screenH};
-    if (screenH > metrics::kTaskbarH * 2) wa.h -= metrics::kTaskbarH;  // our taskbar
+    if (screenH > metrics::taskbarH * 2) wa.h -= metrics::taskbarH;  // our taskbar
     for (const auto& c : clients) {
         if (!c->isDock || !c->mapped) continue;
         if (c->strut[2] > 0) {
@@ -1471,22 +1486,265 @@ void Manager::activateTaskbarItem(Client* c) {
     }
 }
 
+// A pinned launcher is matched to its windows the way the tablet home screen
+// matches an icon to the app it launched: the WM_CLASS instance against the
+// entry's StartupWMClass, then the entry name against the window class or title.
+Client* Manager::clientForPinned(const AppEntry& app) const {
+    const auto low = [](std::string s) {
+        for (char& ch : s) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        return s;
+    };
+    const std::string cls = low(app.wmClass);
+    const std::string key = low(app.name);
+    if (cls.empty() && key.empty()) return nullptr;
+    // Top down: the topmost window of the app is the one a click should raise.
+    for (size_t i = clients.size(); i-- > 0;) {
+        Client* c = clients[i].get();
+        if (!c->managed || !c->alive || c->closing || c->isDock || c->isDesktop) continue;
+        if (c->skipTaskbar) continue;
+        // appName is already lower-cased when the class was read.
+        if (!cls.empty() && c->appName == cls) return c;
+        if (!key.empty() && (c->appName == key || low(c->title) == key)) return c;
+    }
+    return nullptr;
+}
+
+bool Manager::isPinned(const AppEntry& app) const {
+    return std::any_of(pinned.begin(), pinned.end(),
+                       [&](const AppEntry& p) { return p.exec == app.exec; });
+}
+
+void Manager::pinApp(const AppEntry& app) {
+    if (app.exec.empty() || isPinned(app)) return;
+    pinned.push_back(app);
+    savePinned(pinned);
+    log("pinned \"%s\" to the taskbar", app.name.c_str());
+    dirty = true;
+}
+
+void Manager::unpinApp(const std::string& exec) {
+    const size_t before = pinned.size();
+    pinned.erase(std::remove_if(pinned.begin(), pinned.end(),
+                                [&](const AppEntry& p) { return p.exec == exec; }),
+                 pinned.end());
+    if (pinned.size() == before) return;
+    savePinned(pinned);
+    log("unpinned \"%s\" (%zu pin(s) left)", exec.c_str(), pinned.size());
+    dirty = true;
+}
+
+// A pin launches its app only when there is nothing to focus, so a second click
+// on a running app keeps the ordinary minimise/restore behaviour of a window
+// button rather than starting a second copy.
+void Manager::activatePinned(int index) {
+    if (index < 0 || index >= int(pinned.size())) return;
+    const AppEntry app = pinned[size_t(index)];
+    if (Client* c = clientForPinned(app)) {
+        activateTaskbarItem(c);
+        return;
+    }
+    launchApp(app.exec);
+}
+
+void Manager::activateTaskItem(int index) {
+    if (index < 0 || index >= int(taskItems.size())) return;
+    const TaskItem& it = taskItems[size_t(index)];
+    if (it.pin >= 0) {
+        activatePinned(it.pin);
+        return;
+    }
+    activateTaskbarItem(it.client);
+}
+
+// The menu behind a right click on a pinned taskbar button or a Launchpad tile:
+// one item that pins or unpins, whichever applies to what was clicked.
+void Manager::openPinMenu(int appIndex, int pinIndex, int x, int y) {
+    const AppEntry* app = nullptr;
+    if (pinIndex >= 0 && pinIndex < int(pinned.size())) app = &pinned[size_t(pinIndex)];
+    else if (appIndex >= 0 && appIndex < int(apps.size())) app = &apps[size_t(appIndex)];
+    if (!app) return;
+    // Reached from the Launchpad as well as from the taskbar, so drop whatever
+    // flyout is up first: the pointer and keyboard must end up grabbed once, not
+    // stacked, which is the same dance openStartMenu does the other way round.
+    if (overlayOpen()) closeOverlays();
+    contextClient = nullptr;
+    contextWidget = -1;
+    contextPin = pinIndex;
+    contextApp = appIndex;
+    contextItems.clear();
+    contextItems.push_back(isPinned(*app) ? "Unpin from taskbar" : "Pin to taskbar");
+
+    const int itemH = 32;
+    const int width = 200;
+    const int height = int(contextItems.size()) * itemH + 12;
+    int mx = x, my = y - 6;
+    const int bottom = screenH - metrics::taskbarH;
+    if (my + height > bottom) my = bottom - height;
+    if (mx + width > screenW) mx = screenW - width - 4;
+    if (mx < 4) mx = 4;
+    if (my < 4) my = 4;
+    contextRect = Rect{mx, my, width, height};
+    contextOpen = true;
+    contextHover = -1;
+    startOpen = false;
+    grabPointer();
+    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    dirty = true;
+}
+
+// ------------------------------------------------------------------ reordering
+// A press on a pinned button arms a drag instead of launching straight away: the
+// button only lifts once the pointer has travelled far enough, so an ordinary
+// click is still an ordinary click. From then on the pointer owns the drag and the
+// button under it is the one being carried.
+void Manager::beginPinDrag(int index, int x) {
+    if (index < 0 || index >= int(pinned.size())) return;
+    // The bar's edge owns the pointer while it is being dragged.
+    if (taskbarResizeY >= 0) return;
+    pinDrag = index;
+    pinDragPressX = x;
+    pinDragMoved = false;
+    pinDragOrder = pinned;
+}
+
+void Manager::updatePinDrag(int x) {
+    if (pinDrag < 0 || pinDrag >= int(pinned.size())) return;
+    if (!pinDragMoved) {
+        const int dx = x - pinDragPressX;
+        if (dx > -metrics::kPinDragSlop && dx < metrics::kPinDragSlop) return;
+        pinDragMoved = true;
+        dirty = true;
+    }
+    // Where the pin wants to land: the slot the pointer is in, counted over the
+    // *other* buttons. Skipping the dragged one is what keeps it from shoving
+    // itself along by its own centre as it is carried past a neighbour.
+    const int current = pinDrag;
+    int slot = 0;
+    for (const TaskItem& it : taskItems) {
+        if (it.pin < 0 || it.pin == current) continue;
+        if (x > it.rect.x + it.rect.w / 2) ++slot;
+        else break;
+    }
+    if (slot == current) return;
+    const AppEntry carried = pinned[size_t(current)];
+    pinned.erase(pinned.begin() + current);
+    pinned.insert(pinned.begin() + slot, carried);
+    pinDrag = slot;
+    dirty = true;
+}
+
+void Manager::endPinDrag(bool commit) {
+    if (pinDrag < 0) return;
+    const int index = pinDrag;
+    const bool moved = pinDragMoved;
+    // A drag that never travelled, or one Escape called off, leaves the pins
+    // exactly as the press found them; a real drag is what gets written out.
+    if (!commit || !moved) pinned = pinDragOrder;
+    else savePinned(pinned);
+    pinDrag = -1;
+    pinDragMoved = false;
+    pinDragOrder.clear();
+    // A press that turned out to be a click is the click the old code did on the
+    // press itself, just answered one event later.
+    if (commit && !moved) activatePinned(index);
+    dirty = true;
+}
+
+// The grab strip along the top of the taskbar. It reaches a few pixels above the
+// bar as well as into it: the bar's buttons are centred, so the space between the
+// top edge and the first button is empty, and the desktop just above the bar is
+// empty too because maximised windows stop at the bar.
+bool Manager::taskbarGripAt(int x, int y) const {
+    if (tabletMode || x < 0 || x >= screenW) return false;
+    const int top = screenH - metrics::taskbarH;
+    return y >= top - metrics::kTaskbarOuterGrip && y < top + metrics::taskbarInnerGrip();
+}
+
+void Manager::beginTaskbarResize(int y) {
+    // One pointer drag at a time: a resize in flight keeps the button until it is
+    // released, so a second grab cannot restart the bar from a different origin.
+    if (taskbarResizeY >= 0 || pinDrag >= 0) return;
+    taskbarResizeY = y;
+    taskbarResizeH = metrics::taskbarH;
+}
+
+void Manager::updateTaskbarResize(int y) {
+    if (taskbarResizeY < 0) return;
+    // Dragging the edge upwards grows the bar, the same way dragging a window's
+    // bottom edge upwards grows its height. Computed from the thickness at the
+    // press, so the bar tracks the pointer exactly instead of drifting by the
+    // rounding of each step.
+    const int want = taskbarResizeH + (taskbarResizeY - y);
+    const int next = std::max(metrics::kTaskbarMinH,
+                              std::min(metrics::kTaskbarMaxH, want));
+    if (next == metrics::taskbarH) return;
+    metrics::taskbarH = next;
+    layoutTaskbar();
+    // Buttons and icon boxes are derived from the thickness, so the whole bar
+    // reflows from this one value.
+    reflowWorkAreaWindows();
+    updateWorkArea();
+    dirty = true;
+}
+
+void Manager::endTaskbarResize() {
+    if (taskbarResizeY < 0) return;
+    taskbarResizeY = -1;
+    saveTaskbarHeight(metrics::taskbarH);
+    dirty = true;
+}
+
+// A maximised or snapped window is sized from the work area, which the bar is part
+// of, so a bar that changed thickness leaves them floating. setMaximized() cannot
+// do this job: it returns early when the flags already match, which is exactly the
+// case here.
+void Manager::reflowWorkAreaWindows() {
+    const Rect wa = workArea();
+    for (auto& cp : clients) {
+        Client* c = cp.get();
+        if (!c->managed || !c->alive || c->fullscreen || c->closing) continue;
+        if (c->snapZone != kSnapNone) {
+            c->frame = snapGeometry(c->snapZone);
+        } else if (c->maximizedH || c->maximizedV) {
+            Rect f = c->frame;
+            if (c->maximizedH) {
+                f.x = wa.x;
+                f.w = wa.w;
+            }
+            if (c->maximizedV) {
+                f.y = wa.y;
+                f.h = wa.h;
+            }
+            c->frame = f;
+        } else {
+            continue;  // an ordinary window keeps the size the user gave it
+        }
+        applyFrame(c, true);
+        syncClientGeometry(c);
+        updateStateAtoms(c);
+    }
+}
+
 // Wheel over the taskbar: move the focus to the next/previous button, which is
-// what every other desktop does and what makes a crowded taskbar usable.
+// what every other desktop does and what makes a crowded taskbar usable. Pinned
+// launchers have no window of their own to focus, so they are skipped.
 void Manager::cycleTaskbar(bool backward) {
-    if (taskItems.empty()) return;
-    Client* start = focused;
+    std::vector<Client*> buttons;
+    for (const TaskItem& it : taskItems) {
+        if (it.client) buttons.push_back(it.client);
+    }
+    const int n = int(buttons.size());
+    if (n == 0) return;
     int idx = -1;
-    for (size_t i = 0; i < taskItems.size(); ++i) {
-        if (taskItems[i].client == start) {
-            idx = int(i);
+    for (int i = 0; i < n; ++i) {
+        if (buttons[size_t(i)] == focused) {
+            idx = i;
             break;
         }
     }
-    const int n = int(taskItems.size());
-    int next = backward ? (idx <= 0 ? n - 1 : idx - 1) : (idx + 1) % n;
-    if (idx >= 0 && next == idx) next = idx;  // a single button stays put
-    Client* target = taskItems[size_t(next)].client;
+    const int next = backward ? (idx <= 0 ? n - 1 : idx - 1) : (idx + 1) % n;
+    if (idx >= 0 && next == idx) return;  // a single button stays put
+    Client* target = buttons[size_t(next)];
     if (!target) return;
     restoreClient(target);
     focusClient(target, true);
@@ -1583,6 +1841,8 @@ void Manager::showContextMenu(Client* c, int x, int y) {
     if (!c) return;
     contextClient = c;
     contextWidget = -1;
+    contextPin = -1;
+    contextApp = -1;
     contextItems.clear();
     contextItems.push_back((c->maximizedH && c->maximizedV) ? "Restore" : "Maximize");
     contextItems.push_back("Minimize");
@@ -1595,7 +1855,7 @@ void Manager::showContextMenu(Client* c, int x, int y) {
     const int width = 200;
     const int height = int(contextItems.size()) * itemH + 12;
     int mx = x, my = y - 6;
-    const int bottom = screenH - metrics::kTaskbarH;
+    const int bottom = screenH - metrics::taskbarH;
     if (my + height > bottom) my = bottom - height;
     if (mx + width > screenW) mx = screenW - width - 4;
     if (mx < 4) mx = 4;
@@ -1615,6 +1875,8 @@ void Manager::showContextMenu(Client* c, int x, int y) {
 void Manager::openDesktopMenu(int x, int y) {
     contextClient = nullptr;
     contextWidget = widgetAt(x, y);
+    contextPin = -1;
+    contextApp = -1;
     contextItems.clear();
     if (contextWidget >= 0) contextItems.push_back("Remove Widget");
     contextItems.push_back("Add Clock Widget");
@@ -1624,7 +1886,7 @@ void Manager::openDesktopMenu(int x, int y) {
     const int width = 210;
     const int height = int(contextItems.size()) * itemH + 12;
     int mx = x, my = y - 6;
-    const int bottom = screenH - metrics::kTaskbarH;
+    const int bottom = screenH - metrics::taskbarH;
     if (my + height > bottom) my = bottom - height;
     if (mx + width > screenW) mx = screenW - width - 4;
     if (mx < 4) mx = 4;

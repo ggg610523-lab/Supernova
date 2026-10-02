@@ -534,13 +534,16 @@ private:
     bool contextOpen = false;
     Client* contextClient = nullptr;   // null = the desktop (widget) menu
     int contextWidget = -1;            // widget the menu was opened on, or -1
+    int contextPin = -1;               // pinned button the menu was opened on, or -1
+    int contextApp = -1;               // index into apps (Launchpad tile), or -1
     Rect contextRect;
     int contextHover = -1;
     std::vector<std::string> contextItems;
 
     struct TaskItem {
         Rect rect;
-        Client* client = nullptr;
+        Client* client = nullptr;  // null for a pinned launcher
+        int pin = -1;              // index into pinned, or -1 for a window
     };
     std::vector<TaskItem> taskItems;
     Rect startButtonRect, showDesktopRect, clockRect;
@@ -548,6 +551,47 @@ private:
     bool hoverStart = false;
     bool hoverShowDesktop = false;
     bool hoverClock = false;
+
+    // ---- pinned taskbar launchers (manager.cpp)
+    // The launchers the user pinned, in pin order. They are laid out right after
+    // the Start button and before the running windows; each keeps its button
+    // whether or not the app is running, and clicking it focuses the app's window
+    // when there is one and starts it when there is not.
+    std::vector<AppEntry> pinned;
+    bool isPinned(const AppEntry& app) const;
+    void pinApp(const AppEntry& app);       // no-op when already pinned
+    void unpinApp(const std::string& exec);  // no-op when not pinned
+    // The topmost live window of a pinned app, or null when it is not running.
+    Client* clientForPinned(const AppEntry& app) const;
+    void activatePinned(int index);    // focus its window, else launch it
+    void activateTaskItem(int index);  // activateTaskbarItem, pins included
+    void openPinMenu(int appIndex, int pinIndex, int x, int y);  // right-click menu
+    // Reordering: a press on a pinned button arms a drag instead of launching, and
+    // once the pointer has travelled past the slop the button lifts out of the bar
+    // and the pins swap under it until the button is let go. pinDragOrder is the
+    // order as of the press, so Escape can put it back.
+    int pinDrag = -1;              // index into pinned being dragged, -1 when idle
+    int pinDragPressX = 0;
+    bool pinDragMoved = false;
+    std::vector<AppEntry> pinDragOrder;
+    double pinDragLift = 0.0;      // eased lift of the button being dragged
+    void beginPinDrag(int index, int x);
+    void updatePinDrag(int x);
+    void endPinDrag(bool commit);  // commit = false restores the pressed order
+
+    // Resizing the taskbar by its edge, the way Windows 10 let you: grab the strip
+    // along the top of the bar and drag. The grip deliberately straddles the border
+    // -- the bar's own empty margin above the buttons, plus a few pixels of desktop
+    // above that -- so it can be grabbed from either side and, being proportional
+    // to the bar, can never grow into a button.
+    bool taskbarGripAt(int x, int y) const;
+    void beginTaskbarResize(int y);
+    void updateTaskbarResize(int y);
+    void endTaskbarResize();       // saves the thickness the drag settled on
+    void reflowWorkAreaWindows();  // maximised/snapped windows follow the bar
+    int taskbarResizeY = -1;       // pointer y at the press, -1 when not dragging
+    int taskbarResizeH = 0;        // thickness at the press, so the bar tracks the
+                                   // pointer 1:1 instead of accumulating rounding
 
     // ---- ambient motion (draw.cpp / manager.cpp)
     // Every hover, selection and flyout eases through these instead of toggling,

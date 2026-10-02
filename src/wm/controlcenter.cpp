@@ -90,7 +90,7 @@ int Manager::ccScale() const {
     const int baseH = 2 * metrics::kCcPad + metrics::kCcRows * metrics::kCcCell +
                       (metrics::kCcRows - 1) * metrics::kCcGap;
     // Leave room for the taskbar plus the drop shadow above it.
-    const int availH = screenH - metrics::kTaskbarH - 24;
+    const int availH = screenH - metrics::taskbarH - 24;
     const int availW = screenW - 24;
     int scale = metrics::kCcMaxScale;
     if (availW * 100 / baseW < scale) scale = availW * 100 / baseW;
@@ -128,7 +128,7 @@ void Manager::layoutControlCenter() {
         int x = clockRect.right() - w - 4;
         if (x + w > screenW - 4) x = screenW - w - 4;
         if (x < 4) x = 4;
-        int y = screenH - metrics::kTaskbarH - 12 - h;
+        int y = screenH - metrics::taskbarH - 12 - h;
         if (y < 4) y = 4;
         ccRect = Rect{x, y, w, h};
         // The panel zooms out of the clock, so remember the point under it,

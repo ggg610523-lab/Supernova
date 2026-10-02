@@ -173,9 +173,38 @@ constexpr int kBorder = 1;         // visible hairline frame
 constexpr int kRadius = 8;         // window corner radius
 constexpr int kResizeEdge = 8;     // invisible resize band outside the frame
 constexpr int kShadowPad = 30;     // quad margin the drop shadow spreads into
-constexpr int kTaskbarH = 48;
-constexpr int kTaskIconW = 44;
-constexpr int kTaskIconH = 40;
+// The taskbar's thickness is the one piece of shell geometry the user sets. As in
+// Windows 10 you grab the bar's top edge and drag it, and it stays where you left
+// it; Windows 11 dropped that and offers only a small/default toggle. 48 is the
+// Windows 11 height at 100%, and the baseline the derived sizes below are written
+// against, so at kTaskbarDefaultH they come out at exactly 44/40/32.
+constexpr int kTaskbarDefaultH = 48;
+// 32 is Windows' own small taskbar height, and the floor here too: the two-line
+// clock alone is 29px, so a thinner bar could not hold it.
+constexpr int kTaskbarMinH = 32;
+constexpr int kTaskbarMaxH = 96;
+extern int taskbarH;               // live thickness; saved by saveTaskbarHeight
+
+// Buttons and icons are sized off the thickness, so a thicker bar grows its
+// contents instead of stranding a 32px icon in the middle of it. One icon box
+// serves every button, whatever the button is: a pinned launcher and a running
+// window have to read as the same size of app.
+inline int taskButtonW() { return 44 * taskbarH / kTaskbarDefaultH; }
+inline int taskButtonH() { return 40 * taskbarH / kTaskbarDefaultH; }
+inline int taskIconSize() { return 32 * taskbarH / kTaskbarDefaultH; }
+inline int taskIconDragSize() { return 34 * taskbarH / kTaskbarDefaultH; }
+
+constexpr int kPinDragSlop = 6;    // travel that turns a press into a drag
+
+// The strip of bar above the buttons, which is empty because they are centred in
+// it. It doubles as the grab area inside the bar, and it shrinks with the bar, so
+// the grip can never overlap a button however thin the bar gets.
+inline int taskbarInnerGrip() { return (taskbarH - taskButtonH()) / 2; }
+
+// Desktop pixels above the bar that also belong to its edge. Maximised windows stop
+// at the top of the bar, so this band is empty desktop and grabbing it cannot
+// steal a press meant for a window.
+constexpr int kTaskbarOuterGrip = 4;
 constexpr int kSnapGap = 4;        // gap Win11 leaves around snapped halves
 constexpr int kSnapZonePx = 24;    // distance from an edge that arms a snap
 constexpr int kAnimMs = 150;       // open/close/minimise duration

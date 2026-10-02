@@ -23,6 +23,30 @@ struct AppEntry {
 // Scans XDG_DATA_DIRS + ~/.local/share for applications/*.desktop.
 std::vector<AppEntry> scanApps();
 
+// The launchers the user pinned to the taskbar, in the order they were pinned.
+// An entry is a snapshot of the AppEntry, so a pin keeps working (and keeps its
+// icon) even when the .desktop file it came from is gone.
+using PinnedList = std::vector<AppEntry>;
+
+// Where the pins live: $XDG_CONFIG_HOME/win11wm/pinned, else
+// $HOME/.config/win11wm/pinned. Empty when neither can be determined.
+std::string pinnedPath();
+
+// Reads the pin file back. Missing or unreadable file = no pins, never an error.
+PinnedList loadPinned();
+
+// Writes the pin list, one entry per line, replacing the file atomically.
+void savePinned(const PinnedList& pins);
+
+// The thickness the user dragged the taskbar to, from the same config directory
+// as the pins. A missing, unreadable or nonsense value falls back to the Windows
+// 11 default rather than failing: a bad setting must never stop the WM starting.
+int loadTaskbarHeight();
+
+// Writes the taskbar's thickness, so the bar is still the size the user left it
+// next time. Called once, when the drag that changed it ends.
+void saveTaskbarHeight(int height);
+
 // One thing the user's desktop should show: a folder, a plain file, or a
 // .desktop launcher dropped there by an installer.
 struct DesktopItem {

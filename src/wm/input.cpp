@@ -365,7 +365,7 @@ void Manager::onButtonPress(XButtonEvent& ev) {
     // their own copy of Button4/5, we simply never selected wheel events on
     // them, so scrolling inside a window keeps working untouched.
     if (ev.button == Button4 || ev.button == Button5) {
-        if (y >= screenH - metrics::kTaskbarH) cycleTaskbar(ev.button == Button5);
+        if (y >= screenH - metrics::taskbarH) cycleTaskbar(ev.button == Button5);
         return;
     }
 
@@ -403,12 +403,22 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         endTabletIconDrag();
         return;
     }
+    if (taskbarResizeY >= 0) {
+        endTaskbarResize();
+        return;
+    }
     if (dragClient) {
         endDrag(x, y);
         return;
     }
     if (dragWidget >= 0) {
         endWidgetDrag();
+        return;
+    }
+    // Dropping a pin: the reorder is committed, unless the press never became a
+    // drag, in which case this release is the click the press stood for.
+    if (pinDrag >= 0) {
+        if (ev.button == Button1) endPinDrag(true);
         return;
     }
     // A Control Centre slider keeps tracking until the button comes up, so the
@@ -467,8 +477,21 @@ void Manager::onMotion(XMotionEvent& ev) {
         updateHoverStates(x, y);
         return;
     }
+    if (taskbarResizeY >= 0) {
+        // The bar's edge tracks the pointer anywhere on screen, up or down, the way
+        // a dragged window edge does: the pointer does not have to stay on the bar.
+        updateTaskbarResize(y);
+        return;
+    }
     if (dragClient) {
         updateDrag(x, y);
+        return;
+    }
+    // A pin being carried keeps tracking wherever the pointer goes: the reorder
+    // is horizontal, so wandering off the taskbar must not drop it.
+    if (pinDrag >= 0) {
+        updatePinDrag(x);
+        updateHoverStates(x, y);
         return;
     }
     if (dragWidget >= 0) {
@@ -500,6 +523,13 @@ void Manager::onKeyPress(XKeyEvent& ev) {
             }
             dirty = true;
         }
+        return;
+    }
+
+    // Escape abandons a launcher reorder and puts the pins back as they were,
+    // which is also what a lost button release leaves behind.
+    if (pinDrag >= 0 && sym == XK_Escape) {
+        endPinDrag(false);
         return;
     }
 
@@ -599,6 +629,18 @@ void Manager::onKeyPress(XKeyEvent& ev) {
 }
 
 void Manager::applyContextAction(int index) {
+    // The pin menu, opened either on a pinned taskbar button or on a Launchpad
+    // tile: a single item that pins or unpins what was clicked.
+    if (contextPin >= 0 || contextApp >= 0) {
+        AppEntry app;
+        if (contextPin >= 0 && contextPin < int(pinned.size())) app = pinned[size_t(contextPin)];
+        else if (contextApp >= 0 && contextApp < int(apps.size())) app = apps[size_t(contextApp)];
+        else return;
+        if (index != 0) return;
+        if (isPinned(app)) unpinApp(app.exec);
+        else pinApp(app);
+        return;
+    }
     // The desktop menu: an optional "Remove Widget" when opened on a card, then
     // the two add entries.
     if (!contextClient) {
@@ -682,6 +724,12 @@ void Manager::runShortcut(KeySym sym, unsigned mods) {
         if (c) showContextMenu(c, c->frame.x + 12, c->frame.y + c->captionH + 12);
         return;
     }
+    // Win+1..9 address the taskbar buttons, so they work with nothing focused at
+    // all -- which is exactly when a pinned launcher still has to be launchable.
+    if (sym >= XK_1 && sym <= XK_9) {
+        activateTaskItem(int(sym - XK_1));
+        return;
+    }
     if (!c) return;
     switch (sym) {
         case XK_Left:
@@ -699,12 +747,6 @@ void Manager::runShortcut(KeySym sym, unsigned mods) {
         case XK_Down:
             if (c->maximizedH || c->maximizedV || c->snapZone != kSnapNone) snapClient(c, kSnapNone);
             else minimizeClient(c, true);
-            break;
-        default:
-            if (sym >= XK_1 && sym <= XK_9) {
-                const int index = int(sym - XK_1);
-                if (index < int(taskItems.size())) activateTaskbarItem(taskItems[index].client);
-            }
             break;
     }
 }
@@ -725,6 +767,9 @@ void Manager::handleClientPress(Client* c, int x, int y, unsigned button) {
 }
 
 void Manager::handleTaskbarPress(int x, int y, unsigned button) {
+    // A pin is being carried, so the button that started it is still down: ignore
+    // anything else that lands on the bar until that one is let go.
+    if (pinDrag >= 0) return;
     if (startButtonRect.contains(x, y)) {
         if (startOpen) closeOverlays();
         else openStartMenu();
@@ -740,6 +785,15 @@ void Manager::handleTaskbarPress(int x, int y, unsigned button) {
     }
     for (size_t i = 0; i < taskItems.size(); ++i) {
         if (!taskItems[i].rect.contains(x, y)) continue;
+        // A pinned button right clicks into its own pin/unpin menu, so its
+        // button is never the same target as its window button.
+        if (taskItems[i].pin >= 0) {
+            if (button == Button3) openPinMenu(-1, taskItems[i].pin, x, y - 8);
+            // A left press on a pin arms a reorder drag; the launch (or the focus)
+            // happens on the release, and only if the pointer never travelled.
+            else beginPinDrag(taskItems[i].pin, x);
+            return;
+        }
         Client* c = taskItems[i].client;
         if (button == Button3 && c) {
             focusClient(c, true);
@@ -805,7 +859,7 @@ int Manager::snapZoneFor(int x, int y) const {
     const bool left = x <= zone;
     const bool right = x >= screenW - zone - 1;
     const bool top = y <= zone;
-    const bool bottom = y >= screenH - metrics::kTaskbarH - zone - 1;
+    const bool bottom = y >= screenH - metrics::taskbarH - zone - 1;
     if (left && top) return kSnapTopLeft;
     if (right && top) return kSnapTopRight;
     if (left && bottom) return kSnapBottomLeft;
@@ -835,7 +889,14 @@ Client* Manager::chromeAt(int x, int y) const {
 // "the click reached the overlay" path and the "the click reached a client that
 // was sitting on top of our chrome" path funnel through here.
 bool Manager::handleChromePress(int x, int y, unsigned button, Time time) {
-    if (y >= screenH - metrics::kTaskbarH) {
+    // The taskbar's edge is grabbed before anything else on the bar, because the
+    // grip reaches above the bar as well as into it. It is checked ahead of the
+    // taskbar strip below for the same reason.
+    if (button == Button1 && taskbarGripAt(x, y)) {
+        beginTaskbarResize(y);
+        return true;
+    }
+    if (y >= screenH - metrics::taskbarH) {
         handleTaskbarPress(x, y, button);
         return true;
     }
@@ -914,21 +975,33 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
             }
             return;
         }
-        if (button == Button1) {
+        if (button == Button1 || button == Button3) {
+            // Tiles answer both buttons: left starts the app, right offers to
+            // pin it. Either way the Launchpad gives way to what comes next.
+            for (size_t i = 0; i < appRects.size(); ++i) {
+                if (!appRects[i].contains(x, y)) continue;
+                const size_t gi = startPageBase + i;
+                if (gi < appFiltered.size() && appFiltered[gi] < apps.size()) {
+                    const size_t ai = appFiltered[gi];
+                    if (button == Button3) openPinMenu(int(ai), -1, x, y);
+                    else {
+                        launchApp(apps[ai].exec);
+                        closeOverlays();
+                    }
+                } else {
+                    closeOverlays();
+                }
+                return;
+            }
+            if (button != Button1) {
+                closeOverlays();
+                return;
+            }
             for (size_t p = 0; p < appDotRects.size(); ++p) {
                 if (!appDotRects[p].contains(x, y)) continue;
                 startPage = int(p);
                 layoutStartMenu();
                 dirty = true;
-                return;
-            }
-            for (size_t i = 0; i < appRects.size(); ++i) {
-                if (!appRects[i].contains(x, y)) continue;
-                const size_t gi = startPageBase + i;
-                if (gi < appFiltered.size() && appFiltered[gi] < apps.size()) {
-                    launchApp(apps[appFiltered[gi]].exec);
-                }
-                closeOverlays();
                 return;
             }
             if (searchRect.contains(x, y)) return;  // focus stays in the field
@@ -966,7 +1039,7 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
     // move or resize, a right press opens the add/remove menu anywhere on the
     // desktop (above the taskbar).
     if (button == Button1 && handleWidgetPress(x, y, time)) return;
-    if (button == Button3 && y < screenH - metrics::kTaskbarH) {
+    if (button == Button3 && y < screenH - metrics::taskbarH) {
         openDesktopMenu(x, y);
         return;
     }

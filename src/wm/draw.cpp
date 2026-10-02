@@ -12,6 +12,13 @@
 #include "theme.h"
 
 namespace wm {
+
+namespace metrics {
+// The one piece of shell geometry the user sets; Manager::updateTaskbarResize
+// moves it while the bar's edge is being dragged.
+int taskbarH = kTaskbarDefaultH;
+}  // namespace metrics
+
 namespace {
 
 // Trim `s` with an ellipsis so it fits in `maxW` pixels.
@@ -87,7 +94,7 @@ void Manager::layoutDesktopIcons() {
     desktopIconRects.clear();
     const int cellW = 92, cellH = 92, gapX = 6, gapY = 2;
     const int marginX = 10, marginY = 10;
-    const int usableH = screenH - metrics::kTaskbarH - marginY;
+    const int usableH = screenH - metrics::taskbarH - marginY;
     const int rows = std::max(1, (usableH + gapY) / (cellH + gapY));
     const auto cellAt = [&](int n) {
         const int col = n / rows, row = n % rows;
@@ -219,7 +226,7 @@ void Manager::beginLaunchAnim(const DesktopItem& item, const Rect& fromIcon) {
     // A generous, centred window the tile can grow into. placeNewClient centres
     // new windows too, so the real frame usually lands close by and the morph in
     // claimLaunch smooths out whatever difference remains.
-    const int bottom = screenH - metrics::kTaskbarH;
+    const int bottom = screenH - metrics::taskbarH;
     const int w = std::clamp(int(screenW * 0.60), metrics::kMinW,
                              std::max(metrics::kMinW, screenW - 120));
     const int h = std::clamp(int(bottom * 0.60), metrics::kMinH,
@@ -475,11 +482,13 @@ void Manager::drawClientSprite(Client* c) {
         if (c->minFade > 0.0) {
             const double m = c->minFade;
             genie = m;
-            genieIcon = Rect{screenW / 2 - 12, screenH - metrics::kTaskbarH, 24, 24};
+            // The funnel lands on the taskbar button's icon, whatever size that is.
+            const int icon = metrics::taskIconSize();
+            genieIcon = Rect{screenW / 2 - icon / 2, screenH - metrics::taskbarH, icon, icon};
             for (const TaskItem& it : taskItems) {
                 if (it.client != c) continue;
-                genieIcon = Rect{it.rect.x + (it.rect.w - 24) / 2,
-                                 it.rect.y + (it.rect.h - 24) / 2, 24, 24};
+                genieIcon = Rect{it.rect.x + (it.rect.w - icon) / 2,
+                                 it.rect.y + (it.rect.h - icon) / 2, icon, icon};
                 break;
             }
             opacity *= 1.0 - m * m;
@@ -548,11 +557,11 @@ void Manager::drawClientSprite(Client* c) {
 
 void Manager::layoutTaskbar() {
     taskItems.clear();
-    const int y = screenH - metrics::kTaskbarH;
-    const int top = y + (metrics::kTaskbarH - metrics::kTaskIconH) / 2;
+    const int y = screenH - metrics::taskbarH;
+    const int top = y + (metrics::taskbarH - metrics::taskButtonH()) / 2;
     const int gap = 4;
-    const int w = metrics::kTaskIconW;
-    const int h = metrics::kTaskIconH;
+    const int w = metrics::taskButtonW();
+    const int h = metrics::taskButtonH();
 
     std::vector<Client*> visible;
     for (auto& cp : clients) {
@@ -565,25 +574,40 @@ void Manager::layoutTaskbar() {
         visible.push_back(c);
     }
     const int count = int(visible.size());
-    const int total = count * w + (count > 1 ? (count - 1) * gap : 0);
+    const int buttons = count + int(pinned.size());
+    const int total = buttons * w + (buttons > 1 ? (buttons - 1) * gap : 0);
     // Windows 11 centres the Start button together with the whole app group.
     int x = (screenW - (total + w + gap)) / 2;
     if (x < 8) x = 8;
     startButtonRect = Rect{x, top, w, h};
     x += w + gap;
     const int rightLimit = screenW - 150;  // the clock cluster owns the right side
-    for (Client* c : visible) {
+    // Pinned launchers come first, in the order they were pinned: the buttons
+    // the user arranged stay where they put them while the window buttons after
+    // them grow and shrink with what is running.
+    for (size_t p = 0; p < pinned.size(); ++p) {
         if (x + w > rightLimit) break;
-        taskItems.push_back(TaskItem{Rect{x, top, w, h}, c});
+        TaskItem item;
+        item.rect = Rect{x, top, w, h};
+        item.pin = int(p);
+        taskItems.push_back(item);
         x += w + gap;
     }
-    clockRect = Rect{screenW - 140, y, 116, metrics::kTaskbarH};
-    showDesktopRect = Rect{screenW - 14, y, 14, metrics::kTaskbarH};
+    for (Client* c : visible) {
+        if (x + w > rightLimit) break;
+        TaskItem item;
+        item.rect = Rect{x, top, w, h};
+        item.client = c;
+        taskItems.push_back(item);
+        x += w + gap;
+    }
+    clockRect = Rect{screenW - 140, y, 116, metrics::taskbarH};
+    showDesktopRect = Rect{screenW - 14, y, 14, metrics::taskbarH};
 }
 
 void Manager::drawTaskbar() {
-    const int y = screenH - metrics::kTaskbarH;
-    const Rect bar{0, y, screenW, metrics::kTaskbarH};
+    const int y = screenH - metrics::taskbarH;
+    const Rect bar{0, y, screenW, metrics::taskbarH};
 
     // Acrylic: the blurred wallpaper tinted towards the taskbar colour, plus the
     // one pixel line Windows 11 puts on the top edge.
@@ -597,26 +621,64 @@ void Manager::drawTaskbar() {
     for (size_t i = 0; i < taskItems.size(); ++i) {
         const TaskItem& it = taskItems[i];
         Client* w = it.client;
-        if (!w) continue;
-        const bool active = (w == focused) && !w->minimized;
         const double hv = i < taskHover.size() ? taskHover[i] : 0.0;
-        // The active wash is a base layer; the hover wash fades over it, so a
-        // button lights up smoothly instead of popping.
-        if (active) comp.drawRect(it.rect, 6.f, theme::kItemActive);
-        if (hv > 0.001) comp.drawRect(it.rect, 6.f, theme::kItemHover, float(hv));
-        const Rect iconArea{it.rect.x + (it.rect.w - 24) / 2, it.rect.y + (it.rect.h - 24) / 2,
-                            24, 24};
-        if (w->iconTex && w->iconW > 0) {
-            comp.drawTex(w->iconTex, iconArea, 4.f, Color{1.f, 1.f, 1.f, 1.f}, 1.f, true, true);
-        } else if (!drawAppIcon(iconArea, w->appName, w->appName, 5.f, 1.f)) {
-            drawAppTile(iconArea, w->title, 5.f, tileTint(w->title), false);
+        // One icon box for every button, so a pinned launcher and a running
+        // window are drawn at exactly the same size.
+        const Rect iconArea{it.rect.x + (it.rect.w - metrics::taskIconSize()) / 2,
+                            it.rect.y + (it.rect.h - metrics::taskIconSize()) / 2,
+                            metrics::taskIconSize(), metrics::taskIconSize()};
+        // A pin lights up when the window it stands for is the focused one; a
+        // window button lights up when it is focused itself.
+        bool active = false;
+        bool running = false;
+        if (it.pin >= 0 && it.pin < int(pinned.size())) {
+            const AppEntry& app = pinned[size_t(it.pin)];
+            if (Client* win = clientForPinned(app)) {
+                running = true;
+                active = (win == focused) && !win->minimized;
+            }
+            // The carried button grows by a couple of pixels and keeps a stronger
+            // wash while it is lifted, so the eye can follow it across the bar.
+            const bool lifted = pinDragMoved && it.pin == pinDrag;
+            Rect area = iconArea;
+            if (lifted) {
+                const int side = metrics::taskIconSize() +
+                                 int(std::lround(pinDragLift * (metrics::taskIconDragSize() -
+                                                               metrics::taskIconSize())));
+                area = Rect{it.rect.x + (it.rect.w - side) / 2,
+                            it.rect.y + (it.rect.h - side) / 2, side, side};
+            }
+            if (active || lifted) comp.drawRect(it.rect, 6.f, theme::kItemActive);
+            if (hv > 0.001) comp.drawRect(it.rect, 6.f, theme::kItemHover, float(hv));
+            if (!drawAppIcon(area, app.icon, app.wmClass, 5.f, 1.f)) {
+                drawAppTile(area, app.name, 5.f, tileTint(app.name), false);
+            }
+        } else {
+            if (!w) continue;
+            active = (w == focused) && !w->minimized;
+            running = true;
+            // The active wash is a base layer; the hover wash fades over it, so a
+            // button lights up smoothly instead of popping.
+            if (active) comp.drawRect(it.rect, 6.f, theme::kItemActive);
+            if (hv > 0.001) comp.drawRect(it.rect, 6.f, theme::kItemHover, float(hv));
+            if (w->iconTex && w->iconW > 0) {
+                comp.drawTex(w->iconTex, iconArea, 4.f, Color{1.f, 1.f, 1.f, 1.f}, 1.f, true,
+                             true);
+            } else if (!drawAppIcon(iconArea, w->appName, w->appName, 5.f, 1.f)) {
+                drawAppTile(iconArea, w->title, 5.f, tileTint(w->title), false);
+            }
         }
         // The running/active pill on the bottom edge of the button: it grows and
-        // brightens as the button is hovered or becomes active.
-        const int iw = std::max(1, int(std::lround(active ? 16.0 : lerp(6.0, 8.0, hv))));
-        const Color ic = active ? theme::kAccent
-                                : mixColor(theme::kTextDim, theme::kTextMuted, float(hv));
-        comp.drawRect(Rect{it.rect.x + (it.rect.w - iw) / 2, bar.bottom() - 5, iw, 3}, 1.5f, ic);
+        // brightens as the button is hovered or becomes active. A pinned launcher
+        // that is not running shows no pill at all, the way Windows 11 does.
+        const double len = active ? 16.0 : running ? lerp(6.0, 8.0, hv) : 0.0;
+        if (len > 0.5) {
+            const int iw = std::max(1, int(std::lround(len)));
+            const Color ic = active ? theme::kAccent
+                                    : mixColor(theme::kTextDim, theme::kTextMuted, float(hv));
+            comp.drawRect(Rect{it.rect.x + (it.rect.w - iw) / 2, bar.bottom() - 5, iw, 3}, 1.5f,
+                          ic);
+        }
     }
 
     time_t now = time(nullptr);
@@ -627,12 +689,16 @@ void Manager::drawTaskbar() {
     strftime(hhmm, sizeof hhmm, "%H:%M", &lt);
     strftime(dateStr, sizeof dateStr, "%d/%m/%Y", &lt);
     const int right = clockRect.right();
-    drawTextRight(hhmm, 13, Weight::Regular, theme::kText, right, y + 9);
-    drawTextRight(dateStr, 11, Weight::Regular, theme::kTextMuted, right, y + 27);
+    // The clock is a two-line stack, centred in the bar rather than hung off fixed
+    // offsets, so it stays in the middle when the bar is dragged thicker or thinner.
+    // 29 is the stack's own height: 13px time, 5px gap, 11px date.
+    const int top = y + (metrics::taskbarH - 29) / 2;
+    drawTextRight(hhmm, 13, Weight::Regular, theme::kText, right, top);
+    drawTextRight(dateStr, 11, Weight::Regular, theme::kTextMuted, right, top + 18);
 
     if (showDesktopHoverAnim > 0.001)
         comp.drawRect(showDesktopRect, 2.f, theme::kItemHover, float(showDesktopHoverAnim));
-    comp.drawRect(Rect{screenW - 3, y + 6, 2, metrics::kTaskbarH - 12}, 1.f, theme::kShellBorder);
+    comp.drawRect(Rect{screenW - 3, y + 6, 2, metrics::taskbarH - 12}, 1.f, theme::kShellBorder);
 }
 
 void Manager::drawSnapPreview() {
@@ -663,7 +729,7 @@ void Manager::layoutStartMenu() {
 
     // The launcher owns everything above the taskbar; the taskbar stays put so
     // its Start button can still toggle it.
-    const int taskbarTop = screenH - metrics::kTaskbarH;
+    const int taskbarTop = screenH - metrics::taskbarH;
     startRect = Rect{0, 0, screenW, taskbarTop};
 
     // Top-centred search field, like macOS Launchpad.
@@ -922,7 +988,7 @@ void Manager::drawTaskView() {
     const int cols = n <= 1 ? 1 : (n <= 4 ? 2 : 3);
     const int rows = (n + cols - 1) / cols;
     const int gap = 24;
-    const int marginX = 56, marginTop = 64, marginBottom = metrics::kTaskbarH + 44;
+    const int marginX = 56, marginTop = 64, marginBottom = metrics::taskbarH + 44;
     const int availW = screenW - 2 * marginX;
     const int availH = screenH - marginTop - marginBottom;
     const int cellW = std::max(80, (availW - (cols - 1) * gap) / cols);

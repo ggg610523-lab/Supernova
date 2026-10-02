@@ -48,6 +48,7 @@ void usage(const char* argv0) {
         "                          home screen (dock, status bar, splash back)\n"
         "  Win+D / Win+M           show desktop\n"
         "  Win+1..9                activate the n-th taskbar window\n"
+        "  drag the taskbar edge   resize the taskbar, as in Windows 10\n"
         "  Win+R                   Start menu (search focused)\n"
         "  Alt+Tab                 switcher (release Alt to switch)\n"
         "  Alt+F4                  close window\n"
