@@ -69,7 +69,14 @@ inline Color kShadow = rgb(0x000000, 0.50f);
 inline Color kShadowIdle = rgb(0x000000, 0.32f);
 
 // --- shell (taskbar / Start / flyouts) -------------------------------------
-inline Color kTaskbarTint = rgb(0x1F1F1F, 0.78f);
+// The taskbar background is the Windows 11 web clone's recipe verbatim: a
+// translucent theme fill laid over a strongly saturated, blurred backdrop --
+// `background: rgba(32,32,32,0.75); backdrop-filter: saturate(3) blur(20px)`.
+// kTaskbarTint is the fill colour, kTaskbarTintOpacity its rgba alpha, and
+// kTaskbarSaturate the backdrop-filter saturate() amount.
+inline Color kTaskbarTint = rgb(0x202020);
+inline float kTaskbarTintOpacity = 0.75f;
+inline float kTaskbarSaturate = 3.0f;
 inline Color kShellTint = rgb(0x2B2B2B, 0.90f);
 inline Color kFlyoutTint = rgb(0x2B2B2B, 0.94f);
 inline Color kShellBorder = rgb(0xFFFFFF, 0.09f);
@@ -78,6 +85,15 @@ inline Color kItemHover = rgb(0xFFFFFF, 0.06f);
 inline Color kItemActive = rgb(0xFFFFFF, 0.10f);
 inline Color kItemPress = rgb(0xFFFFFF, 0.04f);
 inline Color kSearchBox = rgb(0xFFFFFF, 0.06f);
+// The backplate under the focused app's taskbar button. Windows 11 lifts it a
+// little above a plain hover wash and lets a trace of the accent through, which is
+// what stops the active button reading as just "the one under the cursor".
+inline Color kTaskActivePlate = rgb(0xFFFFFF, 0.115f);
+// The accent bloom that lifts the taskbar button under the cursor -- and the
+// focused app -- off the acrylic. Windows 11 keeps this neutral, but a trace of
+// the accent spilling onto the bar is what stops the surface reading as flat
+// paint and gives it the lit-glass look the whole shell is going for.
+inline Color kTaskGlow = rgb(0x4CC2FF, 1.0f);
 // The wash behind a modal dialog, and the fill of a control sitting *on* a light
 // flyout. These exist so the Fluent shell never has to borrow a colour from one of
 // the imitated skins below: a near-black scrim over a white dialog is the one
@@ -132,7 +148,9 @@ inline void applyMode(Mode m) {
         kTextDim = rgb(0x000000, 0.38f);
         kShadow = rgb(0x000000, 0.22f);
         kShadowIdle = rgb(0x000000, 0.13f);
-        kTaskbarTint = rgb(0xF3F3F3, 0.78f);
+        kTaskbarTint = rgb(0xF3F3F3);
+        kTaskbarTintOpacity = 0.85f;
+        kTaskbarSaturate = 3.0f;
         kShellTint = rgb(0xF3F3F3, 0.90f);
         kFlyoutTint = rgb(0xFFFFFF, 0.94f);
         kShellBorder = rgb(0x000000, 0.0578f);
@@ -141,6 +159,8 @@ inline void applyMode(Mode m) {
         kItemActive = rgb(0x000000, 0.0595f);
         kItemPress = rgb(0x000000, 0.0235f);
         kSearchBox = rgb(0x000000, 0.0373f);
+        kTaskActivePlate = rgb(0x000000, 0.0536f);
+        kTaskGlow = rgb(0x0078D4, 1.0f);
         kScrim = rgb(0xF5F5F5, 0.96f);
         kFieldFill = rgb(0xEFEFEF, 0.92f);
         kSnapFill = rgb(0x0078D4, 0.16f);
@@ -168,7 +188,9 @@ inline void applyMode(Mode m) {
     kTextDim = rgb(0xFFFFFF, 0.38f);
     kShadow = rgb(0x000000, 0.50f);
     kShadowIdle = rgb(0x000000, 0.32f);
-    kTaskbarTint = rgb(0x1F1F1F, 0.78f);
+    kTaskbarTint = rgb(0x202020);
+    kTaskbarTintOpacity = 0.75f;
+    kTaskbarSaturate = 3.0f;
     kShellTint = rgb(0x2B2B2B, 0.90f);
     kFlyoutTint = rgb(0x2B2B2B, 0.94f);
     kShellBorder = rgb(0xFFFFFF, 0.09f);
@@ -177,6 +199,8 @@ inline void applyMode(Mode m) {
     kItemActive = rgb(0xFFFFFF, 0.10f);
     kItemPress = rgb(0xFFFFFF, 0.04f);
     kSearchBox = rgb(0xFFFFFF, 0.06f);
+    kTaskActivePlate = rgb(0xFFFFFF, 0.115f);
+    kTaskGlow = rgb(0x4CC2FF, 1.0f);
     kScrim = rgb(0x0A0A0F, 0.96f);
     kFieldFill = rgb(0x1C1C1E, 0.72f);
     kSnapFill = rgb(0x4CC2FF, 0.22f);
@@ -305,8 +329,9 @@ extern int taskbarH;               // live thickness; saved by saveTaskbarHeight
 // Buttons and icons are sized off the thickness, so a thicker bar grows its
 // contents instead of stranding a 32px icon in the middle of it. One icon box
 // serves every button, whatever the button is: a pinned launcher and a running
-// window have to read as the same size of app.
-inline int taskButtonW() { return 44 * taskbarH / kTaskbarDefaultH; }
+// window have to read as the same size of app. 42 rather than Windows' 44 keeps
+// the icons a touch closer together than the reference bar.
+inline int taskButtonW() { return 42 * taskbarH / kTaskbarDefaultH; }
 inline int taskButtonH() { return 40 * taskbarH / kTaskbarDefaultH; }
 inline int taskIconSize() { return 32 * taskbarH / kTaskbarDefaultH; }
 inline int taskIconDragSize() { return 34 * taskbarH / kTaskbarDefaultH; }

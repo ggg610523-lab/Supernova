@@ -592,6 +592,9 @@ void Manager::tickAnimations(double now) {
 void Manager::tickFluidMotion(double dtMs) {
     if (dtMs <= 0.0) return;
     constexpr double kHoverMs = 120.0;   // per-item hover / selection fade
+    // The running pill is the one thing on the bar that springs rather than fades,
+    // so it gets its own, slightly slower budget.
+    constexpr double kPillMs = 190.0;
     constexpr double kFlyoutMs = 140.0;  // dropdown open / close
     constexpr double kButtonMs = 90.0;   // caption-button hover (a touch snappier)
 
@@ -609,6 +612,79 @@ void Manager::tickFluidMotion(double dtMs) {
     if (approach(startHoverAnim, hoverStart ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
     if (approach(showDesktopHoverAnim, hoverShowDesktop ? 1.0 : 0.0, dtMs, kHoverMs))
         dirty = true;
+    if (approach(clockHoverAnim, hoverClock ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
+    // The running pill springs between its three widths instead of snapping. It
+    // tracks the same eased hover the icon lift does, so widening on hover and the
+    // icon growing arrive together rather than in two separate jumps.
+    if (taskPill.size() != taskItems.size()) {
+        // Resize, not assign: an existing pill keeps the width it had, so opening
+        // or closing a window does not make every other pill blink back to rest.
+        taskPill.resize(taskItems.size(), 0.0);
+        dirty = true;
+    }
+    for (size_t i = 0; i < taskItems.size(); ++i) {
+        const TaskItem& it = taskItems[i];
+        double target = 0.0;
+        if (it.pin >= 0 && it.pin < int(pinned.size())) {
+            // A pinned launcher with nothing running keeps no pill at all.
+            if (Client* win = clientForPinned(pinned[size_t(it.pin)]))
+                target = (win == focused && !win->minimized) ? 1.0 : 0.42;
+        } else if (Client* c = it.client) {
+            target = (c == focused && !c->minimized) ? 1.0 : 0.42;
+        }
+        if (target > 0.0 && taskHover[i] > target) target = taskHover[i];
+        if (approach(taskPill[i], target, dtMs, kPillMs)) dirty = true;
+    }
+    // A button that has just appeared -- a new window opened, or an app pinned --
+    // eases up out of the bar instead of blinking into place. New slots start at 0
+    // and the vector grows with the bar, so only the new button animates.
+    if (taskAppear.size() != taskItems.size()) {
+        // The first layout fills the vector in at rest, so the bar does not pop
+        // on start up. Every later growth is a genuinely new button, which
+        // starts from 0 and eases in.
+        taskAppear.resize(taskItems.size(), taskAppearPrimed ? 0.0 : 1.0);
+        taskAppearPrimed = true;
+        dirty = true;
+    }
+    for (size_t i = 0; i < taskAppear.size(); ++i) {
+        if (approach(taskAppear[i], 1.0, dtMs, kPillMs)) dirty = true;
+    }
+    // The press pop: set to 1 when a button is clicked, and it relaxes back to
+    // rest on its own. Snappier than a hover so the click reads as instant.
+    if (taskPress.size() != taskItems.size()) {
+        taskPress.resize(taskItems.size(), 0.0);
+        dirty = true;
+    }
+    for (size_t i = 0; i < taskPress.size(); ++i) {
+        if (approach(taskPress[i], 0.0, dtMs, 70.0)) dirty = true;
+    }
+    // macOS-dock magnification. A button grows by how near the pointer is to its
+    // centre, with a raised-cosine fall-off so the neighbours swell too as the
+    // cursor travels -- the effect the macOS web clones reproduce. It only runs
+    // while the pointer is over the bar; away from it everything returns to rest.
+    if (taskMagnify.size() != taskItems.size()) {
+        taskMagnify.resize(taskItems.size(), 1.0);
+        dirty = true;
+    }
+    {
+        constexpr double kPi = 3.14159265358979323846;
+        constexpr double kRange = 120.0;   // px the cursor reaches to either side
+        constexpr double kMaxMag = 0.08;   // growth directly under the cursor
+        const bool onBar = pointerY >= screenH - metrics::taskbarH;
+        const auto fallOff = [&](int centerX) {
+            const double d = std::fabs(double(pointerX) - double(centerX));
+            if (!onBar || d >= kRange) return 1.0;
+            const double t = 1.0 - d / kRange;
+            return 1.0 + kMaxMag * (0.5 - 0.5 * std::cos(t * kPi));
+        };
+        for (size_t i = 0; i < taskItems.size(); ++i) {
+            const double target = fallOff(taskItems[i].rect.x + taskItems[i].rect.w / 2);
+            if (approach(taskMagnify[i], target, dtMs, 70.0)) dirty = true;
+        }
+        if (approach(startMagnify,
+                     fallOff(startButtonRect.x + startButtonRect.w / 2), dtMs, 70.0))
+            dirty = true;
+    }
     // The button being carried eases up out of the bar and settles back on drop.
     if (approach(pinDragLift, pinDragMoved ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
 

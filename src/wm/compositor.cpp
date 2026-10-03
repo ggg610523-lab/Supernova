@@ -69,6 +69,7 @@ uniform float uShadowPad;
 uniform float uTexMix;    // 1 = take rgb from the texture
 uniform float uKeepAlpha; // 1 = take alpha from the texture
 uniform float uTintAmount;
+uniform float uSaturate;  // backdrop-filter saturate() amount (mode 1)
 uniform float uClipTop;   // mode 0: discard fragments above this screen y
 uniform sampler2D uTex;
 uniform sampler2D uBlur;
@@ -145,10 +146,12 @@ void main() {
         float d = sdRound(p - c, uRect.zw * 0.5, uRadius);
         vec2 uv = clamp(p / uScreen, vec2(0.0), vec2(1.0));
         vec3 col = texture(uBlur, uv).rgb;
-        // Acrylic is a saturated, slightly luminous wash: push the colour away
-        // from grey, lift it with a luminosity layer, then take the tint.
+        // Acrylic is a saturated wash: push the blurred backdrop away from grey so
+        // its colour survives, then take the tint over it. uSaturate is the
+        // backdrop-filter saturate() amount -- the taskbar runs it high (3), the
+        // default surfaces keep a gentler 1.45.
         float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
-        col = mix(vec3(l), col, 1.45);
+        col = mix(vec3(l), col, uSaturate);
         col = mix(col, uColor.rgb, uTintAmount);
         // Grain is luminance only; coloured speckle reads as dirt, not acrylic.
         col += vec3(hash21(floor(p) + 0.5) - 0.5) * 0.016;
@@ -691,6 +694,7 @@ bool Compositor::buildShaders(std::string* error) {
     uTexMix_ = loc("uTexMix");
     uKeepAlpha_ = loc("uKeepAlpha");
     uTintAmount_ = loc("uTintAmount");
+    uSaturate_ = loc("uSaturate");
     uClipTop_ = loc("uClipTop");
     uTex_ = loc("uTex");
     uBlur_ = loc("uBlur");
@@ -1083,7 +1087,7 @@ void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, floa
 }
 
 void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,
-                             const Color& border, float opacity) {
+                             const Color& border, float opacity, float saturation) {
     if (r.empty()) return;
     glUseProgram(prog_);
     glBindVertexArray(vao_);
@@ -1092,6 +1096,7 @@ void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint, flo
     glUniform1f(uRadius_, radius);
     glUniform1f(uOpacity_, opacity);
     glUniform1f(uTintAmount_, tintAmount);
+    glUniform1f(uSaturate_, saturation);
     glUniform4f(uColor_, tint.r, tint.g, tint.b, tint.a);
     glUniform4f(uBorder_, border.r, border.g, border.b, border.a);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

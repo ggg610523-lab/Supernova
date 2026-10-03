@@ -680,8 +680,17 @@ private:
     // which is what makes the whole shell read as one continuous surface. The
     // vectors are kept the size of the list they decorate.
     std::vector<double> taskHover;         // per taskbar button
+    std::vector<double> taskPill;          // per taskbar button, running-pill width
+    std::vector<double> taskAppear;        // per taskbar button, ease-in of a new button
+    bool taskAppearPrimed = false;         // first layout fills in, later ones animate
+    std::vector<double> taskPress;         // per taskbar button, the press pop
+    // macOS-dock magnification: each button's 1..1+max scale as the cursor nears
+    // its centre. The Start button magnifies with the same fall-off.
+    std::vector<double> taskMagnify;
+    double startMagnify = 1.0;
     double startHoverAnim = 0.0;           // Start button wash
     double showDesktopHoverAnim = 0.0;     // show-desktop sliver
+    double clockHoverAnim = 0.0;           // clock/date cluster wash
     std::vector<double> appHover;          // per Launchpad tile
     std::vector<double> dotHover;          // per page dot
     std::vector<double> ctxHover;          // per context-menu item

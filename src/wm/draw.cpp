@@ -629,7 +629,7 @@ void Manager::layoutTaskbar() {
     taskItems.clear();
     const int y = screenH - metrics::taskbarH;
     const int top = y + (metrics::taskbarH - metrics::taskButtonH()) / 2;
-    const int gap = 4;
+    const int gap = 0;
     const int w = metrics::taskButtonW();
     const int h = metrics::taskButtonH();
 
@@ -679,24 +679,81 @@ void Manager::drawTaskbar() {
     const int y = screenH - metrics::taskbarH;
     const Rect bar{0, y, screenW, metrics::taskbarH};
 
-    // Acrylic: the blurred wallpaper tinted towards the taskbar colour, plus the
-    // one pixel line Windows 11 puts on the top edge.
-    comp.drawAcrylic(bar, 0.f, theme::kTaskbarTint, 0.80f, theme::kShellLine, 1.0f);
+    // A soft shadow above the bar, so the acrylic reads as a pane floating over
+    // the desktop rather than paint stuck to the bottom edge. Stacked one pixel
+    // rows with a quadratic falloff are enough to read as a blurred shadow, so the
+    // shader stays untouched.
+    constexpr int kShadowRows = 14;
+    for (int i = 1; i <= kShadowRows; ++i) {
+        const float t = float(i) / float(kShadowRows);
+        const float a = 0.34f * (1.0f - t) * (1.0f - t);
+        comp.drawRect(Rect{0, y - i, screenW, 1}, 0.f, theme::kShadow, a);
+    }
+
+    // The Windows 11 web clone's taskbar background: a translucent theme fill over
+    // a strongly saturated, blurred backdrop. The compositor samples the
+    // pre-blurred wallpaper, so tinting the blur by `tintAmount` at full surface
+    // alpha reproduces `rgba(tint, opacity)` over `backdrop-filter` exactly, and
+    // the desktop behind the bar no longer shows through sharp.
+    comp.drawAcrylic(bar, 0.f, theme::kTaskbarTint, theme::kTaskbarTintOpacity,
+                     theme::kShellLine, 1.0f, theme::kTaskbarSaturate);
     comp.drawRect(Rect{0, y, screenW, 1}, 0.f, theme::kShellBorder);
 
-    if (startHoverAnim > 0.001)
-        comp.drawRect(startButtonRect, 6.f, theme::kItemHover, float(startHoverAnim));
-    drawStartGlyph(startButtonRect, theme::kGlyph);
+    // Glass sheen: the first few rows fade from the bright hairline down into the
+    // acrylic, so the surface reads as lit from above instead of evenly tinted.
+    // Light mode takes a much weaker sheen, or it just washes the pale bar out.
+    {
+        const float sheen = theme::isLight() ? 0.30f : 1.0f;
+        for (int i = 1; i <= 5; ++i) {
+            const float a = 0.05f * sheen * (1.0f - float(i) / 6.0f);
+            comp.drawRect(Rect{0, y + i, screenW, 1}, 0.f, Color{1.f, 1.f, 1.f, 1.f}, a);
+        }
+    }
+
+    // A soft accent bloom behind a button. Concentric rounded rects of the same
+    // hue at falling alpha stack into a halo that reads as a blur without needing
+    // a blur pass: the inner layers overlap and accumulate, the outer ones thin
+    // out to nothing.
+    const auto bloom = [&](const Rect& r, double amount, float radius) {
+        if (amount <= 0.01) return;
+        constexpr int kLayers = 4;
+        for (int k = 0; k < kLayers; ++k) {
+            const float a = 0.08f * float(amount) * (1.0f - float(k) / float(kLayers));
+            comp.drawRect(r.inflated(2 + k), radius + float(k), theme::kTaskGlow, a);
+        }
+    };
+
+    // Windows 11 lifts and slightly enlarges the icon under the cursor rather than
+    // only washing the button, and that motion is most of what makes the bar feel
+    // alive. A focused app keeps a little of the lift so it stays findable.
+    const auto lifted = [](double hv) { return fluentEase(hv); };
+
+    {
+        const double g = lifted(startHoverAnim);
+        const int cx = startButtonRect.x + startButtonRect.w / 2;
+        const int cy = startButtonRect.y + startButtonRect.h / 2;
+        // Sized like every app icon, not the whole button: a launcher drawn at
+        // button width (44px) read as a bigger, louder neighbour than the 32px
+        // app icons beside it.
+        const int baseBox = std::max(8, int(std::lround(metrics::taskIconSize() *
+                                                         (1.0 + 0.12 * g))));
+        // Dock magnification grows the glyph upward out of the bar.
+        const int box = std::max(8, int(std::lround(baseBox * startMagnify)));
+        const Rect icon{cx - box / 2, cy - box / 2 - int(std::lround(g)) - (box - baseBox) / 2,
+                        box, box};
+        drawStartGlyph(icon, theme::kGlyph);
+    }
 
     for (size_t i = 0; i < taskItems.size(); ++i) {
         const TaskItem& it = taskItems[i];
         Client* w = it.client;
         const double hv = i < taskHover.size() ? taskHover[i] : 0.0;
-        // One icon box for every button, so a pinned launcher and a running
-        // window are drawn at exactly the same size.
-        const Rect iconArea{it.rect.x + (it.rect.w - metrics::taskIconSize()) / 2,
-                            it.rect.y + (it.rect.h - metrics::taskIconSize()) / 2,
-                            metrics::taskIconSize(), metrics::taskIconSize()};
+        const double g = lifted(hv);
+        // A button just added eases in; a clicked one pops. Both are read here so
+        // the plate, the icon and the pill all animate as one object.
+        const double appear = i < taskAppear.size() ? taskAppear[i] : 1.0;
+        const double press = i < taskPress.size() ? taskPress[i] : 0.0;
+
         // A pin lights up when the window it stands for is the focused one; a
         // window button lights up when it is focused itself.
         bool active = false;
@@ -709,46 +766,89 @@ void Manager::drawTaskbar() {
             }
             // The carried button grows by a couple of pixels and keeps a stronger
             // wash while it is lifted, so the eye can follow it across the bar.
-            const bool lifted = pinDragMoved && it.pin == pinDrag;
-            Rect area = iconArea;
-            if (lifted) {
-                const int side = metrics::taskIconSize() +
-                                 int(std::lround(pinDragLift * (metrics::taskIconDragSize() -
-                                                               metrics::taskIconSize())));
+            const bool liftedPin = pinDragMoved && it.pin == pinDrag;
+            // The hovered icon grows, and the focused one keeps a fraction of the
+            // growth so the active app is readable at a glance.
+            const double mag = i < taskMagnify.size() ? taskMagnify[i] : 1.0;
+            const double restGrow = (1.0 + 0.12 * g + (active ? 0.05 : 0.0)) *
+                                    (0.82 + 0.18 * appear) * (1.0 - 0.07 * press);
+            const int restSide =
+                std::max(4, int(std::lround(metrics::taskIconSize() * restGrow)));
+            int side = std::max(4, int(std::lround(restSide * mag)));
+            // The dock grows an icon upward out of the bar rather than about its
+            // middle, so a magnified glyph reads as rising off the shelf.
+            const int up = (side - restSide) / 2;
+            Rect area{it.rect.x + (it.rect.w - side) / 2,
+                      it.rect.y + (it.rect.h - side) / 2 - int(std::lround(g)) - up, side, side};
+            if (liftedPin) {
+                // Carried: eases up out of the bar, so the eye can follow it across.
+                side = side + int(std::lround(pinDragLift * (metrics::taskIconDragSize() -
+                                                             side)));
                 area = Rect{it.rect.x + (it.rect.w - side) / 2,
-                            it.rect.y + (it.rect.h - side) / 2, side, side};
+                            it.rect.y + (it.rect.h - side) / 2 - int(std::lround(pinDragLift * 2)),
+                            side, side};
             }
-            if (active || lifted) comp.drawRect(it.rect, 6.f, theme::kItemActive);
-            if (hv > 0.001) comp.drawRect(it.rect, 6.f, theme::kItemHover, float(hv));
-            if (!drawAppIcon(area, app.icon, app.wmClass, 5.f, 1.f)) {
+            // Only the focused app gets a backplate; hovering leaves the bar bare
+            // and lets the enlarged icon do the talking. The bloom sits under the
+            // plate, so the light reads as coming from under the button.
+            bloom(it.rect, (active ? 0.45 : 0.0) * appear, 4.f);
+            if (active) {
+                comp.drawRect(Rect{it.rect.x + 2, it.rect.y + 2, it.rect.w - 4,
+                                   it.rect.h - 4},
+                              4.f, theme::kTaskActivePlate, float(appear));
+            }
+            if (!drawAppIcon(area, app.icon, app.wmClass, 5.f, float(appear))) {
                 drawAppTile(area, app.name, 5.f, tileTint(app.name), false);
             }
         } else {
             if (!w) continue;
             active = (w == focused) && !w->minimized;
             running = true;
-            // The active wash is a base layer; the hover wash fades over it, so a
-            // button lights up smoothly instead of popping.
-            if (active) comp.drawRect(it.rect, 6.f, theme::kItemActive);
-            if (hv > 0.001) comp.drawRect(it.rect, 6.f, theme::kItemHover, float(hv));
+            const double mag = i < taskMagnify.size() ? taskMagnify[i] : 1.0;
+            const double restGrow = (1.0 + 0.12 * g + (active ? 0.05 : 0.0)) *
+                                    (0.82 + 0.18 * appear) * (1.0 - 0.07 * press);
+            const int restSide =
+                std::max(4, int(std::lround(metrics::taskIconSize() * restGrow)));
+            const int side = std::max(4, int(std::lround(restSide * mag)));
+            const int up = (side - restSide) / 2;
+            const Rect iconArea{it.rect.x + (it.rect.w - side) / 2,
+                                it.rect.y + (it.rect.h - side) / 2 - int(std::lround(g)) - up,
+                                side, side};
+            // The same accent bloom as a pinned button, then the active plate. No
+            // hover wash: the icon's own growth is the whole hover response.
+            bloom(it.rect, (active ? 0.45 : 0.0) * appear, 4.f);
+            if (active) {
+                comp.drawRect(Rect{it.rect.x + 2, it.rect.y + 2, it.rect.w - 4,
+                                   it.rect.h - 4},
+                              4.f, theme::kTaskActivePlate, float(appear));
+            }
             if (w->iconTex && w->iconW > 0) {
-                comp.drawTex(w->iconTex, iconArea, 4.f, Color{1.f, 1.f, 1.f, 1.f}, 1.f, true,
-                             true);
-            } else if (!drawAppIcon(iconArea, w->appName, w->appName, 5.f, 1.f)) {
+                comp.drawTex(w->iconTex, iconArea, 4.f, Color{1.f, 1.f, 1.f, 1.f},
+                             float(appear), true, true);
+            } else if (!drawAppIcon(iconArea, w->appName, w->appName, 5.f, float(appear))) {
                 drawAppTile(iconArea, w->title, 5.f, tileTint(w->title), false);
             }
         }
-        // The running/active pill on the bottom edge of the button: it grows and
-        // brightens as the button is hovered or becomes active. A pinned launcher
-        // that is not running shows no pill at all, the way Windows 11 does.
-        const double len = active ? 16.0 : running ? lerp(6.0, 8.0, hv) : 0.0;
-        if (len > 0.5) {
-            const int iw = std::max(1, int(std::lround(len)));
+
+        // The running/active pill on the bottom edge of the button. Its width is
+        // animated (see tickFluidMotion), so it breathes between the short "running
+        // but not focused" bar and the long focused one. A pinned launcher that is
+        // not running shows no pill at all, the way Windows 11 does.
+        const double pw = i < taskPill.size() ? taskPill[i] : 0.0;
+        if (pw > 0.01 && appear > 0.01) {
+            const int wide = 18, narrow = 7;
+            const int iw = std::max(2, int(std::lround(narrow + (wide - narrow) * pw)));
+            const int ph = active ? 4 : 3;
             const Color ic = active ? theme::kAccent
-                                    : mixColor(theme::kTextDim, theme::kTextMuted, float(hv));
-            comp.drawRect(Rect{it.rect.x + (it.rect.w - iw) / 2, bar.bottom() - 5, iw, 3}, 1.5f,
-                          ic);
+                                    : mixColor(theme::kTextDim, theme::kTextMuted, float(g));
+            const Rect pill{it.rect.x + (it.rect.w - iw) / 2,
+                            bar.bottom() - 6 - int(std::lround(press * 1.5)), iw, ph};
+            // A short, faint copy underneath is enough to read as a glow, which is
+            // what makes the focused app's indicator look lit rather than painted.
+            if (active) comp.drawRect(pill.inflated(2), float(ph) * 0.5f + 2.f, ic, 0.22f);
+            comp.drawRect(pill, float(ph) * 0.5f, ic, float(appear));
         }
+        (void)running;
     }
 
     time_t now = time(nullptr);
@@ -763,6 +863,12 @@ void Manager::drawTaskbar() {
     // offsets, so it stays in the middle when the bar is dragged thicker or thinner.
     // 29 is the stack's own height: 13px time, 5px gap, 11px date.
     const int top = y + (metrics::taskbarH - 29) / 2;
+    // The whole cluster takes a hover wash, the way the tray does in Windows 11, so
+    // the click target looks like it exists before it is pressed.
+    if (clockHoverAnim > 0.001) {
+        comp.drawRect(Rect{clockRect.x + 2, y + 4, clockRect.w - 4, metrics::taskbarH - 8},
+                      4.f, theme::kItemHover, float(clockHoverAnim));
+    }
     drawTextRight(hhmm, 13, Weight::Regular, theme::kText, right, top);
     drawTextRight(dateStr, 11, Weight::Regular, theme::kTextMuted, right, top + 18);
 

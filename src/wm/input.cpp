@@ -988,7 +988,11 @@ void Manager::handleTaskbarPress(int x, int y, unsigned button) {
             if (button == Button3) openPinMenu(-1, taskItems[i].pin, x, y - 8);
             // A left press on a pin arms a reorder drag; the launch (or the focus)
             // happens on the release, and only if the pointer never travelled.
-            else beginPinDrag(taskItems[i].pin, x);
+            else {
+                if (i < taskPress.size()) taskPress[i] = 1.0;  // press pop
+                beginPinDrag(taskItems[i].pin, x);
+            }
+            dirty = true;
             return;
         }
         Client* c = taskItems[i].client;
@@ -997,7 +1001,9 @@ void Manager::handleTaskbarPress(int x, int y, unsigned button) {
             showContextMenu(c, x, y - 8);
             return;
         }
+        if (button == Button1 && i < taskPress.size()) taskPress[i] = 1.0;  // press pop
         activateTaskbarItem(c);
+        dirty = true;
         return;
     }
 }
