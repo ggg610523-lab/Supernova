@@ -324,6 +324,10 @@ void Manager::drawDesktop() {
     if (tabletAnim < 0.999) drawDesktopIcons();
     if (tabletAnim > 0.001) drawTabletHome();
     drawWidgets();
+    // The dock picker is modal, so it goes over the widget cards rather than under
+    // them -- the cards are painted on top of the home screen on purpose.
+    if (tabletDockPickerOpen) drawTabletDockPickerView();
+    if (tabletMenu) drawTabletMenuView();
 }
 
 void Manager::drawTextAt(const std::string& s, int px, Weight w, const Color& c, int x, int y) {

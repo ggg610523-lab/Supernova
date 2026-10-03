@@ -116,6 +116,18 @@ struct TabletLayout {
     std::vector<TabletItem> home;
 };
 
+// Whether two entries are the same launcher, however each was found. The desktop
+// items and the .desktop scan describe the same apps with different metadata, so
+// the exec -- or the path for a non-launcher -- decides, and the name has to agree.
+bool sameTabletApp(const TabletEntry& a, const TabletEntry& b);
+
+// Takes one app out of the home screen wherever it appears, as a plain grid icon
+// or inside a folder, and dissolves any folder left with fewer than two apps in
+// it. This is the rule that keeps a single screen from showing the same app twice,
+// whether an app arrives there by being dragged, picked in the dock's app picker,
+// or read back from a file somebody edited by hand.
+void removeTabletAppFromHome(std::vector<TabletItem>& home, const TabletEntry& app);
+
 // Reads the saved arrangement back from the config directory. An empty layout
 // means there is nothing usable to read -- no file yet, or one that did not parse
 // -- and the caller is expected to build the default home screen instead.

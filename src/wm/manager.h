@@ -423,6 +423,7 @@ private:
     void drawClockWidget(const Widget& w);
     void drawBatteryWidget(const Widget& w);
     int  widgetAt(int x, int y) const;        // index, or -1
+    bool widgetOnPage(const Widget& w) const;  // is this card on the page shown?
     bool handleWidgetPress(int x, int y, Time time);  // true when consumed
     void beginWidgetDrag(int index, int x, int y, bool resize);
     void updateWidgetDrag(int x, int y);
@@ -442,10 +443,38 @@ private:
     void setTabletMode(bool on);       // starts the splash transition
     void applyTabletMode();            // swap, at the splash midpoint
     void buildTabletEntries();         // the ordered home/dock lists, once
+    int tabletDockCapacity() const;   // icons the dock row has room for
+    void layoutTabletDockPicker();     // the picker's sheet, tiles and page dots
+    void openTabletDockPicker();       // fill it with everything not in the dock
+    void closeTabletDockPicker();
+    void addTabletDockApps();          // commit the ticked apps to the dock
+    void removeTabletDockApp(int i);   // a remove badge was tapped
+    void drawTabletDockBadge(const Rect& box, const char* glyph, float a, bool tile);
+    void drawTabletDockPickerView();
+
+    void openTabletMenu(int dockIndex, int homeIndex);
+    void closeTabletMenu();
+    void layoutTabletMenu();
+    void drawTabletMenuView();
+    bool runTabletMenuAction(int row);
+    void tabletMenuItems(std::vector<std::string>& labels, std::vector<char>& danger,
+                         std::vector<int>& acts) const;
+    // Put a lifted icon back where it came from without running any drop logic: what
+    // the quick actions gesture needs, where the long press turns out not to have
+    // been a drag after all.
+    void cancelTabletIconDrag();
+    void drawTabletRunDot(const Rect& box, int jiggle, float a);
+    // Whether a home screen entry has a window open. This is the same match that
+    // anchors the launch zoom, so the dot lands under the icon the window came from.
+    bool tabletEntryRunning(const TabletEntry& e) const;
+    bool tabletEntryMatchesClient(const TabletEntry& e, const Client* c) const;
     void saveTabletLayout();           // write the arrangement the user left
     bool loadTabletLayout();           // read it back; false when there is none
     void layoutTabletHome();           // dock/home entries and their rects
     void layoutTabletFolder();         // the open folder's sheet and 3x3 cells
+    Rect tabletGridCell(int k) const;  // where icon k of a page sits
+    void setTabletHomePage(int page);  // turn to a page, relaying out the grid
+    void drawTabletGridPage(int page, int dx, float a, double wiggle);
     void closeTabletFolder();          // fold the open folder back into its icon
     void openTabletFolder(int index);  // zoom a folder's icon out into its sheet
     // iOS names a new folder after what it thinks is in it. There is no category
@@ -503,7 +532,6 @@ private:
     // A drop helper, a private member rather than a file static because it names
     // the nested entry type. It reports true when the folder is left empty, so the
     // caller can delete it the way iOS does.
-    static bool tabletFolderRemove(std::vector<TabletEntry>& apps, const TabletEntry& app);
 
     // ---- cursor helper (declared here to keep the cursor table together)
     void setCursor(int which);
@@ -690,8 +718,69 @@ private:
     double splashOpacity = 0.0;       // splash scrim, 0..1
     std::vector<TabletItem> tabletHome;
     std::vector<TabletEntry> tabletDock;
-    std::vector<Rect> tabletHomeRects;
+    std::vector<Rect> tabletHomeRects;  // this page's cells only
+
+    // --- the home screen is as many pages wide as it needs ------------------
+    // The grid holds a screenful of icons and the rest carry on onto further pages,
+    // which turn sideways: dragged with a finger across the wallpaper, or by
+    // holding a lifted icon against a screen edge. The page dots between the grid
+    // and the dock say how many there are and which one is showing.
+    int tabletGridCols = 3;
+    int tabletGridCellW = metrics::kTabletCellW;
+    int tabletGridCellH = metrics::kTabletCellH;
+    int tabletGridX = 0, tabletGridTop = 0;
+    int tabletGridStride = 0;      // how far one page slides, in pixels
+    int tabletHomePage = 0;
+    int tabletHomePageCount = 1;
+    int tabletHomeFirst = 0;       // absolute index of this page's first icon
+    int tabletHomePerPage = 1;     // icons a page holds at this screen size
+    std::vector<Rect> tabletPageDots;
+    bool tabletPageSwipe = false;  // a finger is turning the page right now
+    int tabletPageSwipeFrom = 0;
+    int tabletSwipeStartX = 0;
+    double tabletPageOffset = 0.0; // in pages, so a half turn is drawable
+    int tabletDragEdge = 0;        // which edge a lifted icon is held against
+    Time tabletDragEdgeAt = 0;
     std::vector<Rect> tabletDockRects;
+
+    // --- editing the dock ---------------------------------------------------
+    // HarmonyOS edits the dock where it stands rather than on a screen of its
+    // own: a long press puts the home screen into rearrange mode, and while it is
+    // there every dock icon carries a remove badge in its top-right corner and the
+    // row grows a "+" tile that opens the app picker. No button, no second screen.
+    Rect tabletDockAddRect;                   // the "+" tile, rearrange mode only
+    std::vector<Rect> tabletDockRemoveRects;  // one badge per icon, same mode
+    int tabletDockPressRemove = -1;           // the badge a press landed on
+    bool tabletDockPressAdd = false;          // the "+" a press landed on
+
+    // The picker behind that "+": every launcher on the machine that is not in the
+    // dock yet, twelve to a page, ticked to choose and committed with Done.
+    bool tabletDockPickerOpen = false;
+    Rect tabletDockPickerPanel, tabletDockPickerDone;
+    std::vector<TabletEntry> tabletDockPickerApps;
+    std::vector<Rect> tabletDockPickerRects;
+    std::vector<Rect> tabletDockPickerDots;
+    std::vector<char> tabletDockPickerSel;
+    int tabletDockPickerPage = 0;
+    int tabletDockPickerPageCount = 1;
+    int tabletDockPickerHover = -1;
+    int tabletDockPickerPress = -1;        // the tile a press landed on
+    bool tabletDockPickerDonePress = false;  // the Done button a press landed on
+
+    // The quick actions sheet: what a still long press opens on an icon. A long
+    // press that moves is a drag and always wins; one that holds still opens this
+    // instead. It is modal while it is up, so the target can be held by index --
+    // nothing can move the layout while the sheet is on screen. Folders are not a
+    // target: holding one renames it, which is where iOS puts it.
+    bool tabletMenu = false;
+    int tabletMenuItem = -1;         // hovered row
+    int tabletMenuDock = -1;         // target: dock index, or -1 when it is on the grid
+    int tabletMenuHome = -1;         // target: absolute tabletHome index
+    bool tabletMenuFolder = false;   // the target is a folder, not an app
+    Rect tabletMenuPanel;
+    std::vector<Rect> tabletMenuRows;
+    std::vector<std::string> tabletMenuLabels;
+    std::vector<char> tabletMenuDanger;
     std::vector<double> tabletIconHover;  // per home + dock icon
     Rect tabletStatusRect, tabletDockRect, tabletHomeBarRect;
     int tabletIconSize = metrics::kTabletIcon;

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <poll.h>
@@ -639,10 +640,52 @@ void Manager::tickFluidMotion(double dtMs) {
     // Control Centre controls (only while the panel is on screen).
     fade(ccHoverFade, ccOpen ? ccControls.size() : 0, ccOpen ? ccHover : -1);
 
-    // Tablet home / dock icons (only while the home screen is up).
+    // Tablet home / dock icons (only while the home screen is up). The vector spans
+    // every icon the grid holds, not just the page on screen, because a hover index
+    // is an icon's own index and the icons keep theirs across a page turn.
     fade(tabletIconHover,
-         tabletMode ? tabletHomeRects.size() + tabletDockRects.size() : 0,
+         tabletMode ? tabletHome.size() + tabletDockRects.size() : 0,
          tabletMode ? tabletHover : -1);
+
+    // The grid settling onto a page once a swipe has let go. The offset is in pages
+    // rather than pixels so that a page caught halfway can be drawn halfway.
+    if (tabletMode && !tabletPageSwipe && tabletHomePageCount > 0) {
+        const double goal = double(tabletHomePage);
+        if (std::abs(tabletPageOffset - goal) > 0.001) {
+            tabletPageOffset +=
+                (goal - tabletPageOffset) * std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+            dirty = true;
+        } else {
+            tabletPageOffset = goal;
+        }
+    }
+
+    // The quick actions sheet is modal too, so its rows light up under the pointer
+    // even where a widget card is drawn behind the panel.
+    if (tabletMenu) {
+        int hot = -1;
+        for (size_t i = 0; i < tabletMenuRows.size(); ++i)
+            if (tabletMenuRows[i].inflated(2).contains(pointerX, pointerY)) hot = int(i);
+        if (tabletMenuItem != hot) {
+            tabletMenuItem = hot;
+            dirty = true;
+        }
+    }
+
+    // The dock picker is modal, so it is the thing under the pointer even where a
+    // widget card is drawn behind it. -2 is the Done button, which lights up only
+    // when there is something to commit.
+    if (tabletDockPickerOpen) {
+        int hot = -1;
+        for (size_t i = 0; i < tabletDockPickerRects.size(); ++i)
+            if (tabletDockPickerRects[i].inflated(6).contains(pointerX, pointerY))
+                hot = int(i);
+        if (tabletDockPickerDone.contains(pointerX, pointerY)) hot = -2;
+        if (tabletDockPickerHover != hot) {
+            tabletDockPickerHover = hot;
+            dirty = true;
+        }
+    }
 
     // Caption buttons on every managed window.
     for (auto& cp : clients) {

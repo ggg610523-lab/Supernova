@@ -5,6 +5,7 @@
 #include <X11/keysym.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace wm {
@@ -475,6 +476,28 @@ void Manager::onMotion(XMotionEvent& ev) {
             static_cast<unsigned>(ev.state), dragClient ? " [dragging]" : "");
     }
     if (tabletMode) {
+        // Turning a page: a sideways drag that started on bare wallpaper. It only
+        // counts as a page turn once it has passed the same slop any other press
+        // has to pass, so brushing the wallpaper does not flick the grid.
+        if (!tabletPageSwipe && tabletPressAt != 0 && tabletPressItem < 0 &&
+            tabletPressDock < 0 && tabletFolderPressCell < 0 && tabletRenameItem < 0) {
+            const int dx = x - tabletSwipeStartX;
+            const int dy = y - tabletPressPos.y;
+            if (std::abs(dx) > metrics::kTabletSwipeSlop && std::abs(dx) > std::abs(dy)) {
+                tabletPageSwipe = true;
+                tabletPageSwipeFrom = tabletHomePage;
+            }
+        }
+        if (tabletPageSwipe) {
+            // The page follows the finger, a third of a page of drag to commit,
+            // which is about as far as a thumb comfortably reaches.
+            const double stride = double(std::max(1, tabletGridStride));
+            const double dx = double(x - tabletSwipeStartX);
+            tabletPageOffset = std::clamp(double(tabletPageSwipeFrom) - dx / stride, -0.35,
+                                          double(tabletHomePageCount - 1) + 0.35);
+            dirty = true;
+        }
+
         // An in-flight drag -- a bottom-edge gesture, a switcher card, a home
         // icon, a widget, a Control Centre slider -- keeps tracking; everything
         // else is tablet hover.
@@ -586,14 +609,41 @@ void Manager::onKeyPress(XKeyEvent& ev) {
             }
             return;
         }
+        // The quick actions sheet is modal: Escape puts it away, the arrows walk its
+        // rows and Return picks one, so the sheet is reachable without a touchscreen.
+        if (tabletMenu) {
+            const int rows = int(tabletMenuRows.size());
+            if (sym == XK_Escape) {
+                closeTabletMenu();
+            } else if (rows > 0 && (sym == XK_Down || sym == XK_Up)) {
+                const int step = (sym == XK_Down) ? 1 : -1;
+                tabletMenuItem =
+                    tabletMenuItem < 0 ? 0 : (tabletMenuItem + step + rows) % rows;
+            } else if (sym == XK_Return || sym == XK_KP_Enter) {
+                if (tabletMenuItem >= 0) runTabletMenuAction(tabletMenuItem);
+            }
+            dirty = true;
+            return;
+        }
+        // Left and right turn the pages of the grid, which is also the only way to
+        // reach one without a touchscreen. A rename is modal and keeps them.
+        if ((sym == XK_Left || sym == XK_Right) && tabletRenameItem < 0) {
+            setTabletHomePage(tabletHomePage + (sym == XK_Right ? 1 : -1));
+            return;
+        }
         if (sym == XK_Escape) {
-            if (tabletFolderOpen >= 0) {
+            if (tabletMenu) {
+                closeTabletMenu();
+            } else if (tabletDockPickerOpen) {
+                closeTabletDockPicker();
+            } else if (tabletFolderOpen >= 0) {
                 closeTabletFolder();
             } else if (tabletSwitcher) {
                 closeTabletSwitcher();
                 tabletGoHome();
             } else if (tabletEdit) {
                 tabletEdit = false;
+                layoutTabletHome();
             } else {
                 closeOverlays();
             }

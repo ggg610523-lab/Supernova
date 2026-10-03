@@ -424,6 +424,43 @@ std::vector<std::string> splitFields(const std::string& line) {
 }
 }  // namespace
 
+bool sameTabletApp(const TabletEntry& a, const TabletEntry& b) {
+    if (!a.exec.empty() || !b.exec.empty()) return a.exec == b.exec && a.name == b.name;
+    return a.path == b.path && a.name == b.name;
+}
+
+void removeTabletAppFromHome(std::vector<TabletItem>& home, const TabletEntry& app) {
+    for (size_t i = 0; i < home.size();) {
+        TabletItem& item = home[i];
+        if (!item.isFolder) {
+            if (sameTabletApp(item.app, app)) {
+                home.erase(home.begin() + long(i));
+                continue;
+            }
+            ++i;
+            continue;
+        }
+        TabletFolder& f = item.folder;
+        f.apps.erase(std::remove_if(f.apps.begin(), f.apps.end(),
+                                    [&](const TabletEntry& a) { return sameTabletApp(a, app); }),
+                     f.apps.end());
+        if (f.apps.size() >= 2) {
+            ++i;
+            continue;
+        }
+        // A folder with too little left in it stops being a folder: its remainder
+        // takes its place on the grid as plain icons.
+        const std::vector<TabletEntry> rest = f.apps;
+        home.erase(home.begin() + long(i));
+        for (const TabletEntry& a : rest) {
+            TabletItem plain;
+            plain.app = a;
+            home.insert(home.begin() + long(i), std::move(plain));
+            ++i;
+        }
+    }
+}
+
 TabletLayout loadTabletLayoutFile() {
     TabletLayout layout;
     const std::string path = configFile("tablet-layout");
@@ -479,37 +516,10 @@ TabletLayout loadTabletLayoutFile() {
     flush();
 
     // An app in both places would show twice on one screen, which is exactly what
-    // the dock is there to prevent, so a repeat is dropped from the grid.
-    for (size_t i = 0; i < layout.home.size();) {
-        const TabletEntry& first =
-            layout.home[i].isFolder ? layout.home[i].folder.apps.front() : layout.home[i].app;
-        const bool alsoInDock = std::any_of(
-            layout.dock.begin(), layout.dock.end(), [&](const TabletEntry& d) {
-                return d.name == first.name && d.exec == first.exec && d.path == first.path;
-            });
-        if (!alsoInDock) {
-            ++i;
-            continue;
-        }
-        if (!layout.home[i].isFolder) {
-            layout.home.erase(layout.home.begin() + long(i));
-            continue;
-        }
-        // Only the front app of the folder is the duplicate; the rest are their own
-        // business. If that empties the folder it dissolves back into plain icons.
-        TabletItem& slot = layout.home[i];
-        slot.folder.apps.erase(slot.folder.apps.begin());
-        if (slot.folder.apps.size() < 2) {
-            const std::vector<TabletEntry> rest = slot.folder.apps;
-            layout.home.erase(layout.home.begin() + long(i));
-            for (const TabletEntry& e : rest) {
-                TabletItem item;
-                item.app = e;
-                layout.home.insert(layout.home.begin() + long(i), std::move(item));
-                ++i;
-            }
-        }
-    }
+    // the dock is there to prevent, so a repeat is taken off the grid by the same
+    // rule that moves an app into the dock at runtime.
+    for (const TabletEntry& d : layout.dock) removeTabletAppFromHome(layout.home, d);
+
     return layout;
 }
 

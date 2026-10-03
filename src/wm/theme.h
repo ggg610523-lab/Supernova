@@ -136,6 +136,17 @@ inline constexpr Color kTabletHomeBarShadow = rgb(0x000000, 0.28f);
 inline constexpr Color kTabletFolderBack = rgb(0xFFFFFF, 0.16f);   // the squircle behind a folder's mini icons
 inline constexpr Color kTabletFolderHover = rgb(0xFFFFFF, 0.30f);   // drop target: an icon over a folder
 inline constexpr Color kTabletFolderSheet = rgb(0x1C1C22, 0.82f);   // the open folder's rounded sheet
+// The dot under a dock / grid icon whose app is open. One colour for both states:
+// the dock already says *which* apps are here, and the dot only has to say "this
+// one is running".
+inline constexpr Color kTabletRunDot = rgb(0xFFFFFF, 0.92f);
+// A row that takes something away, so it is worded and coloured apart from the rest.
+inline constexpr Color kTabletMenuDanger = rgb(0xFF6B6B);
+inline constexpr Color kTabletBadgeFill = rgb(0x1B1B22, 0.94f);     // the dock's remove badge
+inline constexpr Color kTabletBadgeTile = rgb(0xFFFFFF, 0.10f);     // the dock's "+" tile
+inline constexpr Color kTabletBadgeGlyph = rgb(0xFFFFFF, 0.96f);
+inline constexpr Color kTabletAccent = rgb(0x0A6CFF);               // HarmonyOS blue
+inline constexpr Color kTabletPanelBorder = rgb(0xFFFFFF, 0.20f);
 inline constexpr Color kTabletSplash = rgb(0x0A0A0F, 0.96f);
 inline constexpr Color kTabletSplashLabel = rgb(0xFFFFFF);
 inline constexpr Color kTabletSplashSub = rgb(0xFFFFFF, 0.55f);
@@ -249,7 +260,41 @@ constexpr int kTabletIconMin = 48;
 constexpr int kTabletCellW = 106;       // icon + label cell
 constexpr int kTabletCellH = 108;
 constexpr int kTabletDockIcon = 62;
-constexpr int kTabletDockMax = 4;        // iOS caps the dock at four
+// iOS caps its dock at four icons. HarmonyOS 6 raised its own from four columns
+// to five, and a tablet row has width for more again, so this is a ceiling the
+// screen usually gets to ignore: what the dock really holds is however many
+// icons fit across it at the current size (see tabletDockCapacity()).
+constexpr int kTabletDockMax = 6;
+// The quick actions sheet: the menu a still long press opens on an icon. Sized as a
+// share of the screen so it reads the same on a phone-sized panel and a desktop.
+constexpr int kTabletMenuWidthPct = 42;
+constexpr int kTabletMenuMinW = 288;
+constexpr int kTabletMenuMaxW = 380;
+constexpr int kTabletMenuPad = 10;
+constexpr int kTabletMenuHeadH = 78;   // icon + name above the rows
+constexpr int kTabletMenuRowH = 44;
+// The running indicator: a small dot under an icon. The gap is the space a grid
+// icon already leaves between itself and its label; a dock icon has no label and
+// gets the same dot a little further down.
+constexpr int kTabletRunDotSize = 5;
+constexpr int kTabletRunDotGap = 1;
+
+// How full the dock is on a session that has never edited it. This is the size a
+// tablet ships with, and it is deliberately not the ceiling: a user who wants more
+// puts them there, rather than arriving to find their apps already in the dock.
+constexpr int kTabletDockFill = 4;
+// The dock's app picker: a grid of twelve to a page, with page dots under it.
+constexpr int kTabletDockPickerCols = 4;
+constexpr int kTabletDockPickerPerPage = 12;
+// Turning a page of the home screen. A sideways drag on the wallpaper has to pass
+// the same slop as any other press before it counts, so an accidental brush does
+// not flick the grid; holding a lifted icon against a screen edge turns the page
+// after a beat, so a drag can be carried to icons that are not on screen.
+constexpr int kTabletSwipeSlop = 22;
+constexpr int kTabletPageDotsH = 26;   // the strip the page dots sit in
+constexpr int kTabletPageTurnMs = 240; // how long a page takes to settle
+constexpr int kTabletDragEdgePx = 30;  // edge band a lifted icon turns the page in
+constexpr int kTabletDragEdgeMs = 380;
 constexpr int kTabletLongPressMs = 450;  // hold this long to rearrange
 // A folder shows nine apps at a time in a 3x3, both in the closed icon and in the
 // open sheet, exactly as iOS lays one out.

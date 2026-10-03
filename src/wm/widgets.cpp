@@ -99,9 +99,23 @@ Rect Manager::widgetGripRect(const Widget& w) const {
     return Rect{w.rect.right() - g, w.rect.bottom() - g, g, g};
 }
 
+// Whether a card is on the page being shown. A card whose own page has gone past
+// the end of the grid -- because apps were taken off the home screen and there are
+// fewer pages now -- shows on the last page rather than disappearing, and goes back
+// to its own page if the grid ever grows that far again.
+bool Manager::widgetOnPage(const Widget& w) const {
+    if (!tabletMode) return true;
+    return std::min(w.page, std::max(0, tabletHomePageCount - 1)) == tabletHomePage;
+}
+
 int Manager::widgetAt(int x, int y) const {
-    for (size_t i = widgets.size(); i-- > 0;)
+    for (size_t i = widgets.size(); i-- > 0;) {
+        // On a tablet a card belongs to one page, so a card that is not on the page
+        // being shown is not there at all: it is not drawn, and it must not swallow
+        // a press meant for the icon underneath it either.
+        if (!widgetOnPage(widgets[i])) continue;
         if (widgets[i].rect.contains(x, y)) return int(i);
+    }
     return -1;
 }
 
@@ -129,10 +143,14 @@ void Manager::addWidget(WidgetKind kind) {
     const int bottom = screenH - metrics::taskbarH;
     int x = screenW - w - metrics::kWidgetPad;
     int y = metrics::kWidgetPad;
-    // Cascade down/left past the widgets already on screen.
+    // Cascade down/left past the cards already on screen. Only the ones sharing this
+    // page count as in the way: a card on another page is not on screen to collide
+    // with, and the tablet's pages are meant to be laid out independently.
+    const int page = tabletMode ? tabletHomePage : 0;
     for (int guard = 0; guard < 64; ++guard) {
         bool clash = false;
         for (const Widget& o : widgets) {
+            if (o.page != page) continue;
             if (Rect{x, y, w, h}.inflated(12).intersects(o.rect)) {
                 y = o.rect.bottom() + 16;
                 if (y + h > bottom - metrics::kWidgetPad) {
@@ -147,7 +165,7 @@ void Manager::addWidget(WidgetKind kind) {
     }
     x = std::clamp(x, metrics::kWidgetPad, std::max(metrics::kWidgetPad, screenW - w - metrics::kWidgetPad));
     y = std::clamp(y, metrics::kWidgetPad, std::max(metrics::kWidgetPad, bottom - h - metrics::kWidgetPad));
-    widgets.push_back(Widget{kind, Rect{x, y, w, h}});
+    widgets.push_back(Widget{kind, Rect{x, y, w, h}, page});
     if (kind == WidgetKind::Battery) refreshBattery(true);
     layoutDesktopIcons();
     dirty = true;
@@ -185,6 +203,27 @@ void Manager::updateWidgetDrag(int x, int y) {
     if (dragWidget < 0 || dragWidget >= int(widgets.size())) return;
     Widget& w = widgets[dragWidget];
     const int bottom = screenH - metrics::taskbarH;
+
+    // Holding a card against a screen edge turns the page, exactly as it does for a
+    // lifted icon, so a card can be moved to a page it is not on. The edge state is
+    // shared with the icon drag on purpose: only one of the two is ever in flight,
+    // and the icon drag clears it when it ends.
+    if (tabletMode && !widgetResizing) {
+        const int band = metrics::kTabletDragEdgePx;
+        int edge = 0;
+        if (x < band) edge = -1;
+        else if (x > screenW - band) edge = 1;
+        if (edge != tabletDragEdge) {
+            tabletDragEdge = edge;
+            tabletDragEdgeAt = nowMs();
+        } else if (edge != 0 && nowMs() - tabletDragEdgeAt > metrics::kTabletDragEdgeMs) {
+            const int want = tabletHomePage + edge;
+            if (want >= 0 && want < tabletHomePageCount && want != tabletHomePage) {
+                setTabletHomePage(want);
+                tabletDragEdgeAt = nowMs();
+            }
+        }
+    }
     if (!widgetResizing) {
         w.rect.x = std::clamp(x - widgetGrab.x, 0, std::max(0, screenW - w.rect.w));
         w.rect.y = std::clamp(y - widgetGrab.y, 0, std::max(0, bottom - w.rect.h));
@@ -200,8 +239,14 @@ void Manager::updateWidgetDrag(int x, int y) {
 
 void Manager::endWidgetDrag() {
     if (dragWidget < 0) return;
+    // A card dropped on a page belongs to that page, which is how one is moved from
+    // one page to another. On the desktop there are no pages and the field is left
+    // alone.
+    if (tabletMode && !widgetResizing && dragWidget < int(widgets.size()))
+        widgets[size_t(dragWidget)].page = tabletHomePage;
     dragWidget = -1;
     widgetResizing = false;
+    tabletDragEdge = 0;
     ungrabPointer();
     layoutDesktopIcons();
     dirty = true;
@@ -210,6 +255,11 @@ void Manager::endWidgetDrag() {
 void Manager::drawWidgets() {
     for (size_t i = 0; i < widgets.size(); ++i) {
         const Widget& w = widgets[i];
+        // Each card is shown on its own page only, which is what keeps a page of
+        // icons free of the cards that belong to the next one over. The card being
+        // dragged stays drawn whichever page it has reached, or carrying it to the
+        // next page would make it vanish under the finger.
+        if (!widgetOnPage(w) && int(i) != dragWidget) continue;
         const bool dragging = int(i) == dragWidget;
         const bool hot = int(i) == hoverWidget || dragging;
         // The hover wash fades in, and stays lit while the card is being dragged.
