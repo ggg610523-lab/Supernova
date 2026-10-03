@@ -430,6 +430,8 @@ private:
     void endWidgetDrag();
     void addWidget(WidgetKind kind);
     void removeWidget(int index);
+    void suspendWidgets();                    // taken off the desktop for tablet mode
+    void restoreWidgets();                    // put back when tablet mode is left
     void openDesktopMenu(int x, int y);       // right click on the desktop
     void refreshBattery(bool force);
     // Corner grip of a widget, for the resize cursor / press test.
@@ -438,8 +440,9 @@ private:
     // ---- tablet / mobile mode (tablet.cpp)
     // An iOS-like home screen: status bar with the date and time, a grid of
     // squircle app icons, a glass dock and the iPhone X home indicator. The
-    // desktop windows are hidden while it is up and only the widgets and the
-    // Control Centre stay reachable. Switching plays a full-screen splash.
+    // desktop windows are hidden while it is up and only the Control Centre stays
+    // reachable -- the widget cards come off the desktop entirely. Switching plays
+    // a full-screen splash.
     void setTabletMode(bool on);       // starts the splash transition
     void applyTabletMode();            // swap, at the splash midpoint
     void buildTabletEntries();         // the ordered home/dock lists, once
@@ -491,9 +494,6 @@ private:
     // A tap is acted on when the button comes back up, not when it goes down, so
     // that a press held still is still available to become a drag or a long press.
     void handleTabletRelease(int x, int y, unsigned button, Time time);
-    // The dock or grid icon under a point, or -1. A widget card can be sitting on
-    // top of one, so this decides which of the two a press belongs to.
-    int tabletIconAt(int x, int y) const;
     void openTabletEntry(const TabletEntry& e);
     // An app opened from the home screen keeps tablet mode and is inset so the
     // status bar and the home indicator stay tappable above and below it.
@@ -670,7 +670,12 @@ private:
     std::vector<size_t> appFiltered;
     std::vector<Rect> appDotRects;   // page-indicator hit targets
     // ---- desktop widgets
+    // Cards are a desktop surface only: tablet mode takes them off the screen
+    // entirely rather than hiding them behind the home screen.
     std::vector<Widget> widgets;
+    // Held aside while tablet mode is up, so leaving it gives the user back the
+    // desktop they arranged -- cards included -- exactly as they left it.
+    std::vector<Widget> widgetStash;
     int hoverWidget = -1;
     int dragWidget = -1;          // widget being moved/resized, -1 when none
     bool widgetResizing = false;

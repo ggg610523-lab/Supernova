@@ -137,6 +137,31 @@ void Manager::initWidgets() {
     refreshBattery(true);
 }
 
+// Tablet mode has nowhere to put the cards -- its grid is a page of app icons, not
+// wallpaper furniture -- so they are taken off the desktop rather than left sitting
+// behind the home screen where a press would grab an invisible one. Held aside
+// instead of dropped: leaving the mode has to hand back the desktop the user
+// arranged, cards included, rather than an empty wallpaper.
+void Manager::suspendWidgets() {
+    widgetStash = std::move(widgets);
+    widgets.clear();
+    dragWidget = -1;
+    widgetResizing = false;
+    hoverWidget = -1;
+    contextWidget = -1;
+    layoutDesktopIcons();
+}
+
+// Puts the cards back where they were. Nothing about them changed while they were
+// away, so this is a move rather than a rebuild and the icon grid they had been
+// reflowing around returns with them.
+void Manager::restoreWidgets() {
+    widgets = std::move(widgetStash);
+    widgetStash.clear();
+    hoverWidget = -1;
+    layoutDesktopIcons();
+}
+
 void Manager::addWidget(WidgetKind kind) {
     const int w = kind == WidgetKind::Clock ? metrics::kWidgetClock : metrics::kWidgetBatteryW;
     const int h = kind == WidgetKind::Clock ? metrics::kWidgetClock : metrics::kWidgetBatteryH;

@@ -319,13 +319,13 @@ void Manager::drawLaunches() {
 
 void Manager::drawDesktop() {
     comp.drawWallpaper();
-    // Tablet mode replaces the desktop grid with the iOS home screen, but keeps
-    // the widgets (they stay usable) painted on top of it.
+    // Tablet mode replaces the desktop grid with the iOS home screen, and takes the
+    // widget cards off the screen with it.
     if (tabletAnim < 0.999) drawDesktopIcons();
     if (tabletAnim > 0.001) drawTabletHome();
     drawWidgets();
-    // The dock picker is modal, so it goes over the widget cards rather than under
-    // them -- the cards are painted on top of the home screen on purpose.
+    // The dock picker is modal, so it goes over the home screen rather than under
+    // it.
     if (tabletDockPickerOpen) drawTabletDockPickerView();
     if (tabletMenu) drawTabletMenuView();
 }

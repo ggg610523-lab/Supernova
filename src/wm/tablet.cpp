@@ -14,8 +14,8 @@
 // bottom edge.
 //
 // A long press puts the home screen into rearrangement mode: the icons jiggle
-// and can be dragged from cell to cell, and the wallpaper widgets are moved and
-// resized exactly as they are on the desktop.
+// and can be dragged from cell to cell. The wallpaper widgets are desktop only
+// and are taken off the screen while this mode is up.
 //
 // Switching modes is not a hard cut: a full-screen splash fades in over the old
 // shell, the two are swapped while it completely covers the screen, and it
@@ -110,6 +110,8 @@ void Manager::applyTabletMode() {
     if (dragWidget >= 0) endWidgetDrag();
     tabletHover = -1;
     if (tabletMode) {
+        // The cards are desktop furniture, so they come off the desktop with it.
+        suspendWidgets();
         // Hide the desktop: minimise every visible window so it is neither
         // composited nor able to swallow a click, remembering which ones we
         // hid so the user's own minimised windows stay minimised.
@@ -124,6 +126,7 @@ void Manager::applyTabletMode() {
         layoutTabletHome();
     } else {
         tabletEdit = false;
+        restoreWidgets();
         // Leaving the mode abandons any half-turned page and keeps the page the user
         // was on, so the home screen comes back the way they left it.
         tabletPageSwipe = false;
@@ -1417,16 +1420,6 @@ void Manager::openTabletEntry(const TabletEntry& e) {
     dirty = true;
 }
 
-int Manager::tabletIconAt(int x, int y) const {
-    for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i)
-        if (tabletDockRects[i].contains(x, y)) return int(i);
-    // A grid cell is answered with the icon's own index rather than its place on
-    // the page, so everything downstream addresses tabletHome and not the page.
-    for (size_t i = 0; i < tabletHomeRects.size(); ++i)
-        if (tabletHomeRects[i].contains(x, y)) return tabletHomeFirst + int(i);
-    return -1;
-}
-
 bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
     if (button == Button4 || button == Button5) return true;  // no scroll surfaces here
     // A rename is modal: it owns every press until it is committed or abandoned.
@@ -1451,7 +1444,7 @@ bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
         return true;
     }
     // The dock picker is modal for as long as it is up, so it takes the press even
-    // where a widget card happens to be drawn behind it.
+    // where a press would otherwise land on the home screen behind it.
     if (tabletDockPickerOpen) {
         if (button != Button1) return true;
         if (!tabletDockPickerPanel.contains(x, y)) {
@@ -1517,14 +1510,6 @@ bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
             return true;
         }
     }
-
-    // Widget cards live on the home screen as well, and the desktop cascades them
-    // in from the top right, which is where this screen keeps its first icon row
-    // and the top of the grid. Where a card and an icon share a spot the icon wins:
-    // rearranging the grid is what the press is for, and a card drawn over an icon
-    // must not swallow it. An open folder outranks a card for the same reason.
-    const bool iconWins = tabletFolderOpen >= 0 || tabletIconAt(x, y) >= 0;
-    if (!iconWins && handleWidgetPress(x, y, time)) return true;
 
     // An open folder is modal too: taps land in the sheet, and a tap outside it
     // closes the folder rather than reaching the home screen behind.
