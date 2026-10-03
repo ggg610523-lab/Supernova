@@ -313,6 +313,9 @@ int Manager::run(const Options& options) {
     // The bar comes up at the thickness it was dragged to last time. Read before
     // the work area is published, since the work area is the screen minus the bar.
     metrics::taskbarH = loadTaskbarHeight();
+    // Same for the palette: the shell comes up light or dark as the user left it.
+    // Done before the first frame so nothing is ever painted in the wrong mode.
+    theme::applyMode(loadThemeMode());
     updateWorkArea();
     apps = scanApps();
     pinned = loadPinned();
@@ -703,6 +706,7 @@ void Manager::tickFluidMotion(double dtMs) {
         contextItems.clear();
         contextClient = nullptr;
         contextWidget = -1;
+        contextDesktop = -1;
         contextHover = -1;
     }
 
@@ -1021,7 +1025,11 @@ void Manager::updateHoverStates(int px, int py) {
 }
 
 bool Manager::overlayOpen() const {
-    return startOpen || taskViewOpen || altTabOpen || contextOpen || ccOpen || tabletSwitcher;
+    // The desktop's folder dialogs count: while one is up the desktop underneath
+    // must not light up under the pointer or offer resize edges, any more than the
+    // wallpaper does behind the Control Centre.
+    return startOpen || taskViewOpen || altTabOpen || contextOpen || ccOpen || tabletSwitcher ||
+           confirmDeleteOpen || desktopRenameItem >= 0;
 }
 
 bool Manager::pointInOverlaySurface(int x, int y) const {
@@ -1037,6 +1045,11 @@ void Manager::closeOverlays() {
     const bool was = overlayOpen();
     const bool wasCc = ccOpen;
     startOpen = taskViewOpen = altTabOpen = contextOpen = ccOpen = false;
+    // The desktop's folder dialogs are overlays too and go the same way: anything
+    // that would take the desktop away has answered them. They hand back the
+    // grabs they took as they close.
+    closeConfirmDelete();
+    cancelDesktopRename();
     closeTabletSwitcher();
     altTabOrder.clear();
     altTabIndex = 0;
@@ -1635,6 +1648,7 @@ void Manager::openPinMenu(int appIndex, int pinIndex, int x, int y) {
     if (overlayOpen()) closeOverlays();
     contextClient = nullptr;
     contextWidget = -1;
+    contextDesktop = -1;
     contextPin = pinIndex;
     contextApp = appIndex;
     contextItems.clear();
@@ -1907,6 +1921,7 @@ void Manager::showContextMenu(Client* c, int x, int y) {
     if (!c) return;
     contextClient = c;
     contextWidget = -1;
+    contextDesktop = -1;
     contextPin = -1;
     contextApp = -1;
     contextItems.clear();
@@ -1935,16 +1950,26 @@ void Manager::showContextMenu(Client* c, int x, int y) {
     dirty = true;
 }
 
-// The desktop's own context menu, reusing the client menu plumbing. On a widget
-// it offers "Remove Widget"; on bare wallpaper (or below a widget entry) the two
-// add entries.
+// The desktop's own context menu, reusing the client menu plumbing. Its shape
+// follows what it was opened on: a card offers to be removed, a folder offers to
+// be renamed or deleted, and the create and widget entries are always there.
+// applyContextAction() walks the rows in this same order.
 void Manager::openDesktopMenu(int x, int y) {
     contextClient = nullptr;
     contextWidget = widgetAt(x, y);
+    contextDesktop = desktopItemAt(x, y);
     contextPin = -1;
     contextApp = -1;
     contextItems.clear();
     if (contextWidget >= 0) contextItems.push_back("Remove Widget");
+    // Only a folder can be renamed or deleted as a folder. A plain file is the
+    // user's, and this menu does not manage files.
+    if (contextDesktop >= 0 && contextDesktop < int(desktopItems.size()) &&
+        desktopItems[size_t(contextDesktop)].isDir) {
+        contextItems.push_back("Rename Folder");
+        contextItems.push_back("Delete Folder");
+    }
+    contextItems.push_back("New Folder");
     contextItems.push_back("Add Clock Widget");
     contextItems.push_back("Add Battery Widget");
 
@@ -1964,6 +1989,141 @@ void Manager::openDesktopMenu(int x, int y) {
     grabPointer();
     XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
     dirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// Desktop folders
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// What a typed folder name actually is. Leading and trailing spaces are a habit,
+// not an intention, and a name that is only spaces would make an entry the user
+// could never click on again.
+std::string trimmed(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+
+}  // namespace
+
+// The desktop directory changed under us -- the shell just created, renamed or
+// deleted an entry, or something outside the shell did. Rebuilding around what is
+// really there is what keeps the icons from claiming a folder that is gone or
+// hiding one that just appeared.
+void Manager::refreshDesktop(const std::string& selectPath) {
+    desktopItems = scanDesktop();
+    layoutDesktopIcons();
+    selectedDesktopIcon = -1;
+    hoverDesktopIcon = -1;
+    // The grid is sorted by name, so an entry that survived a rename has a
+    // different index than it had. Find it again by what it is, not by where it
+    // was.
+    if (!selectPath.empty()) {
+        for (size_t i = 0; i < desktopItems.size(); ++i) {
+            if (desktopItems[i].path != selectPath) continue;
+            selectedDesktopIcon = int(i);
+            hoverDesktopIcon = int(i);
+            break;
+        }
+    }
+    dirty = true;
+}
+
+// Renaming puts a field over the icon's own label instead of opening a dialog, so
+// the entry is named where the user is already looking. The keyboard is held for
+// the duration -- the same capture the Start menu's search box uses -- so a name
+// can be typed without leaving the desktop for anything.
+void Manager::beginDesktopRename(int index) {
+    if (index < 0 || index >= int(desktopItems.size())) return;
+    if (!desktopItems[size_t(index)].isDir) return;
+    desktopRenameItem = index;
+    desktopRenameText = desktopItems[size_t(index)].name;
+    grabPointer();
+    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    dirty = true;
+}
+
+void Manager::cancelDesktopRename() {
+    if (desktopRenameItem < 0) return;
+    desktopRenameItem = -1;
+    desktopRenameText.clear();
+    ungrabPointer();
+    XUngrabKeyboard(dpy, CurrentTime);
+    dirty = true;
+}
+
+// The field sits exactly where the icon's own label is drawn, a little wider and
+// tall enough to type into, so naming an entry does not move it.
+Rect Manager::desktopRenameRect() const {
+    if (desktopRenameItem < 0) return {};
+    const size_t i = size_t(desktopRenameItem);
+    const std::vector<Rect>& hit =
+        desktopIconDraw.size() == desktopIconRects.size() ? desktopIconDraw : desktopIconRects;
+    if (i >= hit.size()) return {};
+    const Rect cell = hit[i];
+    const int w = std::max(88, cell.w + 12);
+    return Rect{cell.x + (cell.w - w) / 2, cell.y + 8 + 48 + 3, w, 24};
+}
+
+void Manager::commitDesktopRename() {
+    const int index = desktopRenameItem;
+    const std::string wanted = trimmed(desktopRenameText);
+    std::string path;
+    if (index >= 0 && index < int(desktopItems.size())) path = desktopItems[size_t(index)].path;
+    // Hand the keyboard and pointer back before touching the disk: whatever the
+    // rename turns out to be, the desktop is interactive again by the time we
+    // find out.
+    cancelDesktopRename();
+    if (path.empty() || wanted.empty()) return;
+    // A name that is unusable or already taken is refused rather than forced, so
+    // the entry simply keeps the name it had.
+    if (!renameDesktopEntry(path, wanted)) return;
+    refreshDesktop(path);
+}
+
+// A folder can hold files, so deleting one from the desktop takes whatever was in
+// it. That is the only irreversible thing this menu does, which is why it arrives
+// through a dialog that names the folder and offers a way out.
+void Manager::openConfirmDelete(const std::string& path, const std::string& name) {
+    confirmDeletePath = path;
+    confirmDeleteName = name;
+    confirmDeleteOpen = true;
+
+    const int panelW = std::min(420, screenW - 48);
+    const int panelH = 196;
+    const Rect panel{(screenW - panelW) / 2, (screenH - panelH) / 2, panelW, panelH};
+    const int btnW = std::min(112, (panelW - 54) / 2);
+    const int btnH = 36;
+    const int by = panel.bottom() - 24 - btnH;
+    const int left = panel.x + (panelW - (2 * btnW + 12)) / 2;
+    confirmDeleteCancel = Rect{left, by, btnW, btnH};
+    confirmDeleteOk = Rect{left + btnW + 12, by, btnW, btnH};
+
+    grabPointer();
+    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    dirty = true;
+}
+
+void Manager::closeConfirmDelete() {
+    if (!confirmDeleteOpen) return;
+    confirmDeleteOpen = false;
+    confirmDeletePath.clear();
+    confirmDeleteName.clear();
+    ungrabPointer();
+    XUngrabKeyboard(dpy, CurrentTime);
+    dirty = true;
+}
+
+void Manager::commitConfirmDelete() {
+    const std::string path = confirmDeletePath;
+    // Let go first: the delete can take a moment on a large folder, and the
+    // desktop must not be frozen behind a dialog that has already been answered.
+    closeConfirmDelete();
+    if (path.empty()) return;
+    if (deleteDesktopEntry(path)) refreshDesktop();
 }
 
 // @@MANAGER_CPP_END@@

@@ -1,9 +1,13 @@
-// Windows 11 ("Fluent", dark) design tokens: colours, metrics and motion
+// Windows 11 ("Fluent") design tokens: colours, metrics and motion
 // durations. Everything the shell paints is derived from this one file, so the
 // whole look can be re-skinned by editing a single place.
 //
 // Colours are float RGBA in linear-ish sRGB 0..1 space; the compositor emits
 // premultiplied alpha, so an `a` of 0.06 really does mean "6% white wash".
+//
+// The Fluent palette ships in two modes and applyMode() swaps between them; the
+// skins further down (Launchpad, the tablet home screen, Control Centre, the
+// desktop widgets) are imitations of other systems and are mode-independent.
 #pragma once
 
 #include <cstdint>
@@ -31,54 +35,156 @@ inline constexpr Color rgb(unsigned hex, float alpha = 1.0f) {
 namespace theme {
 
 // --- system accent (Windows 11 default blue) --------------------------------
-inline constexpr Color kAccent = rgb(0x4CC2FF);       // "spotlight" hover accent
-inline constexpr Color kAccentDeep = rgb(0x0078D4);   // selection / fill accent
+// The Fluent tokens below are ordinary inline variables rather than constants, so
+// applyMode() can re-point the whole palette at light mode at runtime. Their
+// initialisers are the *dark* palette, which is what the shell comes up in.
+inline Color kAccent = rgb(0x4CC2FF);       // "spotlight" hover accent
+inline Color kAccentDeep = rgb(0x0078D4);   // selection / fill accent
 
 // --- window frame ----------------------------------------------------------
-inline constexpr Color kCaption = rgb(0x202020);        // Mica-tinted, focused
-inline constexpr Color kCaptionIdle = rgb(0x2B2B2B);    // unfocused
-inline constexpr Color kBodyFallback = rgb(0x202020);   // before the 1st frame
-inline constexpr Color kBorderFocus = rgb(0xFFFFFF, 0.14f);
-inline constexpr Color kBorderIdle = rgb(0xFFFFFF, 0.08f);
-inline constexpr Color kCaptionLine = rgb(0xFFFFFF, 0.06f);
+inline Color kCaption = rgb(0x202020);        // Mica-tinted, focused
+inline Color kCaptionIdle = rgb(0x2B2B2B);    // unfocused
+inline Color kBodyFallback = rgb(0x202020);   // before the 1st frame
+inline Color kBorderFocus = rgb(0xFFFFFF, 0.14f);
+inline Color kBorderIdle = rgb(0xFFFFFF, 0.08f);
+inline Color kCaptionLine = rgb(0xFFFFFF, 0.06f);
 
 // --- caption buttons (Windows 11 is 45x32, flush to the corner) -------------
-inline constexpr Color kBtnHover = rgb(0xFFFFFF, 0.06f);
-inline constexpr Color kBtnPress = rgb(0xFFFFFF, 0.10f);
+inline Color kBtnHover = rgb(0xFFFFFF, 0.06f);
+inline Color kBtnPress = rgb(0xFFFFFF, 0.10f);
+// The close button keeps its red in both modes, so these two never move.
 inline constexpr Color kCloseHover = rgb(0xC42B1C);
 inline constexpr Color kClosePress = rgb(0xB22A1B);
-inline constexpr Color kGlyph = rgb(0xFFFFFF, 0.95f);
-inline constexpr Color kGlyphIdle = rgb(0xFFFFFF, 0.60f);
+inline Color kGlyph = rgb(0xFFFFFF, 0.95f);
+inline Color kGlyphIdle = rgb(0xFFFFFF, 0.60f);
 
 // --- text -----------------------------------------------------------------
-inline constexpr Color kText = rgb(0xFFFFFF);
-inline constexpr Color kTextIdle = rgb(0xFFFFFF, 0.62f);
-inline constexpr Color kTextMuted = rgb(0xFFFFFF, 0.55f);
-inline constexpr Color kTextDim = rgb(0xFFFFFF, 0.38f);
+inline Color kText = rgb(0xFFFFFF);
+inline Color kTextIdle = rgb(0xFFFFFF, 0.62f);
+inline Color kTextMuted = rgb(0xFFFFFF, 0.55f);
+inline Color kTextDim = rgb(0xFFFFFF, 0.38f);
 
 // --- shadows ---------------------------------------------------------------
-inline constexpr Color kShadow = rgb(0x000000, 0.50f);
-inline constexpr Color kShadowIdle = rgb(0x000000, 0.32f);
+inline Color kShadow = rgb(0x000000, 0.50f);
+inline Color kShadowIdle = rgb(0x000000, 0.32f);
 
 // --- shell (taskbar / Start / flyouts) -------------------------------------
-inline constexpr Color kTaskbarTint = rgb(0x1F1F1F, 0.78f);
-inline constexpr Color kShellTint = rgb(0x2B2B2B, 0.90f);
-inline constexpr Color kFlyoutTint = rgb(0x2B2B2B, 0.94f);
-inline constexpr Color kShellBorder = rgb(0xFFFFFF, 0.09f);
-inline constexpr Color kShellLine = rgb(0xFFFFFF, 0.06f);
-inline constexpr Color kItemHover = rgb(0xFFFFFF, 0.06f);
-inline constexpr Color kItemActive = rgb(0xFFFFFF, 0.10f);
-inline constexpr Color kItemPress = rgb(0xFFFFFF, 0.04f);
-inline constexpr Color kSearchBox = rgb(0xFFFFFF, 0.06f);
+inline Color kTaskbarTint = rgb(0x1F1F1F, 0.78f);
+inline Color kShellTint = rgb(0x2B2B2B, 0.90f);
+inline Color kFlyoutTint = rgb(0x2B2B2B, 0.94f);
+inline Color kShellBorder = rgb(0xFFFFFF, 0.09f);
+inline Color kShellLine = rgb(0xFFFFFF, 0.06f);
+inline Color kItemHover = rgb(0xFFFFFF, 0.06f);
+inline Color kItemActive = rgb(0xFFFFFF, 0.10f);
+inline Color kItemPress = rgb(0xFFFFFF, 0.04f);
+inline Color kSearchBox = rgb(0xFFFFFF, 0.06f);
+// The wash behind a modal dialog, and the fill of a control sitting *on* a light
+// flyout. These exist so the Fluent shell never has to borrow a colour from one of
+// the imitated skins below: a near-black scrim over a white dialog is the one
+// thing light mode cannot borrow from an iOS or macOS palette.
+inline Color kScrim = rgb(0x0A0A0F, 0.96f);
+inline Color kFieldFill = rgb(0x1C1C1E, 0.72f);
 
 // --- snap / drag previews --------------------------------------------------
-inline constexpr Color kSnapFill = rgb(0x4CC2FF, 0.22f);
-inline constexpr Color kSnapBorder = rgb(0x9AD8FF, 0.80f);
-inline constexpr Color kAccentRing = rgb(0x4CC2FF, 0.90f);
+inline Color kSnapFill = rgb(0x4CC2FF, 0.22f);
+inline Color kSnapBorder = rgb(0x9AD8FF, 0.80f);
+inline Color kAccentRing = rgb(0x4CC2FF, 0.90f);
 
 // --- task view / alt-tab cards --------------------------------------------
-inline constexpr Color kCardTint = rgb(0x2B2B2B, 0.85f);
-inline constexpr Color kDesktopBlur = rgb(0x000000, 0.45f);
+inline Color kCardTint = rgb(0x2B2B2B, 0.85f);
+inline Color kDesktopBlur = rgb(0x000000, 0.45f);
+
+// Which palette the Fluent tokens above currently hold.
+enum class Mode { Dark, Light };
+
+inline Mode mode = Mode::Dark;
+
+inline bool isLight() { return mode == Mode::Light; }
+
+// Re-points every Fluent token in one step. Windows 11's light mode is not the
+// dark palette run backwards: Mica turns into a pale warm grey, the white washes
+// that brighten dark surfaces become black washes that darken light ones (and at
+// a much lower alpha, or every control turns into a smudge), the shadows lose
+// most of their weight, and the accent darkens so it still reads as a fill
+// against white.
+//
+// Only the Fluent tokens move. Launchpad, the tablet home screen and Control
+// Centre are deliberate imitations of other systems' home screens, so they keep
+// their own palettes whichever mode the Windows shell is in.
+inline void applyMode(Mode m) {
+    mode = m;
+    if (m == Mode::Light) {
+        kAccent = rgb(0x0078D4);
+        kAccentDeep = rgb(0x005FB8);
+        kCaption = rgb(0xF3F3F3);
+        kCaptionIdle = rgb(0xFAFAFA);
+        kBodyFallback = rgb(0xFFFFFF);
+        kBorderFocus = rgb(0x000000, 0.0578f);
+        kBorderIdle = rgb(0x000000, 0.0338f);
+        kCaptionLine = rgb(0x000000, 0.0469f);
+        kBtnHover = rgb(0x000000, 0.0373f);
+        kBtnPress = rgb(0x000000, 0.0241f);
+        kGlyph = rgb(0x1A1A1A, 0.95f);
+        kGlyphIdle = rgb(0x1A1A1A, 0.60f);
+        kText = rgb(0x1A1A1A);
+        kTextIdle = rgb(0x000000, 0.62f);
+        kTextMuted = rgb(0x000000, 0.55f);
+        kTextDim = rgb(0x000000, 0.38f);
+        kShadow = rgb(0x000000, 0.22f);
+        kShadowIdle = rgb(0x000000, 0.13f);
+        kTaskbarTint = rgb(0xF3F3F3, 0.78f);
+        kShellTint = rgb(0xF3F3F3, 0.90f);
+        kFlyoutTint = rgb(0xFFFFFF, 0.94f);
+        kShellBorder = rgb(0x000000, 0.0578f);
+        kShellLine = rgb(0x000000, 0.0469f);
+        kItemHover = rgb(0x000000, 0.0373f);
+        kItemActive = rgb(0x000000, 0.0595f);
+        kItemPress = rgb(0x000000, 0.0235f);
+        kSearchBox = rgb(0x000000, 0.0373f);
+        kScrim = rgb(0xF5F5F5, 0.96f);
+        kFieldFill = rgb(0xEFEFEF, 0.92f);
+        kSnapFill = rgb(0x0078D4, 0.16f);
+        kSnapBorder = rgb(0x005FB8, 0.70f);
+        kAccentRing = rgb(0x0078D4, 0.90f);
+        kCardTint = rgb(0xFFFFFF, 0.85f);
+        kDesktopBlur = rgb(0xFFFFFF, 0.40f);
+        return;
+    }
+    kAccent = rgb(0x4CC2FF);
+    kAccentDeep = rgb(0x0078D4);
+    kCaption = rgb(0x202020);
+    kCaptionIdle = rgb(0x2B2B2B);
+    kBodyFallback = rgb(0x202020);
+    kBorderFocus = rgb(0xFFFFFF, 0.14f);
+    kBorderIdle = rgb(0xFFFFFF, 0.08f);
+    kCaptionLine = rgb(0xFFFFFF, 0.06f);
+    kBtnHover = rgb(0xFFFFFF, 0.06f);
+    kBtnPress = rgb(0xFFFFFF, 0.10f);
+    kGlyph = rgb(0xFFFFFF, 0.95f);
+    kGlyphIdle = rgb(0xFFFFFF, 0.60f);
+    kText = rgb(0xFFFFFF);
+    kTextIdle = rgb(0xFFFFFF, 0.62f);
+    kTextMuted = rgb(0xFFFFFF, 0.55f);
+    kTextDim = rgb(0xFFFFFF, 0.38f);
+    kShadow = rgb(0x000000, 0.50f);
+    kShadowIdle = rgb(0x000000, 0.32f);
+    kTaskbarTint = rgb(0x1F1F1F, 0.78f);
+    kShellTint = rgb(0x2B2B2B, 0.90f);
+    kFlyoutTint = rgb(0x2B2B2B, 0.94f);
+    kShellBorder = rgb(0xFFFFFF, 0.09f);
+    kShellLine = rgb(0xFFFFFF, 0.06f);
+    kItemHover = rgb(0xFFFFFF, 0.06f);
+    kItemActive = rgb(0xFFFFFF, 0.10f);
+    kItemPress = rgb(0xFFFFFF, 0.04f);
+    kSearchBox = rgb(0xFFFFFF, 0.06f);
+    kScrim = rgb(0x0A0A0F, 0.96f);
+    kFieldFill = rgb(0x1C1C1E, 0.72f);
+    kSnapFill = rgb(0x4CC2FF, 0.22f);
+    kSnapBorder = rgb(0x9AD8FF, 0.80f);
+    kAccentRing = rgb(0x4CC2FF, 0.90f);
+    kCardTint = rgb(0x2B2B2B, 0.85f);
+    kDesktopBlur = rgb(0x000000, 0.45f);
+}
 
 // --- start menu letter tiles ----------------------------------------------
 inline constexpr Color kTileTints[6] = {

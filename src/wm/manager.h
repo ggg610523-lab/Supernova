@@ -385,6 +385,11 @@ private:
     // shrinks the panel instead of clipping it.
     int ccScale() const;
 
+    // Re-skins the Fluent shell and remembers the choice. The palette itself is
+    // theme::applyMode()'s business; this only commits the setting and asks for a
+    // repaint, and it is a no-op when the mode is already what was asked for.
+    void setLightMode(bool on);
+
     // ---- desktop icons (draw.cpp / input.cpp)
     void layoutDesktopIcons();
     // Eases every icon's shown cell toward its target cell, so the grid reads
@@ -394,6 +399,36 @@ private:
     // Returns true when the press landed on an icon (and was consumed).
     bool handleDesktopPress(int x, int y, Time time);
     void openDesktopItem(const DesktopItem& item, const Rect& fromIcon);
+    // The icon under a point, or -1. Tests the cells the user is actually looking
+    // at, so a press mid-reflow lands on the icon it visibly hit.
+    int desktopItemAt(int x, int y) const;
+
+    // ---- desktop folders (the filesystem work is in apps.cpp)
+    // Rebuilds the grid around the desktop directory's current contents. Used
+    // after the shell itself creates, renames or deletes something; the cells the
+    // surviving icons already hold are kept, so the rest of the grid glides to
+    // its new place instead of jumping. `selectPath`, when it names an entry that
+    // survived, leaves that entry selected -- the grid is sorted by name, so its
+    // index has moved and cannot be carried across.
+    void refreshDesktop(const std::string& selectPath = {});
+    // Renaming a folder: a field over the icon's own label with the keyboard held,
+    // so a name can be typed without a second dialog. Return commits, Escape
+    // abandons, and either way the grab is handed back.
+    void beginDesktopRename(int index);
+    void commitDesktopRename();
+    void cancelDesktopRename();
+    void drawDesktopRename();
+    // The field drawn over a folder's label while it is named. Shared by the
+    // painter and the press test so what is drawn and what is clickable cannot
+    // drift apart. Empty when no rename is up.
+    Rect desktopRenameRect() const;
+    // Deleting a folder is the one thing here that cannot be undone, so it is only
+    // ever reached through this dialog: Escape or Cancel backs out, Return or
+    // Delete goes ahead.
+    void openConfirmDelete(const std::string& path, const std::string& name);
+    void commitConfirmDelete();
+    void closeConfirmDelete();
+    void drawConfirmDelete();
 
     // ---- app launch animation (desktop icon -> window, iOS style)
     // Double-clicking a desktop icon grows a placeholder tile out of the icon
@@ -662,6 +697,19 @@ private:
     std::vector<Rect> desktopIconDraw;   // shown cells, eased toward the targets
     int hoverDesktopIcon = -1;
     int selectedDesktopIcon = -1;
+
+    // ---- desktop folders: the entry the desktop menu was opened on, and the two
+    // modal dialogs that can sit over the wallpaper while one is being named or
+    // deleted.
+    int contextDesktop = -1;       // desktop item the menu was opened on, or -1
+    int desktopRenameItem = -1;    // the item being renamed, or -1
+    std::string desktopRenameText;
+    bool confirmDeleteOpen = false;
+    // Held by path rather than by index: deleting re-sorts the grid, so an index
+    // captured when the menu was built is not the entry by the time it is used.
+    std::string confirmDeletePath;
+    std::string confirmDeleteName;
+    Rect confirmDeleteOk, confirmDeleteCancel;
 
     std::vector<AppEntry> apps;
     std::string searchText;

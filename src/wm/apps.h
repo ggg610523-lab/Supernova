@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "theme.h"
+
 namespace wm {
 
 struct AppEntry {
@@ -57,6 +59,15 @@ int loadTaskbarHeight();
 // next time. Called once, when the drag that changed it ends.
 void saveTaskbarHeight(int height);
 
+// Which Fluent palette the shell should come up in, from the same config
+// directory as the pins. Anything missing or unrecognised means dark, which is
+// both Windows 11's default and this shell's.
+theme::Mode loadThemeMode();
+
+// Writes the palette choice, so the desktop is still light or still dark next
+// time. Called once, when the Control Centre toggle is pressed.
+void saveThemeMode(theme::Mode m);
+
 // One thing the user's desktop should show: a folder, a plain file, or a
 // .desktop launcher dropped there by an installer.
 struct DesktopItem {
@@ -76,6 +87,28 @@ std::string desktopDir();
 // file is parsed the same way the Start menu parses one, so its Name, Icon and
 // Exec are what the desktop shows and runs.
 std::vector<DesktopItem> scanDesktop();
+
+// Whether a name may be used for a desktop entry. Empty is not a name, neither are
+// "." and "..", and a name holding a path separator would put the entry somewhere
+// else entirely. A leading dot is refused because scanDesktop() skips hidden files,
+// so a hidden entry could be created and then never be seen or opened again.
+bool usableDesktopName(const std::string& name);
+
+// Creates a folder on the desktop called `base`, or the first free "base N" for
+// N = 2, 3, ... so making a second one never fails behind the first. Writes the
+// name it settled on to *made. False if the desktop directory is unusable or
+// nothing could be created -- never fatal, the desktop simply stays as it was.
+bool createDesktopFolder(const std::string& base, std::string* made);
+
+// Renames one desktop entry to `name`, keeping it in the same directory. False if
+// the name is unusable or already belongs to something else, which leaves the
+// original untouched.
+bool renameDesktopEntry(const std::string& path, const std::string& name);
+
+// Deletes one desktop entry: a file outright, a folder together with everything
+// inside it. This is the one call here that is not undoable, so the shell only
+// reaches it after the user has confirmed.
+bool deleteDesktopEntry(const std::string& path);
 
 // fork + setsid + sh -c: fully detached, so a crashed app never takes the WM
 // with it and the WM never has to reap anything it does not want to.

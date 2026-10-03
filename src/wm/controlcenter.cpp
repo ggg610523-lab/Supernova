@@ -1,4 +1,4 @@
-// The iOS Control Centre: a 4 column x 5 row grid of dark glass tiles that
+// The iOS Control Centre: a 4 column x 6 row grid of dark glass tiles that
 // drops out of the taskbar clock.
 //
 // The layout is the real one. A module occupies whole grid cells and its inner
@@ -12,7 +12,10 @@
 //   2  [ dnd 1x1 ] [ night 1x1 ] [ brightness 1x2 ] [ volume 1x2 ]
 //   3  [ show desktop 1x2         ] [  (sliders still)         ]
 //   4  [ lock ] [ screenshot ] [ files ] [ terminal ]
+//   5  [ tablet mode 2x1        ] [ light mode 2x1           ]
 //
+// The last row is this shell's own two switches rather than anything iOS ships:
+// the desktop <-> tablet hand-off, and the Fluent shell's light/dark palette.
 // Everything that needs the outside world goes through SystemControls, which
 // probes asynchronously; this file only reads the cached state and draws.
 #include "manager.h"
@@ -46,8 +49,9 @@ enum CcId {
     kCcDnd,
     kCcNight,
     kCcShowDesktop,
-    // 4x1: the desktop <-> tablet / mobile mode switch
+    // the bottom row: two wide plates, each this shell's own switch
     kCcTablet,
+    kCcLight,
     // 1x2
     kCcLock,
     kCcScreenshot,
@@ -72,6 +76,16 @@ std::string ccEllipsize(Text& text, const std::string& s, int px, int maxW) {
 }
 
 }  // namespace
+
+void Manager::setLightMode(bool on) {
+    const theme::Mode want = on ? theme::Mode::Light : theme::Mode::Dark;
+    if (theme::mode == want) return;
+    theme::applyMode(want);
+    saveThemeMode(want);
+    // Repaint everything, not just the panel: window captions, the taskbar and any
+    // open flyout all read the palette, and only a full frame shows that.
+    dirty = true;
+}
 
 int Manager::ccControlIndex(int id, int slot) const {
     for (size_t i = 0; i < ccControls.size(); ++i) {
@@ -188,7 +202,10 @@ void Manager::layoutControlCenter() {
     add(cellRect(0, 3, 2, 1), kCcShowDesktop);
     add(cellRect(0, 4, 1, 1), kCcLock);
     add(cellRect(1, 4, 1, 1), kCcScreenshot);
-    add(cellRect(0, 5, 4, 1), kCcTablet);
+    // The bottom row is two half-width plates: the desktop <-> tablet / mobile mode
+    // switch, and the Fluent shell's light/dark palette.
+    add(cellRect(0, 5, 2, 1), kCcTablet);
+    add(cellRect(2, 5, 2, 1), kCcLight);
 
     // --- launchers share the bottom row, which leaves exactly two slots ----
     for (int i = 0; i < kCcLauncherCount; ++i) {
@@ -311,6 +328,7 @@ void Manager::activateCcControl(int id) {
         case kCcNight: sysctl.setNightLight(!s.nightLight); break;
         case kCcShowDesktop: toggleShowDesktop(); break;
         case kCcTablet: setTabletMode(!tabletMode); break;
+        case kCcLight: setLightMode(!theme::isLight()); break;
         case kCcLock: sysctl.lockSession(); break;
         case kCcScreenshot: sysctl.screenshot(); break;
         default:
@@ -605,23 +623,58 @@ void Manager::drawControlCenter() {
         }
     }
 
-    // --- tablet / mobile mode ---------------------------------------------
-    // A full-width plate that turns systemBlue while the home screen is up, the
-    // way an iOS toggle reads. It is drawn with a device outline rather than a
-    // theme icon, so it never depends on the asset pipeline.
+    // --- tablet / mobile mode, and light mode ----------------------------------
+    // Two wide plates sharing the bottom row. Both turn systemBlue while they are
+    // on, the way an iOS toggle reads. The tablet glyph is a device outline and the
+    // light glyph a sun, both drawn as vectors so they never depend on the asset
+    // pipeline. The sun's rays appear only once light mode is on, so the icon
+    // lights up along with the shell it controls.
     {
-        const Rect m = cellRect(0, 5, 4, 1);
-        const bool on = tabletMode;
-        plateC(m, on ? theme::kCcActive
-                     : mixColor(theme::kCcTile, theme::kCcTileHover, hoverAmt(kCcTablet, 0)),
-               metrics::kCcTileRadius * scale / 100);
-        const int d = int(m.h * 0.34);
-        const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
-        drawTabletGlyph(box, on ? theme::kCcActiveGlyph : theme::kCcGlyph, a);
-        const std::string label = on ? "Tablet mode: on" : "Tablet mode";
-        const int px = int(m.h * 0.20);
-        drawTextAt(label, px, Weight::Medium, theme::kCcLabel, box.right() + gap,
-                   m.y + (m.h - px * 3 / 2) / 2);
+        const auto switchPlate = [&](const Rect& m, int id, bool on) {
+            plateC(m, on ? theme::kCcActive
+                         : mixColor(theme::kCcTile, theme::kCcTileHover, hoverAmt(id, 0)),
+                   metrics::kCcTileRadius * scale / 100);
+            const int d = int(m.h * 0.34);
+            const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
+            return box;
+        };
+        // The sun: a disc, plus eight rays once it is on.
+        const auto sun = [&](const Rect& box, const Color& c, bool rays) {
+            const int d = std::max(6, int(std::min(box.w, box.h) * 0.40f));
+            const Rect disc{box.x + (box.w - d) / 2, box.y + (box.h - d) / 2, d, d};
+            comp.drawRect(disc, float(d) * 0.5f, c, a);
+            if (!rays) return;
+            const int t = std::max(1, d / 5);
+            const float cx = float(disc.x + disc.w / 2), cy = float(disc.y + disc.h / 2);
+            const float reach = float(d) * 0.5f + float(d) * 0.24f;
+            for (int i = 0; i < 8; ++i) {
+                const float ang = float(i) * 3.14159265f / 4.0f;
+                comp.drawRectRotated(int(std::lround(cx + std::cos(ang) * reach)),
+                                     int(std::lround(cy + std::sin(ang) * reach)), t, t * 2,
+                                     ang, float(t) * 0.5f, c, a);
+            }
+        };
+
+        {
+            const Rect m = cellRect(0, 5, 2, 1);
+            const bool on = tabletMode;
+            const Rect box = switchPlate(m, kCcTablet, on);
+            drawTabletGlyph(box, on ? theme::kCcActiveGlyph : theme::kCcGlyph, a);
+            const std::string label = on ? "Tablet mode: on" : "Tablet mode";
+            const int px = int(m.h * 0.20);
+            drawTextAt(label, px, Weight::Medium, theme::kCcLabel, box.right() + gap,
+                       m.y + (m.h - px * 3 / 2) / 2);
+        }
+        {
+            const Rect m = cellRect(2, 5, 2, 1);
+            const bool on = theme::isLight();
+            const Rect box = switchPlate(m, kCcLight, on);
+            sun(box, on ? theme::kCcActiveGlyph : theme::kCcGlyph, on);
+            const std::string label = on ? "Light mode: on" : "Light mode";
+            const int px = int(m.h * 0.20);
+            drawTextAt(label, px, Weight::Medium, theme::kCcLabel, box.right() + gap,
+                       m.y + (m.h - px * 3 / 2) / 2);
+        }
     }
 }
 

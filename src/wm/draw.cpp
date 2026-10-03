@@ -83,6 +83,10 @@ void Manager::render() {
     // iOS keeps them over the app that is running.
     if (tabletAnim > 0.001) drawTabletChrome();
     if (ccOpen || ccAnim > 0.0) drawControlCenter();
+    // The desktop's own dialogs are the last word on the screen while they are up,
+    // so nothing behind them reads as actionable.
+    drawDesktopRename();
+    drawConfirmDelete();
     // The mode transition splash owns the whole screen, so it is painted last.
     if (modeSwitching) drawTabletSplash();
     if (opts->stats) drawStats();
@@ -198,6 +202,67 @@ void Manager::drawDesktopIcons() {
         // them legible over a light patch of wallpaper.
         comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.65f}, 1.0f);
         comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kText, 1.0f);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Desktop folders: the rename field and the delete confirmation
+// ---------------------------------------------------------------------------
+
+// The name is typed into the icon's own label, so the entry never moves and the
+// grid around it stays where it was. The field is deliberately plain -- a lit
+// outline and a caret -- so it reads as "this text is editable" rather than as
+// another window.
+void Manager::drawDesktopRename() {
+    const Rect field = desktopRenameRect();
+    if (field.w <= 0 || field.h <= 0) return;
+    comp.drawRect(field, 5.f, theme::kFieldFill, 0.95f);
+    comp.drawRect(field, 5.f, theme::kAccentRing, 1.0f);
+    const TextTex t = text.get(desktopRenameText, 11, Weight::Regular);
+    if (t.tex) {
+        const int tx = field.x + (field.w - t.w) / 2;
+        const int ty = field.y + (field.h - t.h) / 2;
+        comp.drawText(t, Rect{tx, ty, t.w, t.h}, theme::kText, 1.0f);
+        // The caret blinks on the second, which is enough to read as a text field.
+        if (std::fmod(nowMs(), 1000.0) < 500.0)
+            comp.drawRect(Rect{tx + t.w + 1, field.y + 4, 1, field.h - 8}, 0.f, theme::kText,
+                          1.0f);
+    }
+}
+
+// Deleting a folder takes whatever was in it and cannot be undone, so the dialog
+// says which folder, says what it costs, and makes backing out the obvious
+// choice: Cancel sits first, on the left, under the pointer that got here.
+void Manager::drawConfirmDelete() {
+    if (!confirmDeleteOpen) return;
+    const int panelW = std::min(420, screenW - 48);
+    const int panelH = 196;
+    const Rect panel{(screenW - panelW) / 2, (screenH - panelH) / 2, panelW, panelH};
+
+    comp.drawRect(Rect{0, 0, screenW, screenH}, 0.f, theme::kScrim, 0.55f);
+    comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kFlyoutTint, 0.95f,
+                     theme::kShellBorder, 1.0f);
+
+    drawTextCentered("Delete this folder?", 17, Weight::Bold, theme::kText,
+                     Rect{panel.x, panel.y + 26, panel.w, 24});
+    drawTextCentered(ellipsize(text, confirmDeleteName, 14, panel.w - 48), 14, Weight::Regular,
+                     theme::kTextMuted, Rect{panel.x, panel.y + 56, panel.w, 20});
+    drawTextCentered("Everything inside it goes too, and this cannot be undone.", 12,
+                     Weight::Regular, theme::kTextMuted, Rect{panel.x, panel.y + 82, panel.w, 20});
+
+    struct Btn {
+        Rect r;
+        const char* label;
+        bool danger;
+    };
+    const Btn btns[2] = {{confirmDeleteCancel, "Cancel", false},
+                         {confirmDeleteOk, "Delete", true}};
+    for (const Btn& b : btns) {
+        comp.drawRect(b.r, 6.f, theme::kFieldFill, 0.92f);
+        comp.drawRect(b.r, 6.f, b.danger ? theme::kAccent : theme::kShellBorder,
+                      b.danger ? 0.70f : 1.0f);
+        drawTextCentered(b.label, 13, Weight::Medium, theme::kText,
+                         Rect{b.r.x, b.r.y + (b.r.h - 18) / 2, b.r.w, 18});
     }
 }
 
@@ -818,7 +883,7 @@ void Manager::drawStartMenu() {
                     theme::kLaunchSearchText);
     {
         const std::string label = searchText.empty() ? std::string("Search") : searchText;
-        const Color col = searchText.empty() ? theme::kLaunchSearchText : theme::kText;
+        const Color col = searchText.empty() ? theme::kLaunchSearchText : theme::kLaunchLabel;
         const int textX = searchRect.x + padX + glyph + 8;
         const int maxW = searchRect.right() - textX - 14;
         const TextTex t = text.get(ellipsize(text, label, 14, maxW), 14, Weight::Regular);

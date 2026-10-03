@@ -4,6 +4,7 @@
 #include "util.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -253,6 +254,81 @@ std::vector<DesktopItem> scanDesktop() {
         items.push_back(std::move(item));
     }
     return items;
+}
+
+bool usableDesktopName(const std::string& name) {
+    if (name.empty() || name == "." || name == "..") return false;
+    if (name.find('/') != std::string::npos) return false;
+    // scanDesktop() hides dotfiles, so a hidden entry would be created and then
+    // never be seen or opened again.
+    if (name[0] == '.') return false;
+    for (const char ch : name)
+        if (static_cast<unsigned char>(ch) < 0x20) return false;
+    return true;
+}
+
+namespace {
+
+bool pathExists(const std::string& path) {
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0;
+}
+
+// Depth-first removal, so a folder goes together with everything inside it. Links
+// are unlinked rather than followed, so a symlink on the desktop cannot lead the
+// delete out of the desktop and into whatever it points at.
+bool removeTree(const std::string& path) {
+    struct stat st {};
+    if (::lstat(path.c_str(), &st) != 0) return false;
+    if (S_ISDIR(st.st_mode)) {
+        if (DIR* d = opendir(path.c_str())) {
+            while (dirent* e = readdir(d)) {
+                const char* n = e->d_name;
+                if (n[0] == '.' && (n[1] == '\0' || (n[1] == '.' && n[2] == '\0'))) continue;
+                removeTree(path + "/" + n);
+            }
+            closedir(d);
+        }
+        return ::rmdir(path.c_str()) == 0;
+    }
+    return ::unlink(path.c_str()) == 0;
+}
+
+}  // namespace
+
+bool createDesktopFolder(const std::string& base, std::string* made) {
+    const std::string dir = desktopDir();
+    if (dir.empty() || !usableDesktopName(base)) return false;
+    // "New Folder", then "New Folder 2" and up. A second folder should never fail
+    // just because the first is still there, so the number is part of the name
+    // rather than a collision the user has to clear.
+    for (int n = 1; n < 1000; ++n) {
+        const std::string name = n == 1 ? base : base + " " + std::to_string(n);
+        if (pathExists(dir + "/" + name)) continue;
+        if (::mkdir((dir + "/" + name).c_str(), 0755) == 0) {
+            if (made) *made = name;
+            return true;
+        }
+        // Something else took the name between the check and the mkdir. Anything
+        // else -- a read-only desktop, a full disk -- is not worth retrying.
+        if (errno != EEXIST) return false;
+    }
+    return false;
+}
+
+bool renameDesktopEntry(const std::string& path, const std::string& name) {
+    const std::string dir = desktopDir();
+    if (dir.empty() || path.empty() || !usableDesktopName(name)) return false;
+    const std::string to = dir + "/" + name;
+    if (to == path) return true;  // renamed to what it already is
+    // Refuse to land on top of something else rather than replace it.
+    if (pathExists(to)) return false;
+    return ::rename(path.c_str(), to.c_str()) == 0;
+}
+
+bool deleteDesktopEntry(const std::string& path) {
+    if (path.empty()) return false;
+    return removeTree(path);
 }
 
 std::vector<AppEntry> scanApps() {
@@ -577,6 +653,32 @@ void saveTaskbarHeight(int height) {
         return;
     }
     log("saved taskbar height %d to %s", height, path.c_str());
+}
+
+theme::Mode loadThemeMode() {
+    const std::string path = configFile("theme-mode");
+    if (path.empty()) return theme::Mode::Dark;
+    std::ifstream in(path);
+    std::string mode;
+    if (!(in >> mode)) return theme::Mode::Dark;
+    // A file from a future build, or one the user has edited, must not stop the
+    // shell coming up -- an unrecognised palette is simply not a palette.
+    if (mode == "light") return theme::Mode::Light;
+    return theme::Mode::Dark;
+}
+
+void saveThemeMode(theme::Mode m) {
+    const std::string path = configFile("theme-mode");
+    if (path.empty()) {
+        log("cannot save theme mode: no XDG_CONFIG_HOME or HOME");
+        return;
+    }
+    const std::string word = (m == theme::Mode::Light) ? "light\n" : "dark\n";
+    if (!writeFileAtomicImpl(path, word)) {
+        log("cannot write theme mode to %s", path.c_str());
+        return;
+    }
+    log("saved theme mode %s to %s", word.c_str(), path.c_str());
 }
 
 std::vector<AppEntry> loadPinned() {

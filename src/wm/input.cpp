@@ -344,6 +344,14 @@ void Manager::onButtonPress(XButtonEvent& ev) {
         return;
     }
 
+    // The desktop's folder dialogs are modal and outrank everything below: they
+    // hold the pointer and the keyboard, so not even an Alt+drag can move a window
+    // out from under the question the user is being asked.
+    if (confirmDeleteOpen || desktopRenameItem >= 0) {
+        handleOverlayPress(x, y, ev.button, ev.time);
+        return;
+    }
+
     // Alt+drag: the passive grab on the root delivers this even when the press
     // landed on a client window, which is what makes "Alt+drag to move" work
     // for every client, client side decorations included.
@@ -652,6 +660,48 @@ void Manager::onKeyPress(XKeyEvent& ev) {
         return;
     }
 
+    // The desktop's own dialogs are modal and need the keyboard: a delete is
+    // answered with Return or Escape, and a rename takes a name the same way the
+    // tablet renames a folder. Both are checked before every other overlay so
+    // nothing behind them can be driven while they are up.
+    if (confirmDeleteOpen) {
+        if (sym == XK_Escape) closeConfirmDelete();
+        else if (sym == XK_Return || sym == XK_KP_Enter) commitConfirmDelete();
+        dirty = true;
+        return;
+    }
+    if (desktopRenameItem >= 0) {
+        if (sym == XK_Escape) {
+            cancelDesktopRename();
+            return;
+        }
+        if (sym == XK_Return || sym == XK_KP_Enter) {
+            commitDesktopRename();
+            return;
+        }
+        if (sym == XK_BackSpace) {
+            if (!desktopRenameText.empty()) {
+                desktopRenameText.pop_back();
+                dirty = true;
+            }
+            return;
+        }
+        char field[16] = {0};
+        const int n = XLookupString(&ev, field, sizeof field - 1, nullptr, nullptr);
+        bool printable = n > 0;
+        for (int i = 0; i < n && printable; ++i) {
+            const unsigned char ch = static_cast<unsigned char>(field[i]);
+            if (ch < 0x20 || ch == 0x7F) printable = false;
+        }
+        if (printable) {
+            // Bounded, so a held-down key cannot grow the name without limit. The
+            // cap leaves room for the suffix createDesktopFolder() adds.
+            if (desktopRenameText.size() < 60) desktopRenameText.append(field, size_t(n));
+            dirty = true;
+        }
+        return;
+    }
+
     // Escape abandons a launcher reorder and puts the pins back as they were,
     // which is also what a lost button release leaves behind.
     if (pinDrag >= 0 && sym == XK_Escape) {
@@ -767,19 +817,40 @@ void Manager::applyContextAction(int index) {
         else pinApp(app);
         return;
     }
-    // The desktop menu: an optional "Remove Widget" when opened on a card, then
-    // the two add entries.
+    // The desktop menu. Its shape depends on what it was opened on, so the rows
+    // are walked in exactly the order openDesktopMenu() pushed them.
     if (!contextClient) {
-        int first = 0;
+        int row = 0;
         if (contextWidget >= 0) {
-            if (index == 0) {
+            if (index == row++) {
                 removeWidget(contextWidget);
                 return;
             }
-            first = 1;
         }
-        if (index == first) addWidget(WidgetKind::Clock);
-        else if (index == first + 1) addWidget(WidgetKind::Battery);
+        if (contextDesktop >= 0 && contextDesktop < int(desktopItems.size()) &&
+            desktopItems[size_t(contextDesktop)].isDir) {
+            if (index == row++) {
+                beginDesktopRename(contextDesktop);
+                return;
+            }
+            if (index == row++) {
+                openConfirmDelete(desktopItems[size_t(contextDesktop)].path,
+                                  desktopItems[size_t(contextDesktop)].name);
+                return;
+            }
+        }
+        if (index == row++) {
+            // A folder created from here is real and empty, so it is worth having
+            // on screen straight away rather than only after the next restart.
+            std::string made;
+            if (createDesktopFolder("New Folder", &made)) {
+                const std::string dir = desktopDir();
+                refreshDesktop(dir.empty() ? std::string() : dir + "/" + made);
+            }
+            return;
+        }
+        if (index == row++) addWidget(WidgetKind::Clock);
+        else if (index == row) addWidget(WidgetKind::Battery);
         return;
     }
     Client* c = contextClient;
@@ -1076,6 +1147,23 @@ bool Manager::handleChromePress(int x, int y, unsigned button, Time time) {
 }
 
 void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
+    // The desktop's own dialogs sit above everything else and take the whole
+    // pointer while they are up, so nothing behind them can be reached by accident.
+    if (confirmDeleteOpen) {
+        if (button != Button1) return;
+        if (confirmDeleteOk.contains(x, y)) commitConfirmDelete();
+        else if (confirmDeleteCancel.contains(x, y)) closeConfirmDelete();
+        // Anywhere else is deliberately inert. This is the one dialog where a
+        // stray click must not be able to destroy anything.
+        return;
+    }
+    if (desktopRenameItem >= 0) {
+        if (button != Button1) return;
+        // A press on the field keeps the caret where it is; a press anywhere else
+        // is how the rename is abandoned without reaching for Escape.
+        if (!desktopRenameRect().contains(x, y)) cancelDesktopRename();
+        return;
+    }
     // Control Centre stays open when a control is used, exactly as iOS does;
     // only a press outside the panel dismisses it.
     if (ccOpen) {
@@ -1083,11 +1171,16 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
         return;
     }
     if (contextOpen) {
+        // Dismiss first, then act. An action that opens a dialog of its own -- the
+        // folder rename field, the delete confirmation -- would otherwise be torn
+        // down by the menu that launched it closing.
+        int idx = -1;
         if (button == Button1 && contextRect.contains(x, y)) {
-            const int idx = (y - contextRect.y - 6) / 32;
-            if (idx >= 0 && idx < int(contextItems.size())) applyContextAction(idx);
+            idx = (y - contextRect.y - 6) / 32;
+            if (idx < 0 || idx >= int(contextItems.size())) idx = -1;
         }
         closeOverlays();
+        if (idx >= 0) applyContextAction(idx);
         return;
     }
     if (startOpen) {
@@ -1176,23 +1269,31 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
     handleChromePress(x, y, button, time);
 }
 
+// The desktop icon under a point, or -1. Tested against what the user is actually
+// looking at: mid-reflow the shown cells are the eased positions, not the settled
+// grid targets, so a press lands on the icon it visibly hit.
+int Manager::desktopItemAt(int x, int y) const {
+    const std::vector<Rect>& hit =
+        desktopIconDraw.size() == desktopIconRects.size() ? desktopIconDraw : desktopIconRects;
+    for (size_t i = 0; i < hit.size(); ++i)
+        if (hit[i].contains(x, y)) return int(i);
+    return -1;
+}
+
 // A desktop icon opens on a single click, the way a launcher should; a click on
 // bare wallpaper clears the selection.
 bool Manager::handleDesktopPress(int x, int y, Time time) {
     (void)time;
-    // Test what the user actually sees: mid-reflow the shown cells are the
-    // eased positions, not the settled grid targets.
-    const std::vector<Rect>& hit =
-        desktopIconDraw.size() == desktopIconRects.size() ? desktopIconDraw : desktopIconRects;
-    for (size_t i = 0; i < hit.size(); ++i) {
-        if (!hit[i].contains(x, y)) continue;
-        const int index = int(i);
+    const int index = desktopItemAt(x, y);
+    if (index >= 0) {
         selectedDesktopIcon = index;
         hoverDesktopIcon = index;
         if (index < int(desktopItems.size())) {
+            const Rect cell = desktopIconDraw.size() == desktopIconRects.size()
+                                  ? desktopIconDraw[size_t(index)]
+                                  : desktopIconRects[size_t(index)];
             // Grow the placeholder out of the icon's own glyph, not its cell, so
             // the animation starts exactly where the user clicked.
-            const Rect cell = hit[i];
             const Rect fromIcon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
             openDesktopItem(desktopItems[size_t(index)], fromIcon);
         }
