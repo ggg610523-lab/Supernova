@@ -276,9 +276,9 @@ void Manager::onCrossing(XCrossingEvent& ev) {
 // Pointer left our chrome: clear every hover so nothing looks stuck. The dock
 // magnification field reads pointerOnTaskbar, so it relaxes here too -- a
 // LeaveNotify carries no motion of its own.
-    if (hoverStart || hoverShowDesktop || hoverClock || hoverTaskIndex >= 0 ||
-        tabletHover >= 0 || pointerOnTaskbar) {
-        hoverStart = hoverShowDesktop = hoverClock = false;
+    if (hoverStart || hoverShowDesktop || hoverClock || hoverCircle ||
+        hoverTaskIndex >= 0 || tabletHover >= 0 || pointerOnTaskbar) {
+        hoverStart = hoverShowDesktop = hoverClock = hoverCircle = false;
         hoverTaskIndex = -1;
         tabletHover = -1;
         pointerOnTaskbar = false;

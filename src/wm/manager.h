@@ -676,6 +676,7 @@ private:
     bool hoverStart = false;
     bool hoverShowDesktop = false;
     bool hoverClock = false;
+    bool hoverCircle = false;   // the ring button at the left end of the bar
 
     // ---- pinned taskbar launchers (manager.cpp)
     // The launchers the user pinned, in pin order. They are laid out right after
@@ -746,6 +747,7 @@ private:
     double startHoverAnim = 0.0;           // Start button wash
     double showDesktopHoverAnim = 0.0;     // show-desktop sliver
     double clockHoverAnim = 0.0;           // clock/date cluster wash
+    double circleHoverAnim = 0.0;          // ring-button glow
     std::vector<double> appHover;          // per Launchpad tile
     std::vector<double> dotHover;          // per page dot
     std::vector<double> ctxHover;          // per context-menu item

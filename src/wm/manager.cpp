@@ -624,6 +624,10 @@ void Manager::tickFluidMotion(double dtMs) {
     if (approach(showDesktopHoverAnim, hoverShowDesktop ? 1.0 : 0.0, dtMs, kHoverMs))
         dirty = true;
     if (approach(clockHoverAnim, hoverClock ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
+    if (approach(circleHoverAnim, hoverCircle ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
+    // The ring-button motes keep drifting while the pointer is on the button, so
+    // hold a repaint open until the hover (and its particles) have faded out.
+    if (circleHoverAnim > 0.001) dirty = true;
     // The running pill springs between its three widths instead of snapping. It
     // tracks the same eased hover the icon lift does, so widening on hover and the
     // icon growing arrive together rather than in two separate jumps.
@@ -1005,11 +1009,12 @@ void Manager::updateHoverStates(int px, int py) {
     // LeaveNotify, which sends no motion event of its own.
     pointerOnTaskbar = overTaskbar;
 
-    bool newStart = false, newShowDesktop = false, newClock = false;
+    bool newStart = false, newShowDesktop = false, newClock = false, newCircle = false;
     int newTask = -1;
     if (overTaskbar) {
         newStart = startButtonRect.contains(px, py);
         if (!startOpen) {
+            newCircle = circleButtonRect.contains(px, py);
             newShowDesktop = showDesktopRect.contains(px, py);
             newClock = clockRect.contains(px, py);
             for (size_t i = 0; i < taskItems.size(); ++i) {
@@ -1021,10 +1026,11 @@ void Manager::updateHoverStates(int px, int py) {
         }
     }
     if (newStart != hoverStart || newShowDesktop != hoverShowDesktop ||
-        newClock != hoverClock || newTask != hoverTaskIndex) {
+        newClock != hoverClock || newCircle != hoverCircle || newTask != hoverTaskIndex) {
         hoverStart = newStart;
         hoverShowDesktop = newShowDesktop;
         hoverClock = newClock;
+        hoverCircle = newCircle;
         hoverTaskIndex = newTask;
         changed = true;
     }

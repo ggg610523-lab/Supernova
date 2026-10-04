@@ -854,12 +854,69 @@ void Manager::drawTaskbar() {
     // everything else. Draw a solid disc, then redraw the taskbar's own acrylic
     // over the middle to punch the hole. Both passes are opaque, so the inner
     // acrylic reproduces the surface it is sitting on exactly, leaving only the
-    // ring -- no ring primitive needed. It has no action yet; when it gets one, its
-    // hover and press live beside Start's.
+    // ring -- no ring primitive needed. It has no action yet; its hover already
+    // glows, and a press would live beside Start's.
     if (circleButtonRect.w > 0) {
         const float rad = float(circleButtonRect.w) * 0.5f;
         const int thick = std::max(4, circleButtonRect.w / 5);  // bold stroke
+        // Hover: a soft white halo behind the ring, the same stacked rounded
+        // rects the app buttons use, so the button reads as lit the moment the
+        // pointer reaches it. It eases in and out with circleHoverAnim.
+        const Color white{1.f, 1.f, 1.f, 1.f};
+        const int ccx = circleButtonRect.x + circleButtonRect.w / 2;
+        const int ccy = circleButtonRect.y + circleButtonRect.h / 2;
+        if (circleHoverAnim > 0.001) {
+            constexpr int kGlowLayers = 5;
+            for (int k = kGlowLayers; k >= 1; --k) {
+                const float t = float(k) / float(kGlowLayers);
+                const float a = 0.14f * float(circleHoverAnim) * (1.0f - t) * (1.0f - t);
+                const int spread = int(std::lround(1.0 + 11.0 * t));
+                // Clipped to the bar's top edge, so the halo never washes over
+                // the desktop above the taskbar.
+                comp.drawRect(circleButtonRect.inflated(spread), rad + float(spread), white, a,
+                              y);
+            }
+        }
+        // Motes: a ring of tiny white particles that drift outward from the rim
+        // and fade as they go, so the glow feels charged rather than painted. No
+        // state is stored -- each mote's position comes from the clock and its
+        // own index -- and the whole ring is scaled by the hover amount, so it
+        // appears with the glow and disappears with it. The golden ratio spreads
+        // the phases so the motes never settle into a visible pattern.
+        if (circleHoverAnim > 0.001) {
+            const double tt = nowMs() / 1000.0;
+            constexpr int kMotes = 12;
+            constexpr double kGolden = 0.6180339887498949;
+            for (int i = 0; i < kMotes; ++i) {
+                const double seed = double(i) * kGolden;
+                const double period = 1.5 + 1.2 * seed;                 // 1.5 .. 2.7 s
+                const double phase = std::fmod(tt / period + seed, 1.0);
+                // Distance grows from just outside the rim outward.
+                const double orbit = double(rad) + 1.0 + phase * (double(rad) * 1.6 + 9.0);
+                const double ang = double(i) * (2.0 * M_PI / double(kMotes)) +
+                                   tt * (0.7 + 0.6 * seed);
+                const int mx = ccx + int(std::lround(std::cos(ang) * orbit));
+                const int my = ccy + int(std::lround(std::sin(ang) * orbit));
+                const float fade = float(std::sin(phase * M_PI));        // 0..1..0
+                const int size = std::max(2, int(std::lround(double(rad) * 0.24 *
+                                                             (1.0 - 0.45 * phase))));
+                const float a = 0.9f * fade * float(circleHoverAnim);
+                if (a <= 0.01f) continue;
+                // `y` is the taskbar's top edge: every mote is clipped to the
+                // bar, so a mote never drifts up onto the desktop.
+                comp.drawRect(Rect{mx - size / 2, my - size / 2, size, size},
+                              float(size) * 0.5f, white, a, y);
+                // A fainter, larger copy underneath reads as the mote's own glow.
+                comp.drawRect(Rect{mx - size, my - size, size * 2, size * 2},
+                              float(size), white, a * 0.25f, y);
+            }
+        }
         comp.drawRect(circleButtonRect, rad, theme::kCircleRing);
+        // The ring itself picks up the white a little as it lights, so the glow
+        // is not only a halo around an unchanged circle.
+        if (circleHoverAnim > 0.001)
+            comp.drawRect(circleButtonRect, rad, white,
+                          float(circleHoverAnim) * 0.30f);
         comp.drawAcrylic(circleButtonRect.inflated(-thick),
                          std::max(0.f, rad - float(thick)), theme::kTaskbarTint,
                          theme::kTaskbarTintOpacity, theme::kShellLine, 1.0f,

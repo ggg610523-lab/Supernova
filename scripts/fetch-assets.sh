@@ -337,7 +337,7 @@ PY
     fi
   done < <(sort -u "$list")
 
-  say "icons: $rendered/$wanted rendered into $ICONS"
+  say "icons: $rendered/$wanted app/shell names rendered ($HATTER_ICONS + $ICONS)"
   render_local_svgs "$tool"
 }
 
