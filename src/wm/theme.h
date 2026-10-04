@@ -252,8 +252,8 @@ inline constexpr Color kCcLabel = rgb(0xFFFFFF, 0.70f);
 // wallpaper shows through blurred and bright, exactly like the macOS Web
 // launchpad's `backdrop-filter: blur(25px)` over a transparent background.
 inline constexpr Color kLaunchTint = rgb(0x14141A, 1.0f);
-inline constexpr Color kLaunchSearch = rgb(0xFFFFFF, 0.05f);   // search field wash
-inline constexpr Color kLaunchSearchBorder = rgb(0xFFFFFF, 0.22f);  // its 1px hairline
+inline constexpr Color kLaunchSearch = rgb(0xFFFFFF, 0.10f);   // search pill wash
+inline constexpr Color kLaunchSearchBorder = rgb(0xFFFFFF, 0.28f);  // its rounded hairline
 inline constexpr Color kLaunchSearchText = rgb(0xFFFFFF, 0.60f);
 inline constexpr Color kLaunchLabel = rgb(0xFFFFFF, 0.95f);
 inline constexpr Color kLaunchLabelShadow = rgb(0x000000, 0.60f);
@@ -399,7 +399,7 @@ constexpr int kCcMaxScale = 100;  // percent; shrinks to fit small screens
 constexpr int kLaunchIcon = 80;      // app icon edge at 100% (the macOS Web size)
 constexpr int kLaunchIconMin = 46;   // floor when the screen is small
 constexpr int kLaunchCols = 4;       // the macOS Web launchpad is four across
-constexpr int kLaunchRowGap = 20;    // vertical gap between icon rows
+constexpr int kLaunchRowGap = 40;    // vertical gap between icon rows
 constexpr int kLaunchLabelH = 18;    // label strip under each icon
 constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
 

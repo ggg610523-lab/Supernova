@@ -1064,11 +1064,11 @@ void Manager::layoutStartMenu() {
     const int taskbarTop = screenH - metrics::taskbarH;
     startRect = Rect{0, 0, screenW, taskbarTop};
 
-    // Top-centred search field, like the macOS Web launchpad: a small bordered
-    // pill (220x30) sitting in a ~100px band, with the query centred until the
-    // user starts typing.
-    const int sw = std::min(220, screenW - 48);
-    const int sh = 30;
+    // Top-centred search field, like the macOS Web launchpad: a rounded pill
+    // sitting in a ~100px band, with the query centred until the user starts
+    // typing.
+    const int sw = std::min(260, screenW - 48);
+    const int sh = 34;
     const int sy = std::clamp(screenH / 22, 18, 40);
     searchRect = Rect{(screenW - sw) / 2, sy, sw, sh};
 
@@ -1149,12 +1149,14 @@ void Manager::drawStartMenu() {
     // user types, then the query is left-aligned after the magnifier, exactly as
     // the CSS `input:focus { text-align: left }` does.
     const Rect search = scaled(searchRect);
-    comp.drawRect(search, 4.f, theme::kLaunchSearch, a);
-    const Color edge = theme::kLaunchSearchBorder;
-    comp.drawRect(Rect{search.x, search.y, search.w, 1}, 1.f, edge, a);
-    comp.drawRect(Rect{search.x, search.bottom() - 1, search.w, 1}, 1.f, edge, a);
-    comp.drawRect(Rect{search.x, search.y, 1, search.h}, 1.f, edge, a);
-    comp.drawRect(Rect{search.right() - 1, search.y, 1, search.h}, 1.f, edge, a);
+    // A fully rounded pill: the hairline is painted as a filled pill and the wash
+    // is laid back over it inset by the stroke, so the corners stay perfectly
+    // round instead of the four straight edges of the old box.
+    const float pillR = search.h * 0.5f;
+    const float stroke = std::max(1.f, std::round(search.h * 0.09f));
+    comp.drawRect(search, pillR, theme::kLaunchSearchBorder, a);
+    comp.drawRect(search.inflated(-int(std::lround(stroke))), pillR - stroke,
+                  theme::kLaunchSearch, a);
     const int glyph = 15;
     const int padX = 10;
     drawSearchGlyph(Rect{search.x + padX, search.y + (search.h - glyph) / 2, glyph, glyph},
