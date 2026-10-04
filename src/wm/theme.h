@@ -94,6 +94,12 @@ inline Color kTaskActivePlate = rgb(0xFFFFFF, 0.115f);
 // the accent spilling onto the bar is what stops the surface reading as flat
 // paint and gives it the lit-glass look the whole shell is going for.
 inline Color kTaskGlow = rgb(0x4CC2FF, 1.0f);
+// The bold ring button parked at the left end of the taskbar. It has no job yet,
+// so it is an empty ring rather than a glyph: a high-contrast neutral stroke, white
+// on the dark bar and black on the light one, which applyMode() re-points so it
+// tracks the rest of the shell. The hollow centre shows the taskbar's acrylic
+// through it (draw.cpp redraws the surface inside the ring).
+inline Color kCircleRing = rgb(0xFFFFFF, 0.95f);
 // The wash behind a modal dialog, and the fill of a control sitting *on* a light
 // flyout. These exist so the Fluent shell never has to borrow a colour from one of
 // the imitated skins below: a near-black scrim over a white dialog is the one
@@ -161,6 +167,7 @@ inline void applyMode(Mode m) {
         kSearchBox = rgb(0x000000, 0.0373f);
         kTaskActivePlate = rgb(0x000000, 0.0536f);
         kTaskGlow = rgb(0x0078D4, 1.0f);
+        kCircleRing = rgb(0x000000, 0.90f);
         kScrim = rgb(0xF5F5F5, 0.96f);
         kFieldFill = rgb(0xEFEFEF, 0.92f);
         kSnapFill = rgb(0x0078D4, 0.16f);
@@ -201,6 +208,7 @@ inline void applyMode(Mode m) {
     kSearchBox = rgb(0xFFFFFF, 0.06f);
     kTaskActivePlate = rgb(0xFFFFFF, 0.115f);
     kTaskGlow = rgb(0x4CC2FF, 1.0f);
+    kCircleRing = rgb(0xFFFFFF, 0.95f);
     kScrim = rgb(0x0A0A0F, 0.96f);
     kFieldFill = rgb(0x1C1C1E, 0.72f);
     kSnapFill = rgb(0x4CC2FF, 0.22f);

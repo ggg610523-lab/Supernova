@@ -671,6 +671,14 @@ void Manager::layoutTaskbar() {
         taskItems.push_back(item);
         x += w + gap;
     }
+    // The bold ring button lives at the left of the bar, indented off the edge and
+    // clear of the centred app group. It is decorative for now, so it is sized a
+    // touch under an app icon and centred in the bar's thickness rather than in a
+    // button cell.
+    const int d = std::max(8, metrics::taskIconSize() * 4 / 5);
+    const int indent = 16;
+    circleButtonRect = Rect{indent, y + (metrics::taskbarH - d) / 2, d, d};
+
     clockRect = Rect{screenW - 140, y, 116, metrics::taskbarH};
     showDesktopRect = Rect{screenW - 14, y, 14, metrics::taskbarH};
 }
@@ -724,6 +732,23 @@ void Manager::drawTaskbar() {
             const float a = 0.05f * sheen * (1.0f - float(i) / 6.0f);
             comp.drawRect(Rect{0, y + i, screenW, 1}, 0.f, Color{1.f, 1.f, 1.f, 1.f}, a);
         }
+    }
+
+    // The bold ring button at the left end of the bar: white on the dark bar, black
+    // on the light one, straight from applyMode(), so it tracks the mode like
+    // everything else. Draw a solid disc, then redraw the taskbar's own acrylic
+    // over the middle to punch the hole. Both passes are opaque, so the inner
+    // acrylic reproduces the surface it is sitting on exactly, leaving only the
+    // ring -- no ring primitive needed. It has no action yet; when it gets one, its
+    // hover and press live beside Start's.
+    if (circleButtonRect.w > 0) {
+        const float rad = float(circleButtonRect.w) * 0.5f;
+        const int thick = std::max(4, circleButtonRect.w / 5);  // bold stroke
+        comp.drawRect(circleButtonRect, rad, theme::kCircleRing);
+        comp.drawAcrylic(circleButtonRect.inflated(-thick),
+                         std::max(0.f, rad - float(thick)), theme::kTaskbarTint,
+                         theme::kTaskbarTintOpacity, theme::kShellLine, 1.0f,
+                         theme::kTaskbarSaturate);
     }
 
     // A soft accent bloom behind a button. Concentric rounded rects of the same

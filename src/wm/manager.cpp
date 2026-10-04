@@ -673,7 +673,7 @@ void Manager::tickFluidMotion(double dtMs) {
     // which is the half of Plank's effect that makes the swell read as one smooth
     // wave instead of a lone icon popping out of a static row.
     {
-        constexpr double kPeak = 0.45;   // peak growth at the hovered icon
+        constexpr double kPeak = 0.28;   // peak growth at the hovered icon
         const double icon = double(metrics::taskIconSize());
         const double radius = std::max(1.0, icon * (1.0 + kPeak));
         const double dtSec = std::min(dtMs, 50.0) / 1000.0;

@@ -635,7 +635,7 @@ private:
         int pin = -1;              // index into pinned, or -1 for a window
     };
     std::vector<TaskItem> taskItems;
-    Rect startButtonRect, showDesktopRect, clockRect;
+    Rect startButtonRect, circleButtonRect, showDesktopRect, clockRect;
     int hoverTaskIndex = -1;
     bool hoverStart = false;
     bool hoverShowDesktop = false;
