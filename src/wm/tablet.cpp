@@ -1256,7 +1256,9 @@ void Manager::drawTabletSplash() {
     const int d = int(std::lround(base * pop));
     const Rect box{cx - d / 2, screenH / 2 - d / 2 - 46, d, d};
     const float radius = float(d) * 0.22f;
-    if (!drawAppIcon(box, "2048", "2048", radius, a)) {
+    // The bundled PNG Start logo wins over 2048.svg, exactly as on the taskbar;
+    // the plain name keeps the SVG as a fallback when the PNG is missing.
+    if (!drawAppIcon(box, assetDir + "/icons/2048.png", "2048", radius, a)) {
         drawAppTile(box, modeSwitchTarget ? "T" : "D", radius, theme::kAccentDeep, false);
     }
 

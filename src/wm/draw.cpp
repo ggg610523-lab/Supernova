@@ -524,11 +524,16 @@ void Manager::drawTextRight(const std::string& s, int px, Weight w, const Color&
     comp.drawText(t, Rect{right - t.w, y, t.w, t.h}, c, 1.0f);
 }
 
-// The Windows 11 Start logo: assets/icons/2048.svg when the asset pipeline has
-// rendered it, otherwise four squares in a 2x2 grid.
+// The Windows 11 Start logo. The bundled PNG (assets/icons/2048.png) is asked
+// for by name so it wins over the vector source (2048.svg), which librsvg would
+// otherwise prefer: the raster is the artwork that should show. The "2048"
+// fallback keeps the SVG working when the PNG is absent, and four squares in a
+// 2x2 grid are the last resort.
 void Manager::drawStartGlyph(const Rect& box, const Color& c) {
     const Rect icon{box.x, box.y + (box.h - box.w) / 2, box.w, box.w};
-    if (icon.w >= 8 && drawAppIcon(icon, "2048", "2048", 0.f, c.a)) return;
+    if (icon.w >= 8 &&
+        drawAppIcon(icon, assetDir + "/icons/2048.png", "2048", 0.f, c.a))
+        return;
     const int s = 8, gap = 2;
     const int x0 = box.x + (box.w - (2 * s + gap)) / 2;
     const int y0 = box.y + (box.h - (2 * s + gap)) / 2;
