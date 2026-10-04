@@ -407,6 +407,13 @@ constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
 // does not flick it; a third of a page of travel commits the turn.
 constexpr int kLaunchSwipeSlop = 22;
 
+// --- ring menu (the circle button's flyout) -------------------------------
+// A greeting header over a list of recently launched apps. The menu reuses the
+// context flyout's plumbing, so only its two row metrics live here.
+constexpr int kRingHeaderH = 72;  // greeting + date, above the rows
+constexpr int kRingRowH = 36;     // one recent app: icon + name
+constexpr int kRingMaxRecents = 8;
+
 // --- tablet / mobile mode (iOS home screen) -------------------------------
 // The status bar is 44pt on an iPhone X (52 here to leave room for the Dynamic
 // Island), the home indicator is the 134x5pt gesture bar, and the dock is a

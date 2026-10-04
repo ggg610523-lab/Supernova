@@ -346,6 +346,8 @@ private:
     void closeOverlays();
     void showContextMenu(Client* c, int x, int y);
     void openStartMenu();
+    // The circle button's flyout: a time-based greeting over the recent apps.
+    void openRingMenu();
     void toggleTaskView();
     void toggleControlCenter();
     bool overlayOpen() const;
@@ -664,6 +666,14 @@ private:
     Rect contextRect;
     int contextHover = -1;
     std::vector<std::string> contextItems;
+    // The ring menu reuses the context flyout: the same open/close animation,
+    // pointer grab, hover wipe and dismiss rules, but with a greeting header
+    // over a list of recent apps instead of action strings.
+    bool contextRing = false;
+    std::vector<AppEntry> contextRecents;  // the app each visible row stands for
+    // The row under a point, header and padding accounted for, or -1. Shared by
+    // the hover wipe and the press handler so they can never disagree.
+    int contextRowAt(int x, int y) const;
 
     struct TaskItem {
         Rect rect;
@@ -684,6 +694,15 @@ private:
     // whether or not the app is running, and clicking it focuses the app's window
     // when there is one and starts it when there is not.
     std::vector<AppEntry> pinned;
+    // The apps launched most recently, newest first, capped at kRingMaxRecents.
+    // Loaded at startup and rewritten on every launch, so the ring menu's list
+    // survives a restart.
+    std::vector<AppEntry> recents;
+    // Records one launch: moves an existing entry to the front, or inserts it.
+    // Never fatal -- a config directory that cannot be written simply means the
+    // list is session-only.
+    void noteRecent(const std::string& name, const std::string& exec,
+                    const std::string& icon, const std::string& wmClass);
     bool isPinned(const AppEntry& app) const;
     void pinApp(const AppEntry& app);       // no-op when already pinned
     void unpinApp(const std::string& exec);  // no-op when not pinned

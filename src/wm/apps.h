@@ -50,6 +50,17 @@ PinnedList loadPinned();
 // Writes the pin list, one entry per line, replacing the file atomically.
 void savePinned(const PinnedList& pins);
 
+// Where the recently launched apps live, in the same config directory as the
+// pins. Empty when neither XDG_CONFIG_HOME nor HOME names an absolute path.
+std::string recentsPath();
+
+// Reads the recent-app list back, newest first. Missing or unreadable = empty,
+// never an error: a first run simply has nothing to show.
+PinnedList loadRecents();
+
+// Writes the recent-app list, newest first, replacing the file atomically.
+void saveRecents(const PinnedList& recents);
+
 // The thickness the user dragged the taskbar to, from the same config directory
 // as the pins. A missing, unreadable or nonsense value falls back to the Windows
 // 11 default rather than failing: a bad setting must never stop the WM starting.

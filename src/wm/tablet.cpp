@@ -1409,6 +1409,7 @@ void Manager::tabletGoHome() {
 
 void Manager::openTabletEntry(const TabletEntry& e) {
     if (!e.exec.empty()) {
+        noteRecent(e.name, e.exec, e.icon, e.wmClass);
         launchApp(e.exec);
     } else if (!e.path.empty()) {
         std::string quoted = "'";

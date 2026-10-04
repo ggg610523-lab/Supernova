@@ -322,6 +322,7 @@ int Manager::run(const Options& options) {
     updateWorkArea();
     apps = scanApps();
     pinned = loadPinned();
+    recents = loadRecents();
     // The desktop shows the session's real Desktop directory; layout is fixed, so
     // it is computed once here and reused by every frame and hit test.
     desktopItems = scanDesktop();
@@ -843,6 +844,10 @@ void Manager::tickFluidMotion(double dtMs) {
         contextWidget = -1;
         contextDesktop = -1;
         contextHover = -1;
+        // The ring menu's rows go the same way, and its mode flag with them, so
+        // the next flyout starts from a clean slate.
+        contextRing = false;
+        contextRecents.clear();
     }
 
     // The snap preview catches the eye as it arms, then fades away when released.
@@ -1072,16 +1077,7 @@ void Manager::updateHoverStates(int px, int py) {
     if (contextOpen) {
         // Context-menu item hover, so the row under the pointer lights up (and,
         // with the eased ctxHover, fades back out as the pointer leaves it).
-        int newCtx = -1;
-        const int itemH = 32, pad = 6;
-        for (size_t i = 0; i < contextItems.size(); ++i) {
-            const Rect item{contextRect.x + pad, contextRect.y + pad + int(i) * itemH,
-                            contextRect.w - 2 * pad, itemH};
-            if (item.contains(px, py)) {
-                newCtx = int(i);
-                break;
-            }
-        }
+        const int newCtx = contextRowAt(px, py);
         if (newCtx != contextHover) {
             contextHover = newCtx;
             changed = true;
@@ -1824,7 +1820,29 @@ void Manager::activatePinned(int index) {
         activateTaskbarItem(c);
         return;
     }
+    noteRecent(app.name, app.exec, app.icon, app.wmClass);
     launchApp(app.exec);
+}
+
+// One launch remembered. The newest first and deduplicated, so re-launching an
+// app moves it to the top rather than adding a second row. The write is
+// best-effort: a read-only config directory just makes the list session-only.
+void Manager::noteRecent(const std::string& name, const std::string& exec,
+                         const std::string& icon, const std::string& wmClass) {
+    if (exec.empty()) return;
+    recents.erase(std::remove_if(recents.begin(), recents.end(),
+                                 [&](const AppEntry& r) { return r.exec == exec; }),
+                  recents.end());
+    AppEntry e;
+    e.name = name.empty() ? exec : name;
+    e.exec = exec;
+    e.icon = icon;
+    e.wmClass = wmClass;
+    e.searchKey = e.name;
+    for (char& c : e.searchKey) c = char(std::tolower(static_cast<unsigned char>(c)));
+    recents.insert(recents.begin(), std::move(e));
+    if (recents.size() > size_t(metrics::kRingMaxRecents)) recents.resize(metrics::kRingMaxRecents);
+    saveRecents(recents);
 }
 
 void Manager::activateTaskItem(int index) {
@@ -1872,6 +1890,61 @@ void Manager::openPinMenu(int appIndex, int pinIndex, int x, int y) {
     grabPointer();
     XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
     dirty = true;
+}
+
+// The circle button's flyout. It reuses the context flyout wholesale -- the same
+// open/close animation, pointer grab, hover wipe and Escape/outside dismiss -- but
+// rebuilds the contents as a greeting plus the recent apps, so pressing the ring
+// is a quick way back to whatever was opened last.
+void Manager::openRingMenu() {
+    if (overlayOpen()) closeOverlays();
+    contextClient = nullptr;
+    contextWidget = -1;
+    contextDesktop = -1;
+    contextPin = -1;
+    contextApp = -1;
+    contextRing = true;
+    contextRecents = recents;
+    contextItems.clear();
+    for (const AppEntry& e : contextRecents) contextItems.push_back(e.name);
+    // An empty list still shows the greeting; the placeholder row is inert.
+    if (contextItems.empty()) contextItems.push_back("No recent apps yet");
+
+    const int pad = 6;
+    const int width = std::min(300, screenW - 16);
+    // Header, then the rows, then a single bottom pad -- matching the panel
+    // drawContextMenu lays out, so a row's hit box sits exactly on the row.
+    const int height =
+        metrics::kRingHeaderH + int(contextItems.size()) * metrics::kRingRowH + pad;
+    // Anchored above the bar at the ring's left edge, so it grows out of the
+    // button that opened it and never covers the taskbar.
+    const int bottom = screenH - metrics::taskbarH;
+    int mx = std::max(4, circleButtonRect.x);
+    int my = bottom - height - 10;
+    if (my < 4) my = 4;
+    if (mx + width > screenW) mx = screenW - width - 4;
+    contextRect = Rect{mx, my, width, height};
+    contextOpen = true;
+    contextHover = -1;
+    startOpen = false;
+    grabPointer();
+    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    dirty = true;
+}
+
+// The row under a point, with the panel padding -- and, for the ring menu, the
+// greeting header -- taken off first, or -1. One definition, so the hover wipe and
+// the press handler can never disagree about which row is which.
+int Manager::contextRowAt(int x, int y) const {
+    if (!contextOpen || !contextRect.contains(x, y)) return -1;
+    const int rowH = contextRing ? metrics::kRingRowH : 32;
+    // The ring menu's header owns the top of the panel; an ordinary flyout has
+    // only its padding before the first row. Kept in step with drawContextMenu.
+    const int top = contextRect.y + (contextRing ? metrics::kRingHeaderH : 6);
+    if (y < top) return -1;
+    const int idx = (y - top) / rowH;
+    if (idx < 0 || idx >= int(contextItems.size())) return -1;
+    return idx;
 }
 
 // ------------------------------------------------------------------ reordering

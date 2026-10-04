@@ -786,7 +786,9 @@ void Manager::onKeyPress(XKeyEvent& ev) {
         }
         if (sym == XK_Return || sym == XK_KP_Enter) {
             if (!appFiltered.empty() && appFiltered.front() < apps.size()) {
-                launchApp(apps[appFiltered.front()].exec);
+                const AppEntry& a = apps[appFiltered.front()];
+                noteRecent(a.name, a.exec, a.icon, a.wmClass);
+                launchApp(a.exec);
             }
             closeOverlays();
             return;
@@ -871,6 +873,17 @@ void Manager::onKeyPress(XKeyEvent& ev) {
 }
 
 void Manager::applyContextAction(int index) {
+    // The ring menu: each row is one of the recent apps, so a press launches it
+    // (and bumps it back to the top of the list). The empty-list placeholder has
+    // no app behind it and does nothing.
+    if (contextRing) {
+        if (index >= 0 && index < int(contextRecents.size())) {
+            const AppEntry app = contextRecents[size_t(index)];
+            noteRecent(app.name, app.exec, app.icon, app.wmClass);
+            launchApp(app.exec);
+        }
+        return;
+    }
     // The pin menu, opened either on a pinned taskbar button or on a Launchpad
     // tile: a single item that pins or unpins what was clicked.
     if (contextPin >= 0 || contextApp >= 0) {
@@ -1033,6 +1046,11 @@ void Manager::handleTaskbarPress(int x, int y, unsigned button) {
     // A pin is being carried, so the button that started it is still down: ignore
     // anything else that lands on the bar until that one is let go.
     if (pinDrag >= 0) return;
+    if (circleButtonRect.w > 0 && circleButtonRect.contains(x, y)) {
+        if (contextOpen && contextRing) closeOverlays();
+        else openRingMenu();
+        return;
+    }
     if (startButtonRect.contains(x, y)) {
         if (startOpen) closeOverlays();
         else openStartMenu();
@@ -1246,11 +1264,7 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
         // Dismiss first, then act. An action that opens a dialog of its own -- the
         // folder rename field, the delete confirmation -- would otherwise be torn
         // down by the menu that launched it closing.
-        int idx = -1;
-        if (button == Button1 && contextRect.contains(x, y)) {
-            idx = (y - contextRect.y - 6) / 32;
-            if (idx < 0 || idx >= int(contextItems.size())) idx = -1;
-        }
+        const int idx = (button == Button1) ? contextRowAt(x, y) : -1;
         closeOverlays();
         if (idx >= 0) applyContextAction(idx);
         return;
@@ -1277,6 +1291,8 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
                     const size_t ai = appFiltered[gi];
                     if (button == Button3) openPinMenu(int(ai), -1, x, y);
                     else {
+                        noteRecent(apps[ai].name, apps[ai].exec, apps[ai].icon,
+                                   apps[ai].wmClass);
                         launchApp(apps[ai].exec);
                         closeOverlays();
                     }
@@ -1502,6 +1518,7 @@ void Manager::openDesktopItem(const DesktopItem& item, const Rect& fromIcon) {
     // the double-click feels answered before the process has even been forked.
     beginLaunchAnim(item, fromIcon);
     if (!item.exec.empty()) {
+        noteRecent(item.name, item.exec, item.icon, std::string());
         launchApp(item.exec);
         return;
     }

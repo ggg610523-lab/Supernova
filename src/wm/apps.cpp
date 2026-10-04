@@ -730,4 +730,54 @@ void savePinned(const PinnedList& pins) {
     log("saved %zu taskbar pin(s) to %s", pins.size(), path.c_str());
 }
 
+std::string recentsPath() { return configFile("recents"); }
+
+std::vector<AppEntry> loadRecents() {
+    PinnedList recents;
+    const std::string path = recentsPath();
+    if (path.empty()) return recents;
+    std::ifstream in(path);
+    if (!in) return recents;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::vector<std::string> f = splitTabs(line);
+        // A recent record is the launcher snapshot, so name and exec are the
+        // only two fields it cannot work without.
+        if (f.size() < 2 || f[0].empty() || f[1].empty()) continue;
+        AppEntry e;
+        e.name = f[0];
+        e.exec = f[1];
+        if (f.size() > 2) e.icon = f[2];
+        if (f.size() > 3) e.wmClass = f[3];
+        e.searchKey = lower(e.name);
+        // The same launcher twice: a hand-edited file, or a write from an older
+        // WM. First line wins, exactly as the pin file does.
+        const bool dup = std::any_of(recents.begin(), recents.end(), [&](const AppEntry& r) {
+            return r.exec == e.exec;
+        });
+        if (dup) continue;
+        recents.push_back(e);
+    }
+    return recents;
+}
+
+void saveRecents(const PinnedList& recents) {
+    const std::string path = recentsPath();
+    if (path.empty()) {
+        log("cannot save recent apps: no XDG_CONFIG_HOME or HOME");
+        return;
+    }
+    std::ostringstream text;
+    for (const AppEntry& e : recents) {
+        text << pinField(e.name) << '\t' << pinField(e.exec) << '\t' << pinField(e.icon) << '\t'
+             << pinField(e.wmClass) << '\n';
+    }
+    if (!writeFileAtomicImpl(path, text.str())) {
+        log("cannot write recent apps to %s", path.c_str());
+        return;
+    }
+    log("saved %zu recent app(s) to %s", recents.size(), path.c_str());
+}
+
 }  // namespace wm

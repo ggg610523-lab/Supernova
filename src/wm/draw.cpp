@@ -1315,26 +1315,85 @@ void Manager::drawStartMenu() {
 }
 
 void Manager::drawContextMenu() {
-    if (contextItems.empty()) return;
+    // A ring menu with no rows at all (no recents) still shows its greeting.
+    if (contextItems.empty() && !contextRing) return;
     const double eased = fluentEase(contextAnim);
     if (eased <= 0.001) return;
     const float a = float(eased);
-    const int itemH = 32;
+    const int itemH = contextRing ? metrics::kRingRowH : 32;
     const int pad = 6;
     // The flyout drops the last few pixels into place as it fades in, the way
     // Windows 11 menus do, and reverses cleanly when it is dismissed.
     const int dy = int(std::lround(-8.0 * (1.0 - eased)));
     const Rect panel{contextRect.x, contextRect.y + dy, contextRect.w,
-                     int(contextItems.size()) * itemH + 2 * pad};
-    comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kFlyoutTint, 0.90f,
-                     theme::kShellBorder, a);
+                     int(contextItems.size()) * itemH + 2 * pad +
+                         (contextRing ? metrics::kRingHeaderH - pad : 0)};
+    if (contextRing) {
+        // The ring menu wears the taskbar's frosted surface -- the same tint,
+        // tint amount, saturate() and hairline -- so the two read as one
+        // material. A soft shadow lifts it off the desktop.
+        for (int i = 8; i >= 1; --i) {
+            const float t = float(i) / 8.0f;
+            comp.drawRect(panel.inflated(i), float(metrics::kFlyoutRadius) + float(i),
+                          theme::kShadow, 0.22f * a * (1.0f - t) * (1.0f - t));
+        }
+        comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kTaskbarTint,
+                         theme::kTaskbarTintOpacity, theme::kShellLine, a,
+                         theme::kTaskbarSaturate);
+    } else {
+        comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kFlyoutTint, 0.90f,
+                         theme::kShellBorder, a);
+    }
+
+    int top = panel.y + pad;
+    if (contextRing) {
+        // The greeting reads the clock at draw time, so it is right for however
+        // long the shell has been up, not just for the moment it started. Medium,
+        // not Bold: the bundled font has no real bold face and the synthesized
+        // one smears at small sizes, which is what made this text look blurred.
+        time_t now = time(nullptr);
+        struct tm lt {};
+        localtime_r(&now, &lt);
+        const int hour = lt.tm_hour;
+        const char* greet = hour < 5    ? "Good night"
+                            : hour < 12 ? "Good morning"
+                            : hour < 17 ? "Good afternoon"
+                            : hour < 22 ? "Good evening"
+                                        : "Good night";
+        drawTextAt(ellipsize(text, greet, 18, panel.w - 32), 18, Weight::Medium, theme::kText,
+                   panel.x + 16, panel.y + 14);
+        char dateStr[48] = {0};
+        strftime(dateStr, sizeof dateStr, "%A, %d %B", &lt);
+        drawTextAt(ellipsize(text, dateStr, 12, panel.w - 32), 12, Weight::Regular,
+                   theme::kTextMuted, panel.x + 16, panel.y + 44);
+        // A hairline separates the greeting from the list, so the rows read as a
+        // separate group rather than as part of the header.
+        comp.drawRect(Rect{panel.x + 10, panel.y + metrics::kRingHeaderH - 1, panel.w - 20, 1},
+                      0.f, theme::kShellBorder, a * 0.8f);
+        top = panel.y + metrics::kRingHeaderH;
+    }
+
     for (size_t i = 0; i < contextItems.size(); ++i) {
-        const Rect item{panel.x + pad, panel.y + pad + int(i) * itemH, panel.w - 2 * pad, itemH};
+        const Rect item{panel.x + pad, top + int(i) * itemH, panel.w - 2 * pad, itemH};
         const double hv = i < ctxHover.size() ? ctxHover[i] : 0.0;
         if (hv > 0.001) comp.drawRect(item, 4.f, theme::kItemHover, float(hv) * a);
-        const Color col = mixColor(theme::kTextIdle, theme::kText, float(hv));
-        drawTextAt(contextItems[i], 13, Weight::Regular, col, item.x + 14,
-                   item.y + (item.h - 18) / 2);
+        if (contextRing && i < contextRecents.size()) {
+            // Recent apps carry their icon, so the row says which app it is at a
+            // glance the way the taskbar does.
+            const int side = std::max(16, itemH - 12);
+            const Rect ibox{item.x + 8, item.y + (item.h - side) / 2, side, side};
+            const AppEntry& app = contextRecents[i];
+            if (!drawAppIcon(ibox, app.icon, app.wmClass, float(side) * 0.24f, float(a)))
+                drawAppTile(ibox, app.name, float(side) * 0.24f, tileTint(app.name), false);
+            const std::string label =
+                ellipsize(text, contextItems[i], 13, item.w - side - 30);
+            drawTextAt(label, 13, Weight::Regular, theme::kText, ibox.right() + 10,
+                       item.y + (item.h - 18) / 2);
+        } else {
+            const Color col = mixColor(theme::kTextIdle, theme::kText, float(hv));
+            drawTextAt(contextItems[i], 13, Weight::Regular, col, item.x + 14,
+                       item.y + (item.h - 18) / 2);
+        }
     }
 }
 
