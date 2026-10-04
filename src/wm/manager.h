@@ -670,10 +670,18 @@ private:
     // pointer grab, hover wipe and dismiss rules, but with a greeting header
     // over a list of recent apps instead of action strings.
     bool contextRing = false;
-    std::vector<AppEntry> contextRecents;  // the app each visible row stands for
-    // The row under a point, header and padding accounted for, or -1. Shared by
-    // the hover wipe and the press handler so they can never disagree.
+    std::vector<AppEntry> contextRecents;  // the app each grid cell stands for
+    std::vector<Rect> ringRecentRects;     // one square per recent app
+    std::vector<Rect> ringPowerRects;      // one per power action, in a row below
+    int ringGridH = 0;                     // height of the recent grid, for draw
+    // The row/cell under a point, or -1. Shared by the hover wipe and the press
+    // handler so the two can never disagree about what is where.
     int contextRowAt(int x, int y) const;
+    // Lays the panel and its cells out from the current recents; called once when
+    // the menu opens, so the rects stay in step with what drawContextMenu paints.
+    void layoutRingMenu();
+    // Runs one power action (index into the fixed kRingPower table).
+    void runRingPower(int index);
 
     struct TaskItem {
         Rect rect;

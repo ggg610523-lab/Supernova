@@ -408,11 +408,17 @@ constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
 constexpr int kLaunchSwipeSlop = 22;
 
 // --- ring menu (the circle button's flyout) -------------------------------
-// A greeting header over a list of recently launched apps. The menu reuses the
-// context flyout's plumbing, so only its two row metrics live here.
-constexpr int kRingHeaderH = 72;  // greeting + date, above the rows
-constexpr int kRingRowH = 36;     // one recent app: icon + name
+// A greeting header over a grid of recent apps (icons only) and a row of power
+// actions. The menu reuses the context flyout's plumbing; these are its metrics.
+constexpr int kRingHeaderH = 72;   // greeting + date, above everything else
+constexpr int kRingCols = 4;       // recents and power buttons share the columns
+constexpr int kRingCell = 78;      // square cell of the recent-app grid
+constexpr int kRingIcon = 48;      // icon edge inside a recent cell
+constexpr int kRingPowerH = 74;    // power button: a glyph over a short label
 constexpr int kRingMaxRecents = 8;
+// The power actions, in the order they are drawn and dispatched. Their labels
+// and Reversal glyph names live beside runRingPower() in manager.cpp.
+constexpr int kRingPowerCount = 4;
 
 // --- tablet / mobile mode (iOS home screen) -------------------------------
 // The status bar is 44pt on an iPhone X (52 here to leave room for the Dynamic

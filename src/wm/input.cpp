@@ -877,10 +877,15 @@ void Manager::applyContextAction(int index) {
     // (and bumps it back to the top of the list). The empty-list placeholder has
     // no app behind it and does nothing.
     if (contextRing) {
-        if (index >= 0 && index < int(contextRecents.size())) {
+        const int n = int(contextRecents.size());
+        if (index >= 0 && index < n) {
             const AppEntry app = contextRecents[size_t(index)];
             noteRecent(app.name, app.exec, app.icon, app.wmClass);
             launchApp(app.exec);
+        } else if (index >= n && index < n + int(ringPowerRects.size())) {
+            // The cells after the grid are the power actions; runRingPower counts
+            // from the start of that row.
+            runRingPower(index - n);
         }
         return;
     }

@@ -1320,14 +1320,17 @@ void Manager::drawContextMenu() {
     const double eased = fluentEase(contextAnim);
     if (eased <= 0.001) return;
     const float a = float(eased);
-    const int itemH = contextRing ? metrics::kRingRowH : 32;
-    const int pad = 6;
+    const int itemH = 32;
+    const int pad = contextRing ? 8 : 6;
     // The flyout drops the last few pixels into place as it fades in, the way
     // Windows 11 menus do, and reverses cleanly when it is dismissed.
     const int dy = int(std::lround(-8.0 * (1.0 - eased)));
+    // The ring menu's height is already settled by layoutRingMenu (it depends on
+    // how many rows the recent grid needs), so the panel reads it back rather
+    // than recomputing it from the item list.
     const Rect panel{contextRect.x, contextRect.y + dy, contextRect.w,
-                     int(contextItems.size()) * itemH + 2 * pad +
-                         (contextRing ? metrics::kRingHeaderH - pad : 0)};
+                     contextRing ? contextRect.h
+                                 : int(contextItems.size()) * itemH + 2 * pad};
     if (contextRing) {
         // The ring menu wears the taskbar's frosted surface -- the same tint,
         // tint amount, saturate() and hairline -- so the two read as one
@@ -1373,27 +1376,70 @@ void Manager::drawContextMenu() {
         top = panel.y + metrics::kRingHeaderH;
     }
 
+    if (contextRing) {
+        // Recent apps are a grid of bare icons -- the same squares the taskbar and
+        // Launchpad use -- rather than a list of names, so the menu is scanned at a
+        // glance. Every cell was placed by layoutRingMenu. When there are no
+        // recents yet the empty grid gets its own short note.
+        if (contextRecents.empty()) {
+            drawTextCentered("No recent apps", 13, Weight::Regular, theme::kTextDim,
+                             Rect{panel.x, top, panel.w, ringGridH});
+        }
+        for (size_t i = 0; i < contextRecents.size() && i < ringRecentRects.size(); ++i) {
+            const Rect cell{ringRecentRects[i].x, ringRecentRects[i].y + dy,
+                            ringRecentRects[i].w, ringRecentRects[i].h};
+            const double hv = i < ctxHover.size() ? ctxHover[i] : 0.0;
+            if (hv > 0.001)
+                comp.drawRect(cell.inflated(-10), 12.f, theme::kItemHover, float(hv) * a);
+            const AppEntry& app = contextRecents[i];
+            const int icon = metrics::kRingIcon;
+            const Rect ibox{cell.x + (cell.w - icon) / 2, cell.y + (cell.h - icon) / 2,
+                            icon, icon};
+            if (!drawAppIcon(ibox, app.icon, app.wmClass, float(icon) * 0.22f, float(a)))
+                drawAppTile(ibox, app.name, float(icon) * 0.22f, tileTint(app.name), false);
+        }
+
+        // A hairline separates the grid from the power row, so the two read as
+        // distinct groups the way the greeting does from the grid.
+        if (!ringPowerRects.empty()) {
+            comp.drawRect(Rect{panel.x + 10, ringPowerRects[0].y - 5 + dy, panel.w - 20, 1},
+                          0.f, theme::kShellBorder, a * 0.8f);
+        }
+
+        // The power row, in the order runRingPower() switches on. The Reversal
+        // glyphs are the Control Centre's own set, so the two surfaces agree about
+        // what "sleep" and "restart" look like.
+        static const char* const kPowerGlyph[metrics::kRingPowerCount] = {
+            "system-suspend", "system-log-out", "system-reboot", "system-shutdown"};
+        static const char* const kPowerLabel[metrics::kRingPowerCount] = {
+            "Sleep", "Log out", "Restart", "Power"};
+        for (size_t i = 0; i < ringPowerRects.size() && i < metrics::kRingPowerCount; ++i) {
+            const Rect cell{ringPowerRects[i].x, ringPowerRects[i].y + dy,
+                            ringPowerRects[i].w, ringPowerRects[i].h};
+            const size_t idx = contextRecents.size() + i;
+            const double hv = idx < ctxHover.size() ? ctxHover[idx] : 0.0;
+            if (hv > 0.001)
+                comp.drawRect(cell.inflated(-4), 8.f, theme::kItemHover, float(hv) * a);
+            const int glyph = std::max(16, metrics::kRingIcon - 22);
+            const Rect ibox{cell.x + (cell.w - glyph) / 2, cell.y + 9, glyph, glyph};
+            if (!drawAppIcon(ibox, kPowerGlyph[i], kPowerGlyph[i], float(glyph) * 0.22f,
+                             float(a), IconTheme::Shell))
+                drawAppTile(ibox, kPowerLabel[i], float(glyph) * 0.22f,
+                            tileTint(kPowerLabel[i]), false);
+            drawTextCentered(kPowerLabel[i], 12, Weight::Regular,
+                             mixColor(theme::kTextMuted, theme::kText, float(hv)),
+                             Rect{cell.x, ibox.bottom() + 3, cell.w, 15});
+        }
+        return;
+    }
+
     for (size_t i = 0; i < contextItems.size(); ++i) {
         const Rect item{panel.x + pad, top + int(i) * itemH, panel.w - 2 * pad, itemH};
         const double hv = i < ctxHover.size() ? ctxHover[i] : 0.0;
         if (hv > 0.001) comp.drawRect(item, 4.f, theme::kItemHover, float(hv) * a);
-        if (contextRing && i < contextRecents.size()) {
-            // Recent apps carry their icon, so the row says which app it is at a
-            // glance the way the taskbar does.
-            const int side = std::max(16, itemH - 12);
-            const Rect ibox{item.x + 8, item.y + (item.h - side) / 2, side, side};
-            const AppEntry& app = contextRecents[i];
-            if (!drawAppIcon(ibox, app.icon, app.wmClass, float(side) * 0.24f, float(a)))
-                drawAppTile(ibox, app.name, float(side) * 0.24f, tileTint(app.name), false);
-            const std::string label =
-                ellipsize(text, contextItems[i], 13, item.w - side - 30);
-            drawTextAt(label, 13, Weight::Regular, theme::kText, ibox.right() + 10,
-                       item.y + (item.h - 18) / 2);
-        } else {
-            const Color col = mixColor(theme::kTextIdle, theme::kText, float(hv));
-            drawTextAt(contextItems[i], 13, Weight::Regular, col, item.x + 14,
-                       item.y + (item.h - 18) / 2);
-        }
+        const Color col = mixColor(theme::kTextIdle, theme::kText, float(hv));
+        drawTextAt(contextItems[i], 13, Weight::Regular, col, item.x + 14,
+                   item.y + (item.h - 18) / 2);
     }
 }
 

@@ -743,8 +743,12 @@ void Manager::tickFluidMotion(double dtMs) {
         }
     }
 
-    // Context-menu items (the panel itself eases open/closed just below).
-    fade(ctxHover, contextItems.size(), contextHover);
+    // Context-menu items (the panel itself eases open/closed just below). The
+    // ring menu hovers its grid cells and power buttons in one index space.
+    const size_t hoverCount = contextRing
+                                  ? contextRecents.size() + ringPowerRects.size()
+                                  : contextItems.size();
+    fade(ctxHover, hoverCount, contextHover);
 
     // Desktop icons: the hover and the selection share one fade, so sliding the
     // selection from one icon to the next cross-fades instead of blinking.
@@ -838,16 +842,19 @@ void Manager::tickFluidMotion(double dtMs) {
     // The dropdown panel opens and closes with a short fade + slide. Its stale
     // contents are dropped only once the close animation has fully played out.
     if (approach(contextAnim, contextOpen ? 1.0 : 0.0, dtMs, kFlyoutMs)) dirty = true;
-    if (!contextOpen && contextAnim <= 0.0 && !contextItems.empty()) {
+    if (!contextOpen && contextAnim <= 0.0 && (!contextItems.empty() || contextRing)) {
         contextItems.clear();
         contextClient = nullptr;
         contextWidget = -1;
         contextDesktop = -1;
         contextHover = -1;
-        // The ring menu's rows go the same way, and its mode flag with them, so
+        // The ring menu's cells go the same way, and its mode flag with them, so
         // the next flyout starts from a clean slate.
         contextRing = false;
         contextRecents.clear();
+        ringRecentRects.clear();
+        ringPowerRects.clear();
+        ringGridH = 0;
     }
 
     // The snap preview catches the eye as it arms, then fades away when released.
@@ -1894,8 +1901,9 @@ void Manager::openPinMenu(int appIndex, int pinIndex, int x, int y) {
 
 // The circle button's flyout. It reuses the context flyout wholesale -- the same
 // open/close animation, pointer grab, hover wipe and Escape/outside dismiss -- but
-// rebuilds the contents as a greeting plus the recent apps, so pressing the ring
-// is a quick way back to whatever was opened last.
+// rebuilds the contents as a greeting, a grid of the recent apps and a row of
+// power actions, so pressing the ring is a quick way back to whatever was opened
+// last and a way out of the session.
 void Manager::openRingMenu() {
     if (overlayOpen()) closeOverlays();
     contextClient = nullptr;
@@ -1905,25 +1913,9 @@ void Manager::openRingMenu() {
     contextApp = -1;
     contextRing = true;
     contextRecents = recents;
+    // The ring drives its own rows/cells, so the plain item list stays empty.
     contextItems.clear();
-    for (const AppEntry& e : contextRecents) contextItems.push_back(e.name);
-    // An empty list still shows the greeting; the placeholder row is inert.
-    if (contextItems.empty()) contextItems.push_back("No recent apps yet");
-
-    const int pad = 6;
-    const int width = std::min(300, screenW - 16);
-    // Header, then the rows, then a single bottom pad -- matching the panel
-    // drawContextMenu lays out, so a row's hit box sits exactly on the row.
-    const int height =
-        metrics::kRingHeaderH + int(contextItems.size()) * metrics::kRingRowH + pad;
-    // Anchored above the bar at the ring's left edge, so it grows out of the
-    // button that opened it and never covers the taskbar.
-    const int bottom = screenH - metrics::taskbarH;
-    int mx = std::max(4, circleButtonRect.x);
-    int my = bottom - height - 10;
-    if (my < 4) my = 4;
-    if (mx + width > screenW) mx = screenW - width - 4;
-    contextRect = Rect{mx, my, width, height};
+    layoutRingMenu();
     contextOpen = true;
     contextHover = -1;
     startOpen = false;
@@ -1932,19 +1924,80 @@ void Manager::openRingMenu() {
     dirty = true;
 }
 
-// The row under a point, with the panel padding -- and, for the ring menu, the
-// greeting header -- taken off first, or -1. One definition, so the hover wipe and
-// the press handler can never disagree about which row is which.
+// Places the panel and every cell in it from the current recents, once, when the
+// menu opens. drawContextMenu and contextRowAt both read these rects, so what is
+// painted and what is clickable can never drift apart.
+void Manager::layoutRingMenu() {
+    const int pad = 8;
+    const int cols = metrics::kRingCols;
+    const int cell = metrics::kRingCell;
+    const int width = cols * cell + 2 * pad;
+
+    const int n = int(contextRecents.size());
+    const int rows = (n + cols - 1) / cols;              // 0 when there are none
+    // With no recents the grid keeps one cell's worth of height for its message,
+    // so the panel does not collapse to a header-only strip.
+    ringGridH = (rows == 0 ? 1 : rows) * cell;
+    const int dividerH = 9;                              // hairline + breathing room
+    const int height =
+        metrics::kRingHeaderH + ringGridH + dividerH + metrics::kRingPowerH + pad;
+
+    // Anchored above the bar at the ring's left edge, so it grows out of the
+    // button that opened it and never covers the taskbar.
+    const int bottom = screenH - metrics::taskbarH;
+    int mx = std::max(6, circleButtonRect.x);
+    int my = bottom - height - 10;
+    if (my < 6) my = 6;
+    if (mx + width > screenW) mx = screenW - width - 6;
+    contextRect = Rect{mx, my, width, height};
+
+    const int gx = mx + pad;
+    const int gy = my + metrics::kRingHeaderH;
+    ringRecentRects.clear();
+    for (int i = 0; i < n; ++i) {
+        const int c = i % cols, r = i / cols;
+        ringRecentRects.push_back(Rect{gx + c * cell, gy + r * cell, cell, cell});
+    }
+
+    const int py = gy + ringGridH + dividerH;
+    const int pcw = (width - 2 * pad) / metrics::kRingPowerCount;
+    ringPowerRects.clear();
+    for (int i = 0; i < metrics::kRingPowerCount; ++i) {
+        ringPowerRects.push_back(Rect{gx + i * pcw, py, pcw, metrics::kRingPowerH});
+    }
+}
+
+// The index of the cell under a point: 0..recents-1 for the app grid, then the
+// power buttons, or -1. An ordinary flyout keeps its single-column rows instead.
+// One definition, so the hover wipe and the press handler can never disagree.
 int Manager::contextRowAt(int x, int y) const {
     if (!contextOpen || !contextRect.contains(x, y)) return -1;
-    const int rowH = contextRing ? metrics::kRingRowH : 32;
-    // The ring menu's header owns the top of the panel; an ordinary flyout has
-    // only its padding before the first row. Kept in step with drawContextMenu.
-    const int top = contextRect.y + (contextRing ? metrics::kRingHeaderH : 6);
+    if (contextRing) {
+        for (size_t i = 0; i < ringRecentRects.size(); ++i) {
+            if (ringRecentRects[i].contains(x, y)) return int(i);
+        }
+        for (size_t i = 0; i < ringPowerRects.size(); ++i) {
+            if (ringPowerRects[i].contains(x, y)) return int(ringRecentRects.size() + i);
+        }
+        return -1;
+    }
+    const int top = contextRect.y + 6;
     if (y < top) return -1;
-    const int idx = (y - top) / rowH;
+    const int idx = (y - top) / 32;
     if (idx < 0 || idx >= int(contextItems.size())) return -1;
     return idx;
+}
+
+// The four power actions, in the order layoutRingMenu lays them out and
+// drawContextMenu paints them. `$USER` is expanded by the shell launchApp runs.
+void Manager::runRingPower(int index) {
+    switch (index) {
+        case 0: launchApp("loginctl suspend"); break;
+        case 1: launchApp("loginctl terminate-user \"$USER\""); break;
+        case 2: launchApp("loginctl reboot"); break;
+        case 3: launchApp("loginctl poweroff"); break;
+        default: break;
+    }
 }
 
 // ------------------------------------------------------------------ reordering
