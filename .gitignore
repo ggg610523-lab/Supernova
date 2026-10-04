@@ -4,6 +4,8 @@ cmake-build-*/
 
 # generated asset bookkeeping
 assets/.stamp
+# Hatter PNG renders written by scripts/fetch-assets.sh (the app icon theme)
+assets/icons-hatter/
 # wallpaper transcoded from assets/wallpaper/*.jpg by scripts/fetch-assets.sh
 assets/wallpaper/wallpaper.png
 

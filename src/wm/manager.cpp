@@ -302,7 +302,10 @@ int Manager::run(const Options& options) {
         return 1;
     }
 
-    icons.init(assetDir + "/icons");
+    // Hatter (colourful app icons) is the default theme; assets/icons holds the
+    // shell's own glyphs and the Control Centre look, assets/icons-hatter the
+    // rasterised Hatter fallback for builds without librsvg.
+    icons.init(assetDir + "/icons", assetDir + "/icons-hatter");
     text.init(assetDir + "/fonts");
 
     std::string keyError;
@@ -775,6 +778,22 @@ void Manager::tickFluidMotion(double dtMs) {
         }
     }
 
+    // The Launchpad grid settling onto the page a swipe committed to. As with the
+    // tablet home screen the offset is in pages, so the page the finger dropped
+    // halfway keeps sliding the rest of the way instead of snapping. Programmatic
+    // page changes set launchPageOffset to startPage themselves, so this only runs
+    // for the tail of a swipe.
+    if (startOpen && !launchSwipe) {
+        const double goal = double(startPage);
+        if (std::abs(launchPageOffset - goal) > 0.001) {
+            launchPageOffset +=
+                (goal - launchPageOffset) * std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+            dirty = true;
+        } else {
+            launchPageOffset = goal;
+        }
+    }
+
     // The quick actions sheet is modal too, so its rows light up under the pointer
     // even where a widget card is drawn behind the panel.
     if (tabletMenu) {
@@ -1011,11 +1030,18 @@ void Manager::updateHoverStates(int px, int py) {
     }
 
     if (startOpen) {
+        // While a page is being turned the tiles are sliding, so the rects
+        // appRects holds (the page startPage names) are not where anything is
+        // drawn: light nothing until the field has settled.
+        const bool turning =
+            launchSwipe || std::abs(launchPageOffset - double(startPage)) > 0.001;
         int newApp = -1;
-        for (size_t i = 0; i < appRects.size(); ++i) {
-            if (appRects[i].contains(px, py)) {
-                newApp = int(i);
-                break;
+        if (!turning) {
+            for (size_t i = 0; i < appRects.size(); ++i) {
+                if (appRects[i].contains(px, py)) {
+                    newApp = int(i);
+                    break;
+                }
             }
         }
         if (newApp != hoverApp) {
@@ -1023,7 +1049,7 @@ void Manager::updateHoverStates(int px, int py) {
             changed = true;
         }
         int newDot = -1;
-        if (newApp < 0) {
+        if (newApp < 0 && !turning) {
             for (size_t p = 0; p < appDotRects.size(); ++p) {
                 if (appDotRects[p].contains(px, py)) {
                     newDot = int(p);
@@ -1181,6 +1207,9 @@ void Manager::closeOverlays() {
     hoverApp = -1;
     startHoverDot = -1;
     startPage = 0;
+    launchPageOffset = 0.0;
+    launchSwipe = false;
+    launchPressArmed = false;
     // The menu's items are kept until its close animation finishes (tickFluid
     // Motion drops them); clearing the hover lets the highlight fade out with it.
     contextHover = -1;
@@ -2098,6 +2127,9 @@ void Manager::openStartMenu() {
     hoverApp = -1;
     startHoverDot = -1;
     startPage = 0;
+    launchPageOffset = 0.0;
+    launchSwipe = false;
+    launchPressArmed = false;
     layoutStartMenu();
     grabPointer();
     XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);

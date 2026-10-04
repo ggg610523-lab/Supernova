@@ -169,6 +169,23 @@ std::string reversalRoot() {
     return base + "/win11wm/reversal";
 }
 
+// The Hatter checkout scripts/fetch-assets.sh keeps in the cache. The theme's
+// default edition is the directory literally called "Hatter"; its scalable/apps
+// tree is the colourful rounded-square app icon set the shell shows by default.
+std::string hatterRoot() {
+    std::string base;
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME")) {
+        if (xdg[0] == '/') base = xdg;
+    }
+    if (base.empty()) {
+        if (const char* home = std::getenv("HOME")) {
+            if (home[0] == '/') base = std::string(home) + "/.cache";
+        }
+    }
+    if (base.empty()) return {};
+    return base + "/win11wm/hatter/Hatter";
+}
+
 // Scores a candidate SVG path: a scalable one beats a fixed-size one, the theme's
 // own src/ beats a mirror, and a shorter path (fewer nested copies) wins ties.
 int svgScore(const std::string& p) {
@@ -415,8 +432,9 @@ std::vector<std::string> themesUnder(const std::string& root) {
 
 }  // namespace
 
-void IconStore::init(const std::string& assetDir) {
+void IconStore::init(const std::string& assetDir, const std::string& hatterDir) {
     assetDir_ = assetDir;
+    hatterDir_ = hatterDir;
     themeRoots_.clear();
     if (const char* home = std::getenv("HOME")) {
         themeRoots_.push_back(std::string(home) + "/.icons");
@@ -444,7 +462,7 @@ void IconStore::clear() {
     missing_.clear();
 }
 
-std::string IconStore::resolve(const std::string& name) const {
+std::string IconStore::resolve(const std::string& name, IconTheme theme) const {
     if (name.empty()) return {};
     // Absolute or relative path straight from the desktop entry.
     if (name.find('/') != std::string::npos) {
@@ -459,7 +477,11 @@ std::string IconStore::resolve(const std::string& name) const {
     // handful of extra stat calls per name is not worth optimising away.
     const std::vector<std::string> names = expandedCandidates(name);
     for (const std::string& cand : names) {
-        // 1. Bundled Reversal render (assets/icons/<name>.png).
+        // 1. The rasterised Hatter app icon, when that is the theme wanted.
+        if (theme == IconTheme::Hatter) {
+            if (const std::string f = findFlat(hatterDir_, cand); !f.empty()) return f;
+        }
+        // 2. Bundled shell render (assets/icons/<name>.png).
         if (!assetDir_.empty()) {
             if (const std::string f = findFlat(assetDir_, cand); !f.empty()) return f;
         }
@@ -478,7 +500,7 @@ std::string IconStore::resolve(const std::string& name) const {
     return {};
 }
 
-std::string IconStore::resolveSvg(const std::string& name) {
+std::string IconStore::resolveSvg(const std::string& name, IconTheme theme) {
     if (name.empty()) return {};
     // An absolute path from a .desktop entry: only a real .svg is worth taking,
     // everything else is left to the raster path.
@@ -489,11 +511,21 @@ std::string IconStore::resolveSvg(const std::string& name) {
     }
     const std::vector<std::string> names = expandedCandidates(name);
 
-    // 1. The project's own SVGs (assets/icons/<name>.svg), already coloured.
+    // 1. The Hatter checkout, when that is the theme wanted. It is checked before
+    //    the bundled assets so a stale Reversal render left in assets/icons can
+    //    never shadow the colourful app icon.
+    if (theme == IconTheme::Hatter) {
+        ensureHatterIndex();
+        for (const std::string& cand : names) {
+            auto it = hatterIndex_.find(lower(cand));
+            if (it != hatterIndex_.end()) return it->second;
+        }
+    }
+    // 2. The project's own SVGs (assets/icons/<name>.svg), already coloured.
     for (const std::string& cand : names) {
         if (const std::string f = findFlatSvg(assetDir_, cand); !f.empty()) return f;
     }
-    // 2. The Reversal checkout: the vector source of the bundled PNGs.
+    // 3. The Reversal checkout: the vector source of the bundled PNGs.
     ensureSvgIndex();
     for (const std::string& cand : names) {
         auto it = svgIndex_.find(lower(cand));
@@ -519,27 +551,38 @@ void IconStore::ensureSvgIndex() {
     indexSvgs(root, &svgIndex_);
 }
 
-IconTex IconStore::get(const std::string& nameOrPath, int px) {
+void IconStore::ensureHatterIndex() {
+    if (hatterIndexBuilt_) return;
+    hatterIndexBuilt_ = true;
+    const std::string root = hatterRoot();
+    if (root.empty() || !dirExists(root)) return;
+    indexSvgs(root, &hatterIndex_);
+}
+
+IconTex IconStore::get(const std::string& nameOrPath, int px, IconTheme theme) {
     if (nameOrPath.empty()) return {};
     const std::string base = lower(nameOrPath);
+    // The theme is part of the memo key, so the same name can resolve to a
+    // Hatter glyph in the shell and a Reversal one in the Control Centre.
+    const std::string memo = std::string(theme == IconTheme::Hatter ? "h:" : "s:") + base;
 
 #ifdef WIN11WM_HAVE_RSVG
     // A vector source beats the raster: it is rasterised at the size it will be
     // drawn, so it is sampled 1:1 and stays sharp instead of being filtered down
     // from one fixed resolution. The name -> SVG lookup is memoised because an
     // animated icon asks again every frame while its size changes.
-    auto svg = svgPath_.find(base);
-    if (svg == svgPath_.end() && !svgNone_.count(base)) {
-        std::string path = resolveSvg(nameOrPath);
+    auto svg = svgPath_.find(memo);
+    if (svg == svgPath_.end() && !svgNone_.count(memo)) {
+        std::string path = resolveSvg(nameOrPath, theme);
         if (path.empty()) {
-            svgNone_.insert(base);
+            svgNone_.insert(memo);
         } else {
-            svg = svgPath_.emplace(base, std::move(path)).first;
+            svg = svgPath_.emplace(memo, std::move(path)).first;
         }
     }
     if (svg != svgPath_.end()) {
         const int bucket = iconBucket(px);
-        const std::string key = base + "@" + std::to_string(bucket);
+        const std::string key = memo + "@" + std::to_string(bucket);
         auto it = cache_.find(key);
         if (it != cache_.end()) return it->second;
         std::vector<unsigned char> rgba;
@@ -557,32 +600,33 @@ IconTex IconStore::get(const std::string& nameOrPath, int px) {
     (void)px;
 #endif
 
-    auto it = cache_.find(base);
+    auto it = cache_.find(memo);
     if (it != cache_.end()) return it->second;
-    if (missing_.count(base)) return {};
+    if (missing_.count(memo)) return {};
 
-    const std::string path = resolve(nameOrPath);
+    const std::string path = resolve(nameOrPath, theme);
     std::vector<unsigned char> rgba;
     int w = 0, h = 0;
     if (path.empty() || !loadPng(path, &rgba, &w, &h) || w <= 0 || h <= 0) {
-        missing_.insert(base);
+        missing_.insert(memo);
         return {};
     }
     const IconTex t = uploadIcon(rgba, w, h, true);
     if (!t.valid()) {
-        missing_.insert(base);
+        missing_.insert(memo);
         return {};
     }
-    cache_[base] = t;
+    cache_[memo] = t;
     return t;
 }
 
-IconTex IconStore::forApp(const std::string& iconName, const std::string& wmClass, int px) {
+IconTex IconStore::forApp(const std::string& iconName, const std::string& wmClass, int px,
+                          IconTheme theme) {
     IconTex t;
-    if (!iconName.empty()) t = get(iconName, px);
+    if (!iconName.empty()) t = get(iconName, px, theme);
     if (!t.valid() && !wmClass.empty()) {
-        t = get(wmClass, px);
-        if (!t.valid()) t = get(lower(wmClass), px);
+        t = get(wmClass, px, theme);
+        if (!t.valid()) t = get(lower(wmClass), px, theme);
     }
     return t;
 }

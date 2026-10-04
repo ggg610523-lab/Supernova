@@ -1,0 +1,24 @@
+[win11wm] wallpaper: /home/mango/Desktop/Supernova/assets/wallpaper/wallpaper.png (3200x2000)
+[win11wm] font: MuternVF (static, bundled; bold synthesized)
+[win11wm] Intel | Mesa Intel(R) UHD Graphics 620 (KBL GT2) | 4.6 (Core Profile) Mesa 26.2.2-arch1.1
+[win11wm] texture_from_pixmap yes, vsync off (swap interval 0), font "MuternVF"
+[win11wm] canvas 1280x800, 0 managed window(s), 69 launcher entries
+[win11wm] desktop: 12 item(s) from /home/mango/Desktop
+[win11wm] taskbar: 3 pinned launcher(s)
+[win11wm] assets: /home/mango/Desktop/Supernova/assets
+[win11wm] press L at (900,700) on 0x200002 mods 0x0
+[win11wm] motion to (870,700) on 0x200002 mods 0x100
+[win11wm] DBGSW start from 0
+[win11wm] motion to (820,700) on 0x200002 mods 0x100
+[win11wm] motion to (760,700) on 0x200002 mods 0x100
+[win11wm] motion to (700,700) on 0x200002 mods 0x100
+[win11wm] motion to (640,700) on 0x200002 mods 0x100
+[win11wm] motion to (580,700) on 0x200002 mods 0x100
+[win11wm] motion to (520,700) on 0x200002 mods 0x100
+[win11wm] motion to (460,700) on 0x200002 mods 0x100
+[win11wm] motion to (400,700) on 0x200002 mods 0x100
+[win11wm] motion to (340,700) on 0x200002 mods 0x100
+[win11wm] motion to (300,700) on 0x200002 mods 0x100
+[win11wm] release L at (300,700) on 0x200002
+[win11wm] DBGSW release dx=-600 from 0 page=1 count=5
+win11wm: ../libepoxy/src/dispatch_common.c:872: epoxy_get_proc_address: Assertion `0 && "Couldn't find current GLX or EGL context.\n"' failed.

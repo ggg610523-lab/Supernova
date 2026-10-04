@@ -383,11 +383,12 @@ private:
     void drawStartGlyph(const Rect& box, const Color& c);
     void drawSearchGlyph(const Rect& box, const Color& c);
     void drawCaptionGlyph(int which, const Rect& box, const Color& c);
-    // Reversal icon for a launcher: the entry's Icon= name first, then its
-    // StartupWMClass. Returns false when nothing resolved, so the caller can
-    // fall back to the coloured letter tile.
+    // Icon for a launcher: the entry's Icon= name first, then its StartupWMClass.
+    // `theme` picks the source -- Hatter's colourful app art by default, Reversal
+    // for the Control Centre. Returns false when nothing resolved, so the caller
+    // can fall back to the coloured letter tile.
     bool drawAppIcon(const Rect& r, const std::string& iconName, const std::string& wmClass,
-                     float radius, float opacity);
+                     float radius, float opacity, IconTheme theme = IconTheme::Hatter);
     void drawAppTile(const Rect& r, const std::string& name, float radius, const Color& tint,
                      bool hovered);
     void drawWindowThumb(const WindowTex& tex, const Rect& dst, float radius, bool focused);
@@ -819,6 +820,26 @@ private:
     int startPageCount = 1;
     size_t startPageBase = 0;        // filtered index of appRects[0]
     size_t startPageSize = 0;        // cells per page
+    // --- turning a Launchpad page ------------------------------------------
+    // The grid follows a sideways drag across the empty backdrop and settles on
+    // the page it was let go nearest, the same gesture the tablet home screen
+    // uses: a press arms the turn, motion past the slop starts it, and the
+    // release commits it. launchPageOffset is an absolute page position in pages
+    // (not pixels) so a page caught halfway can be drawn halfway while it eases
+    // back onto startPage after the finger lifts.
+    bool launchSwipe = false;        // a page is being dragged right now
+    bool launchPressArmed = false;   // pressed the bare backdrop, may become a swipe
+    int launchSwipeFrom = 0;
+    int launchSwipeStartX = 0;
+    int launchSwipeStartY = 0;
+    double launchPageOffset = 0.0;   // absolute page position, in pages
+    // Grid geometry from the last layout, kept so any page can be drawn while
+    // the field is sliding rather than only the one startPage names.
+    int launchCols = metrics::kLaunchCols;
+    int launchCellW = 0;
+    int launchCellH = 0;
+    int launchGridX = 0;
+    int launchGridTop = 0;
     std::vector<Rect> taskViewRects;
     Time lastClickTime = 0;
     Client* lastClickClient = nullptr;

@@ -464,7 +464,7 @@ void Manager::drawControlCenter() {
                                        : (on ? theme::kCcActiveGlyph.a : theme::kCcGlyph.a);
         const int d = int(r.w * 0.50);
         const Rect box = grow(Rect{r.x + (r.w - d) / 2, r.y + (r.h - d) / 2, d, d});
-        if (drawAppIcon(box, icon, icon, 0.f, opacity)) return;
+        if (drawAppIcon(box, icon, icon, 0.f, opacity, IconTheme::Shell)) return;
         // No icon in the theme: a filled dot still communicates state.
         const int dot = std::max(3, int(box.w * 0.4));
         comp.drawRect(Rect{box.x + (box.w - dot) / 2, box.y + (box.h - dot) / 2, dot, dot},
@@ -559,7 +559,7 @@ void Manager::drawControlCenter() {
             const std::string dark = std::string(icon) + "-dark";
             const bool reached = clipY <= box.y + box.h / 2;
             const char* chosen = reached ? dark.c_str() : icon;
-            if (drawAppIcon(box, chosen, chosen, 0.f, 1.0f)) return;
+            if (drawAppIcon(box, chosen, chosen, 0.f, 1.0f, IconTheme::Shell)) return;
         }
         const int dot = std::max(3, box.w / 3);
         comp.drawRect(Rect{box.x + (box.w - dot) / 2, box.y + (box.h - dot) / 2, dot, dot},
@@ -594,7 +594,7 @@ void Manager::drawControlCenter() {
                metrics::kCcTileRadius * scale / 100);
         const int d = int(m.h * 0.34);
         const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
-        drawAppIcon(box, "cc-monitor", "cc-monitor", 0.f, 1.0f);
+        drawAppIcon(box, "cc-monitor", "cc-monitor", 0.f, 1.0f, IconTheme::Shell);
         drawTextAt("Show desktop", int(m.h * 0.20), Weight::Medium, theme::kCcLabel,
                    box.right() + gap, m.y + (m.h - int(m.h * 0.20) * 3 / 2) / 2);
     }
@@ -618,7 +618,7 @@ void Manager::drawControlCenter() {
         if (!have) continue;
         const int d = int(m.h * 0.46);
         const Rect box = grow(Rect{m.x + (m.w - d) / 2, m.y + (m.h - d) / 2, d, d});
-        if (!drawAppIcon(box, kLauncherIcons[i], kLauncherIcons[i], 0.f, a)) {
+        if (!drawAppIcon(box, kLauncherIcons[i], kLauncherIcons[i], 0.f, a, IconTheme::Shell)) {
             drawAppTile(box, "?", float(box.w) * 0.30f, theme::kCcActive, false);
         }
     }

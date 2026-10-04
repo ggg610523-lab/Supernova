@@ -4,6 +4,8 @@
 # installation:
 #
 #   assets/fonts/MuternVF.ttf            the UI font (variable, wght axis)
+#   assets/icons-hatter/<name>.png       Hatter app icons (the shell default),
+#                                        rasterised from the Hatter checkout
 #   assets/icons/<name>.png              Reversal icon theme, rasterised flat
 #   assets/icons/<name>.svg              the same icons as vector art, so the
 #                                        shell can render them at any size
@@ -21,11 +23,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASSETS="${WIN11WM_ASSETS:-$REPO_ROOT/assets}"
 ICONS="$ASSETS/icons"
+HATTER_ICONS="${WIN11WM_HATTER_ICONS:-$ASSETS/icons-hatter}"
 FONTS="$ASSETS/fonts"
 WALLPAPER="$ASSETS/wallpaper"
 
 REVERSAL_REPO="https://github.com/yeyushengfan258/Reversal-icon-theme.git"
 REVERSAL_REF="master"
+HATTER_REPO="https://github.com/Mibea/Hatter.git"
+HATTER_THEME="Hatter"
 MUTERNVF_REPO="https://github.com/vivescene/MuternVF.git"
 
 # Shell glyphs the WM asks for by name (see draw.cpp). Window buttons are not
@@ -155,13 +160,78 @@ find_system_icon_source() {
   return 1
 }
 
+# ----------------------------------------------------------------- Hatter
+# Hatter is the shell's application-icon theme: colourful, rounded-square icons.
+# Its checkout lives beside Reversal's in the cache and is read by the shell at
+# runtime when librsvg is available (see hatterRoot() in src/wm/icons.cpp); the
+# PNGs below are the fallback for builds without librsvg.
+hatter_cache() {
+  local base
+  if [[ -n "${XDG_CACHE_HOME:-}" && "${XDG_CACHE_HOME:0:1}" == / ]]; then
+    base="$XDG_CACHE_HOME"
+  elif [[ -n "${HOME:-}" && "${HOME:0:1}" == / ]]; then
+    base="$HOME/.cache"
+  else
+    return 1
+  fi
+  printf '%s\n' "$base/win11wm/hatter"
+}
+
+# Shallow, blobless, sparse: the theme is ~17k SVGs and the repo carries ten more
+# colour editions, so only the default theme is checked out. A failure is not
+# fatal -- the names it cannot supply fall back to Reversal.
+fetch_hatter() {
+  local src theme
+  src="$(hatter_cache)" || return 1
+  theme="$src/$HATTER_THEME"
+  if [[ $FORCE -eq 1 && -d "$src/.git" ]]; then
+    say "updating Hatter icon theme"
+    git -C "$src" pull --ff-only >/dev/null 2>&1 || true
+  fi
+  if [[ ! -d "$theme/scalable/apps" ]]; then
+    rm -rf "$src"
+    mkdir -p "$(dirname "$src")"
+    say "cloning Hatter icon theme into $src"
+    if ! git clone --depth 1 --filter=blob:none --sparse "$HATTER_REPO" "$src" 2>/dev/null; then
+      rm -rf "$src"
+      say "warning: could not fetch Hatter; app icons fall back to Reversal"
+      return 1
+    fi
+    git -C "$src" sparse-checkout set "$HATTER_THEME" >/dev/null 2>&1 || true
+  fi
+  [[ -d "$theme/scalable/apps" ]]
+}
+
+# Best Hatter source for an icon name: the scalable app art first, then the other
+# contexts, each with a case-folded fallback so a case-sensitive filesystem still
+# finds Hatter's mixed-case filenames.
+HATTER_CONTEXTS=(apps places devices status mimetypes categories actions)
+find_hatter_source() {
+  local name="$1" src theme ctx hit
+  src="$(hatter_cache 2>/dev/null || true)"
+  [[ -n "$src" ]] || return 1
+  theme="$src/$HATTER_THEME"
+  [[ -d "$theme/scalable" ]] || return 1
+  for ctx in "${HATTER_CONTEXTS[@]}"; do
+    hit="$theme/scalable/$ctx/$name.svg"
+    if [[ -f "$hit" ]]; then printf '%s\n' "$hit"; return 0; fi
+  done
+  hit="$(find "$theme/scalable" -maxdepth 2 -type f -iname "$name.svg" -print -quit 2>/dev/null)"
+  if [[ -n "$hit" ]]; then printf '%s\n' "$hit"; return 0; fi
+  return 1
+}
+
 # ------------------------------------------------------------------ icon render
 # Reversal ships monochrome SVGs with a fixed #363636; the shell is dark, so the
 # same recolour the theme's own installer does is applied before rasterising.
 LIGHTEN='s/#363636/#dedede/g; s/#3b3b3b/#dedede/g'
 
 fetch_icons() {
-  mkdir -p "$ICONS"
+  mkdir -p "$ICONS" "$HATTER_ICONS"
+  # Hatter supplies the app icons, so it is fetched first. Reversal still backs
+  # the shell chrome (the Control Centre's cc-* set, the search glyph) and any
+  # name Hatter does not ship.
+  fetch_hatter || true
   # The clone is ~130MB of upstream SVG, so it lives in the user cache rather
   # than in the checkout; --force refreshes it, normal runs never touch the net.
   local src="${XDG_CACHE_HOME:-$HOME/.cache}/win11wm/reversal"
@@ -221,6 +291,23 @@ PY
   while read -r name; do
     [[ -n "$name" ]] || continue
     wanted=$((wanted + 1))
+    # Hatter first: anything it ships is rendered from there into its own
+    # directory, so the shell's default theme is the colourful app art while the
+    # Reversal glyphs stay in assets/icons for the Control Centre.
+    local hfound
+    hfound="$(find_hatter_source "$name" || true)"
+    if [[ -n "$hfound" ]]; then
+      local hout="$HATTER_ICONS/$name.png"
+      if [[ $FORCE -eq 0 && -s "$hout" ]]; then
+        rendered=$((rendered + 1))
+        continue
+      fi
+      if render_one "$hfound" "$hout.tmp" 128 "$tool"; then
+        mv -f "$hout.tmp" "$hout"
+        rendered=$((rendered + 1))
+      fi
+      continue
+    fi
     local out="$ICONS/$name.png"
     local vector="$ICONS/$name.svg"
     if [[ $FORCE -eq 0 && -s "$out" && -s "$vector" ]]; then
@@ -381,9 +468,10 @@ if [[ $WANT_WALLPAPER -eq 1 ]]; then fetch_wallpaper || true; fi
 # A stamp lets run.sh skip this entirely on every later start. `wallpaper=` is
 # tracked explicitly so run.sh can notice a checkout made before it existed.
 if [[ -s "$FONTS/MuternVF.ttf" || -d "$ICONS" || -d "$WALLPAPER" ]]; then
-  printf 'fonts=%s\nicons=%s\nwallpaper=%s\n' \
+  printf 'fonts=%s\nicons=%s\nhatter=%s\nwallpaper=%s\n' \
     "$([[ -s "$FONTS/MuternVF.ttf" ]] && echo ok || echo missing)" \
     "$(find "$ICONS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(find "$HATTER_ICONS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ')" \
     "$([[ -s "$WALLPAPER/wallpaper.png" ]] && echo ok || echo missing)" \
     > "$ASSETS/.stamp"
 fi

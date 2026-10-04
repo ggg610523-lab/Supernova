@@ -402,6 +402,10 @@ constexpr int kLaunchCols = 4;       // the macOS Web launchpad is four across
 constexpr int kLaunchRowGap = 40;    // vertical gap between icon rows
 constexpr int kLaunchLabelH = 18;    // label strip under each icon
 constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
+// Turning a Launchpad page. A sideways drag on the empty backdrop has to pass
+// the same slop any other press does before it counts, so brushing the grid
+// does not flick it; a third of a page of travel commits the turn.
+constexpr int kLaunchSwipeSlop = 22;
 
 // --- tablet / mobile mode (iOS home screen) -------------------------------
 // The status bar is 44pt on an iPhone X (52 here to leave room for the Dynamic

@@ -573,13 +573,16 @@ void Manager::drawAppTile(const Rect& r, const std::string& name, float radius, 
     }
 }
 
-// Reversal icon for a launcher, sized into `r`. Returns false when the theme
-// has nothing for this entry so the caller can draw the letter tile instead.
+// Themed icon for a launcher, sized into `r`. Hatter's colourful app art is the
+// default; the Control Centre asks for Shell (Reversal) so its monochrome glyphs
+// stay put. Returns false when the theme has nothing for this entry so the caller
+// can draw the letter tile instead.
 bool Manager::drawAppIcon(const Rect& r, const std::string& iconName,
-                          const std::string& wmClass, float radius, float opacity) {
+                          const std::string& wmClass, float radius, float opacity,
+                          IconTheme theme) {
     // Rasterise at the size the icon is actually drawn, so an SVG source is
     // sampled 1:1 rather than downscaled from a fixed resolution.
-    const IconTex t = icons.forApp(iconName, wmClass, std::max(r.w, r.h));
+    const IconTex t = icons.forApp(iconName, wmClass, std::max(r.w, r.h), theme);
     if (!t.valid()) return false;
     // Icons are square in every icon theme worth the name; keep the aspect
     // ratio anyway so a non-square icon is never stretched.
@@ -1098,6 +1101,13 @@ void Manager::layoutStartMenu() {
     const int gridH = rows * cellH;
     const int gx = (screenW - gridW) / 2;
     const int gy = gridTop + ((gridBottom - gridTop) - gridH) / 2;
+    // Kept so drawStartMenu can lay out any page while the field slides, not just
+    // the page this layout produced rects for.
+    launchCols = cols;
+    launchCellW = cellW;
+    launchCellH = cellH;
+    launchGridX = gx;
+    launchGridTop = gy;
     const size_t base = startPageBase;
     const size_t onPage = total > base ? std::min(startPageSize, total - base) : 0;
     for (size_t i = 0; i < onPage; ++i) {
@@ -1173,30 +1183,59 @@ void Manager::drawStartMenu() {
         }
     }
 
-    for (size_t i = 0; i < appRects.size() && i < appFiltered.size(); ++i) {
-        const Rect cell = appRects[i];
-        const AppEntry& e = apps[appFiltered[startPageBase + i]];
-        const int icon = std::clamp(std::min(cell.w - 32, screenH / 8), metrics::kLaunchIconMin,
-                                    metrics::kLaunchIcon);
-        const Rect box = scaled(Rect{cell.x + (cell.w - icon) / 2, cell.y, icon, icon});
+    // The app grid. It is drawn from launchPageOffset rather than straight from
+    // startPage so that a swipe drags the field with the pointer and then settles:
+    // while a page is moving, the one leaving and the one arriving are both on
+    // screen, sliding together, exactly as the tablet home screen turns a page.
+    const int stride = std::max(1, launchCellW * launchCols);
+    const double off = launchPageOffset;
+    const int basePage = int(std::floor(off));
+    const double frac = off - double(basePage);
+    const int whole = int(std::lround(-frac * stride));
+    const auto drawPage = [&](int page, int dx) {
+        if (page < 0 || page >= startPageCount) return;
+        const size_t base = size_t(page) * startPageSize;
+        const size_t total = appFiltered.size();
+        const size_t onPage = total > base ? std::min(startPageSize, total - base) : 0;
+        for (size_t i = 0; i < onPage; ++i) {
+            const int cx = int(i) % launchCols;
+            const int cy = int(i) / launchCols;
+            const Rect raw{launchGridX + cx * launchCellW, launchGridTop + cy * launchCellH,
+                           launchCellW, launchCellH};
+            const AppEntry& e = apps[appFiltered[base + i]];
+            const int icon = std::clamp(std::min(raw.w - 32, screenH / 8),
+                                        metrics::kLaunchIconMin, metrics::kLaunchIcon);
+            const Rect box = scaled(Rect{raw.x + (raw.w - icon) / 2, raw.y, icon, icon});
 
-        const double hav = i < appHover.size() ? appHover[i] : 0.0;
-        if (hav > 0.001) {
-            const int pad = std::max(4, box.w / 8);
-            comp.drawRect(Rect{box.x - pad, box.y - pad, box.w + 2 * pad, box.h + 2 * pad},
-                          float(box.w) * 0.30f, theme::kLaunchHover, a * float(hav));
+            const double hav = i < appHover.size() ? appHover[i] : 0.0;
+            if (hav > 0.001) {
+                const int pad = std::max(4, box.w / 8);
+                comp.drawRect(Rect{box.x - pad + dx, box.y - pad, box.w + 2 * pad, box.h + 2 * pad},
+                              float(box.w) * 0.30f, theme::kLaunchHover, a * float(hav));
+            }
+            const Rect ibox{box.x + dx, box.y, box.w, box.h};
+            if (!drawAppIcon(ibox, e.icon, e.wmClass, float(ibox.w) * 0.24f, a)) {
+                drawAppTile(ibox, e.name, float(ibox.w) * 0.24f, tileTint(e.name), false);
+            }
+            const TextTex t =
+                text.get(ellipsize(text, e.name, 15, raw.w - 12), 15, Weight::Regular);
+            if (!t.tex) continue;
+            const Rect label = scaled(
+                Rect{raw.x + (raw.w - t.w) / 2, raw.y + icon + 6, t.w, t.h});
+            // A one pixel shadow keeps the white label legible over a light patch.
+            comp.drawText(t, Rect{label.x + dx + 1, label.y + 1, label.w, label.h},
+                          theme::kLaunchLabelShadow, a);
+            comp.drawText(t, Rect{label.x + dx, label.y, label.w, label.h},
+                          theme::kLaunchLabel, a);
         }
-        if (!drawAppIcon(box, e.icon, e.wmClass, float(box.w) * 0.24f, a)) {
-            drawAppTile(box, e.name, float(box.w) * 0.24f, tileTint(e.name), false);
-        }
-        const TextTex t = text.get(ellipsize(text, e.name, 15, cell.w - 12), 15, Weight::Regular);
-        if (!t.tex) continue;
-        const Rect label =
-            scaled(Rect{cell.x + (cell.w - t.w) / 2, cell.y + icon + 6, t.w, t.h});
-        // A one pixel shadow keeps the white label legible over a light patch.
-        comp.drawText(t, Rect{label.x + 1, label.y + 1, label.w, label.h},
-                      theme::kLaunchLabelShadow, a);
-        comp.drawText(t, label, theme::kLaunchLabel, a);
+    };
+    if (launchSwipe || std::abs(frac) > 0.001) {
+        drawPage(basePage, whole);
+        const int entering = frac > 0.0 ? basePage + 1 : basePage - 1;
+        const int shift = int(std::lround((frac > 0.0 ? 1.0 - frac : 1.0 + frac) * stride));
+        drawPage(entering, whole + shift);
+    } else {
+        drawPage(basePage, 0);
     }
 
     if (appFiltered.empty()) {

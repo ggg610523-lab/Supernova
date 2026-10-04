@@ -435,6 +435,32 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         handleTabletRelease(x, y, ev.button, ev.time);
         return;
     }
+    // A Launchpad page turn: the release commits whichever page the field was let
+    // go nearest, and the offset is left where the finger dropped it so the settle
+    // ease in tickFluidMotion slides it the rest of the way. A press that never
+    // became a swipe was a click on the backdrop, which dismisses.
+    if (startOpen && launchPressArmed) {
+        launchPressArmed = false;
+        if (launchSwipe) {
+            launchSwipe = false;
+            const int dx = x - launchSwipeStartX;
+            const int stride = std::max(1, launchCellW * launchCols);
+            int page = launchSwipeFrom;
+            if (dx <= -stride / 3) page = launchSwipeFrom + 1;
+            else if (dx >= stride / 3) page = launchSwipeFrom - 1;
+            page = std::clamp(page, 0, std::max(0, startPageCount - 1));
+            if (page != startPage) {
+                startPage = page;
+                layoutStartMenu();
+            }
+            hoverApp = -1;
+            startHoverDot = -1;
+            dirty = true;
+            return;
+        }
+        closeOverlays();
+        return;
+    }
     if (taskbarResizeY >= 0) {
         endTaskbarResize();
         return;
@@ -542,6 +568,30 @@ void Manager::onMotion(XMotionEvent& ev) {
         }
         updateHoverStates(x, y);
         return;
+    }
+    // A Launchpad page turn: a sideways drag that began on the empty backdrop.
+    // Once it has passed the slop the grid follows the pointer, one page of
+    // travel per cell-column of drag. Swiping is off while a search narrows the
+    // list, so the list cannot be slid out from under the query.
+    if (startOpen && launchPressArmed) {
+        if (!launchSwipe) {
+            const int dx = x - launchSwipeStartX;
+            const int dy = y - launchSwipeStartY;
+            if (std::abs(dx) > metrics::kLaunchSwipeSlop && std::abs(dx) > std::abs(dy) &&
+                searchText.empty() && startPageCount > 1) {
+                launchSwipe = true;
+                launchSwipeFrom = startPage;
+                launchPageOffset = double(startPage);
+            }
+        }
+        if (launchSwipe) {
+            const int stride = std::max(1, launchCellW * launchCols);
+            const double dx = double(x - launchSwipeStartX);
+            launchPageOffset = std::clamp(double(launchSwipeFrom) - dx / stride, -0.35,
+                                          double(startPageCount - 1) + 0.35);
+            dirty = true;
+            return;
+        }
     }
     if (taskbarResizeY >= 0) {
         // The bar's edge tracks the pointer anywhere on screen, up or down, the way
@@ -751,6 +801,7 @@ void Manager::onKeyPress(XKeyEvent& ev) {
             const int next = startPage + (sym == XK_Right ? 1 : -1);
             if (next >= 0 && next < startPageCount) {
                 startPage = next;
+                launchPageOffset = double(startPage);
                 layoutStartMenu();
                 dirty = true;
             }
@@ -760,6 +811,7 @@ void Manager::onKeyPress(XKeyEvent& ev) {
             if (!searchText.empty()) {
                 searchText.pop_back();
                 startPage = 0;
+                launchPageOffset = 0.0;
                 layoutStartMenu();
                 dirty = true;
             }
@@ -775,6 +827,7 @@ void Manager::onKeyPress(XKeyEvent& ev) {
         if (printable) {
             searchText.append(buf, size_t(n));
             startPage = 0;
+            launchPageOffset = 0.0;
             layoutStartMenu();
             dirty = true;
         }
@@ -1208,6 +1261,7 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
             const int next = startPage + (button == Button5 ? 1 : -1);
             if (next >= 0 && next < startPageCount) {
                 startPage = next;
+                launchPageOffset = double(startPage);
                 layoutStartMenu();
                 dirty = true;
             }
@@ -1238,13 +1292,22 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
             for (size_t p = 0; p < appDotRects.size(); ++p) {
                 if (!appDotRects[p].contains(x, y)) continue;
                 startPage = int(p);
+                launchPageOffset = double(startPage);
                 layoutStartMenu();
                 dirty = true;
                 return;
             }
             if (searchRect.contains(x, y)) return;  // focus stays in the field
+            // The bare backdrop: a press arms a page swipe, and whether this was
+            // a flick or a click is settled on motion and release. Without that
+            // a swipe across the wallpaper would dismiss the Launchpad the
+            // instant the finger came down.
+            launchPressArmed = true;
+            launchSwipeStartX = x;
+            launchSwipeStartY = y;
+            return;
         }
-        // Anywhere else (the empty backdrop) dismisses, like macOS.
+        // A right press on the empty backdrop dismisses, like macOS.
         closeOverlays();
         return;
     }
