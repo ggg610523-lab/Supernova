@@ -892,7 +892,16 @@ bool Compositor::buildWallpaper(std::string* error) {
     orthoMatrix(halfProj, halfW_, halfH_);
 
     // Downsample the wallpaper into halfA_ with the main shader in texture mode.
+    // uMode must be set explicitly: it defaults to -1, and a mode matching no
+    // branch writes no fragColor at all, leaving the acrylic source undefined --
+    // in practice black, which is why every acrylic surface read as flat dark.
+    // The VAO has to be bound too: in a core profile a draw with no VAO is a
+    // GL_INVALID_OPERATION and writes nothing, and the photo path (unlike the
+    // procedural fallback below) never bound one, so the whole blur came out
+    // black whenever the wallpaper image loaded -- which is the normal case.
+    glBindVertexArray(vao_);
     glUseProgram(prog_);
+    glUniform1i(uMode_, 3);
     glUniformMatrix4fv(uProj_, 1, GL_FALSE, halfProj);
     glUniform4f(uRect_, 0.f, 0.f, float(halfW_), float(halfH_));
     glUniform1f(uRadius_, 0.f);

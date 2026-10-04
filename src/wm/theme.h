@@ -247,8 +247,11 @@ inline constexpr Color kCcLabel = rgb(0xFFFFFF, 0.70f);
 // A full-screen blurred wallpaper with large squircles, a top search pill and
 // page dots. Deliberately its own skin: white labels on the photo, no Fluent
 // panel chrome.
-inline constexpr Color kLaunchTint = rgb(0x14141A, 1.0f);      // acrylic tint over the blur
-inline constexpr Color kLaunchDim = rgb(0x000000, 0.16f);      // extra darkening wash
+// The launchpad runs the acrylic at zero tint (the colour is only a placeholder,
+// though its alpha of 1 matters: it multiplies the surface opacity), so the
+// wallpaper shows through blurred and bright, exactly like the macOS Web
+// launchpad's `backdrop-filter: blur(25px)` over a transparent background.
+inline constexpr Color kLaunchTint = rgb(0x14141A, 1.0f);
 inline constexpr Color kLaunchSearch = rgb(0xFFFFFF, 0.05f);   // search field wash
 inline constexpr Color kLaunchSearchBorder = rgb(0xFFFFFF, 0.22f);  // its 1px hairline
 inline constexpr Color kLaunchSearchText = rgb(0xFFFFFF, 0.60f);

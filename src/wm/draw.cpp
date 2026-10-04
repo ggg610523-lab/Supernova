@@ -1133,11 +1133,12 @@ void Manager::drawStartMenu() {
                     int(std::lround(r.h * scale))};
     };
 
-    // Backdrop: a constant heavy blur with a darkening wash, which is the flat
-    // glass the macOS Web launchpad sits on.
-    comp.drawAcrylic(startRect, 0.f, theme::kLaunchTint, 0.10f, Color{0.f, 0.f, 0.f, 0.f},
-                     a * 0.66f);
-    comp.drawRect(startRect, 0.f, theme::kLaunchDim, a);
+    // Backdrop: the macOS Web launchpad effect verbatim -- `backdrop-filter:
+    // blur(25px)` over a fully transparent surface. The acrylic runs at zero
+    // tint, no border and saturation 1, so all that is left is the wallpaper
+    // blurred behind the grid with nothing dimming it down.
+    comp.drawAcrylic(startRect, 0.f, theme::kLaunchTint, 0.0f, Color{0.f, 0.f, 0.f, 0.f}, a,
+                     1.0f);
 
     // Search field: a small bordered pill. The placeholder is centred until the
     // user types, then the query is left-aligned after the magnifier, exactly as
