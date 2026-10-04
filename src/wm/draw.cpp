@@ -95,7 +95,7 @@ void Manager::render() {
 // The desktop grid lays out top-to-bottom and then starts a new column to the
 // right, which is the order Windows fills its desktop in.
 void Manager::layoutDesktopIcons() {
-    desktopIconRects.clear();
+    desktopIconRects.assign(desktopItems.size(), Rect{});
     const int cellW = 92, cellH = 92, gapX = 6, gapY = 2;
     const int marginX = 10, marginY = 10;
     const int usableH = screenH - metrics::taskbarH - marginY;
@@ -104,22 +104,57 @@ void Manager::layoutDesktopIcons() {
         const int col = n / rows, row = n % rows;
         return Rect{marginX + col * (cellW + gapX), marginY + row * (cellH + gapY), cellW, cellH};
     };
-    // Walk the same top-to-bottom, left-to-right order, but step over any cell a
-    // widget occupies so the icons reflow around the glass cards.
-    int slot = 0;
+    // Icons the user dragged by hand keep the cell they were dropped in. They are
+    // resolved first so the automatic grid below can step over them, the same way
+    // it already steps over the widgets.
+    const int maxX = std::max(0, screenW - cellW);
+    const int maxY = std::max(0, screenH - metrics::taskbarH - cellH);
+    std::vector<Rect> placed;
+    std::vector<bool> isPlaced(desktopItems.size(), false);
     for (size_t i = 0; i < desktopItems.size(); ++i) {
-        Rect cell;
+        const auto it = desktopIconPlacement.find(desktopItems[i].path);
+        if (it == desktopIconPlacement.end()) continue;
+        // Clamp, so a spot saved for a different screen or taskbar height still
+        // lands on screen rather than off in the margin.
+        const int px = std::clamp(it->second.x, 0, maxX);
+        const int py = std::clamp(it->second.y, 0, maxY);
+        desktopIconRects[i] = Rect{px, py, cellW, cellH};
+        placed.push_back(desktopIconRects[i]);
+        isPlaced[i] = true;
+    }
+    // Walk the same top-to-bottom, left-to-right order, but step over any cell a
+    // widget or a hand-placed icon occupies so the two never stack. Each icon
+    // starts the scan at its own slot rather than after the previous icon's, which
+    // is what keeps the rest of the grid still: dragging one icon away frees its
+    // slot without tugging every icon behind it across the desktop.
+    std::vector<bool> cellUsed;
+    for (size_t i = 0; i < desktopItems.size(); ++i) {
+        if (isPlaced[i]) continue;
+        int n = int(i);
+        Rect cell = cellAt(n);
         for (int guard = 0; guard < 4096; ++guard) {
-            cell = cellAt(slot++);
-            bool blocked = false;
-            for (const Widget& w : widgets)
-                if (cell.inflated(8).intersects(w.rect)) {
-                    blocked = true;
-                    break;
-                }
-            if (!blocked) break;
+            cell = cellAt(n);
+            if (size_t(n) >= cellUsed.size()) cellUsed.resize(size_t(n) + 1, false);
+            bool blocked = cellUsed[size_t(n)];
+            if (!blocked)
+                for (const Widget& w : widgets)
+                    if (cell.inflated(8).intersects(w.rect)) {
+                        blocked = true;
+                        break;
+                    }
+            if (!blocked)
+                for (const Rect& p : placed)
+                    if (cell.inflated(4).intersects(p)) {
+                        blocked = true;
+                        break;
+                    }
+            if (!blocked) {
+                cellUsed[size_t(n)] = true;
+                break;
+            }
+            ++n;
         }
-        desktopIconRects.push_back(cell);
+        desktopIconRects[i] = cell;
     }
     // Keep the *shown* cells in step with the targets we just computed. Icons
     // that already existed keep their current on-screen position (they are eased
@@ -134,31 +169,70 @@ void Manager::layoutDesktopIcons() {
     }
 }
 
-// Every frame, glide each icon's shown cell toward the cell the grid wants it
-// in. Frame-rate independent exponential smoothing -- the same shape as macOS'
-// critically damped reflow -- so a widget being dropped, resized or dragged over
-// the grid slides the surrounding icons out of the way instead of teleporting
-// them. Retargeting mid-flight is free: the icons simply head for the new cells,
-// which is exactly what a widget being dragged across the desktop needs.
+// Every frame, spring each icon's shown cell toward the cell the grid wants it
+// in. A spring rather than an exponential ease: icons settle with a hint of
+// overshoot, retargeting mid-flight keeps the velocity they already had (so
+// fast drags and widget reflows never stutter), and the grabbed icon is pinned
+// exactly under the pointer. The whole system is critically-ish damped (~0.3 s)
+// so it reads as motion without ever staying in the way.
 void Manager::animateDesktopIconReflow(double dtMs) {
     if (desktopIconDraw.size() != desktopIconRects.size()) layoutDesktopIcons();
-    if (desktopIconDraw.empty()) return;
-    // Time constant: ~110ms lands the glide in about a third of a second, quick
-    // enough to feel responsive but slow enough to read as motion.
-    const double tau = 110.0;
-    const double k = 1.0 - std::exp(-std::max(0.0, dtMs) / tau);
-    for (size_t i = 0; i < desktopIconDraw.size() && i < desktopIconRects.size(); ++i) {
-        const Rect target = desktopIconRects[i];
-        Rect& cur = desktopIconDraw[i];
-        if (cur == target) continue;
-        const auto ease = [k](int a, int b) { return int(std::lround(a + (b - a) * k)); };
-        const Rect next{ease(cur.x, target.x), ease(cur.y, target.y), ease(cur.w, target.w),
-                        ease(cur.h, target.h)};
-        // Rounding can stall a sub-pixel move; finish the glide in that case so
-        // the animation always terminates (and never repaints forever).
-        cur = (next == cur) ? target : next;
-        dirty = true;
+    const size_t n = desktopItems.size();
+
+    // Keep the springs the same length as the item list -- matching either way,
+    // so an entry appearing does not fly in from the origin and one disappearing
+    // does not leave a stale spring to inherit later.
+    if (desktopIconPos.size() != n) {
+        const size_t keep = std::min(desktopIconPos.size(), n);
+        desktopIconPos.resize(n);
+        for (size_t i = keep; i < n; ++i) {
+            const Rect& c = i < desktopIconDraw.size() ? desktopIconDraw[i] : desktopIconRects[i];
+            desktopIconPos[i].reset(motion::Vec2{double(c.x), double(c.y)});
+        }
     }
+
+    const double dt = std::clamp(dtMs, 0.0, 100.0) / 1000.0;
+    // A touch under critical (zeta < 1) is what gives the settle its life; the
+    // frequency is close to the window geometry springs so the whole shell moves
+    // to one rhythm.
+    for (size_t i = 0; i < n && i < desktopIconRects.size(); ++i) {
+        motion::Spring2& sp = desktopIconPos[i];
+        // A playful profile: the dragged icon's neighbours part with a small
+        // overshoot and every icon keeps its momentum when the target moves.
+        sp.configure(3.0, motion::kPlayful.zeta);
+        const Rect target = desktopIconRects[i];
+        const motion::Vec2 tgt{double(target.x), double(target.y)};
+        if (int(i) == dragDesktopIcon && desktopIconDragging) {
+            // Held against the pointer: no lag, no spring, no velocity.
+            sp.setValue(tgt);
+            sp.setVelocity(motion::Vec2{});
+        } else {
+            sp.step(tgt, dt);
+            // A spring settles asymptotically; snap the last fraction of a pixel
+            // so the glide always terminates and never repaints forever.
+            if (sp.settled(tgt, 0.4)) {
+                sp.setValue(tgt);
+                sp.setVelocity(motion::Vec2{});
+            }
+        }
+        if (i >= desktopIconDraw.size()) continue;
+        const motion::Vec2 v = sp.value();
+        const Rect next{int(std::lround(v.x)), int(std::lround(v.y)), target.w, target.h};
+        Rect& cur = desktopIconDraw[i];
+        if (cur != next) {
+            cur = next;
+            dirty = true;
+        }
+    }
+
+    // The lift: the carried icon rises quickly and sinks back a touch slower, so
+    // grabbing and dropping both read on screen.
+    desktopIconLift.setFrequency(4.2);
+    desktopIconLift.zeta = 0.72;
+    const double want = (dragDesktopIcon >= 0 && desktopIconDragging) ? 1.0 : 0.0;
+    const bool moving = !desktopIconLift.settled(want, 1e-3);
+    desktopIconLift.step(want, dt);
+    if (moving) dirty = true;
 }
 
 
@@ -168,16 +242,38 @@ void Manager::drawDesktopIcons() {
     if (desktopIconRects.size() != desktopItems.size() ||
         desktopIconDraw.size() != desktopItems.size())
         layoutDesktopIcons();
-    for (size_t i = 0; i < desktopItems.size() && i < desktopIconDraw.size(); ++i) {
+    const double lift = std::clamp(desktopIconLift.value, 0.0, 1.4);
+
+    const auto drawOne = [&](size_t i, bool lifted) {
         const DesktopItem& item = desktopItems[i];
         // Draw the eased cell, not the target: this is what makes the icons
-        // glide while a widget reflows the grid.
+        // glide while a widget or a carried icon reflows the grid.
         const Rect cell = desktopIconDraw[i];
         const bool selected = int(i) == selectedDesktopIcon;
         const bool hovered = int(i) == hoverDesktopIcon;
+        // The lift only applies to the icon in hand.
+        const double lg = lifted ? lift : 0.0;
         // Hover and selection share one eased amount, so the highlight fades in
         // and, when the selection moves on, cross-fades to the next icon.
         const double hl = i < desktopIconHover.size() ? desktopIconHover[i] : 0.0;
+        // A grabbed icon swells slightly and casts a soft shadow, so it reads as
+        // being held above the desktop rather than painted on it. A handful of
+        // rounded layers with a quadratic falloff stands in for a real blur, the
+        // same trick the taskbar uses for its soft top edge.
+        const int grow = int(std::lround(48.0 * 0.10 * lg));
+        const Rect icon{cell.x + (cell.w - (48 + grow)) / 2, cell.y + 8 - grow / 2,
+                        48 + grow, 48 + grow};
+        if (lg > 0.001) {
+            constexpr int kLayers = 5;
+            for (int s = kLayers; s >= 1; --s) {
+                const float t = float(s) / float(kLayers);
+                const float a = float(0.34 * lg) * (1.0f - t) * (1.0f - t);
+                const int spread = int(std::lround(2.0 + 8.0 * t));
+                comp.drawRect(Rect{icon.x - spread, icon.y - spread + int(std::lround(4.0 * lg)),
+                                   icon.w + 2 * spread, icon.h + 2 * spread},
+                              10.f + float(spread), theme::kShadow, a);
+            }
+        }
         if (hl > 0.001) {
             const Color fill =
                 selected ? Color{theme::kAccent.r, theme::kAccent.g, theme::kAccent.b, 0.30f}
@@ -185,7 +281,6 @@ void Manager::drawDesktopIcons() {
             comp.drawRect(Rect{cell.x + 2, cell.y + 2, cell.w - 4, cell.h - 4}, 6.f, fill,
                           float(hl));
         }
-        const Rect icon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
         // The item's own icon first, then a generic one, then a letter tile.
         const char* fallback = item.isDir ? "folder" : "text-plain";
         if (!drawAppIcon(icon, item.icon, std::string(), 6.f, 1.0f) &&
@@ -193,16 +288,26 @@ void Manager::drawDesktopIcons() {
             drawAppTile(icon, item.name, 8.f, tileTint(item.name), hovered);
         }
         const std::string label = ellipsize(text, item.name, 11, cell.w - 8);
-        if (label.empty()) continue;
+        if (label.empty()) return;
         const TextTex t = text.get(label, 11, Weight::Regular);
-        if (!t.tex) continue;
+        if (!t.tex) return;
         const int lx = cell.x + (cell.w - t.w) / 2;
         const int ly = icon.bottom() + 6;
         // Desktop labels sit on a photo, so a one pixel dark drop shadow keeps
         // them legible over a light patch of wallpaper.
         comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.65f}, 1.0f);
         comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kText, 1.0f);
+    };
+
+    // Draw everything but the carried icon first, then the carried icon on top of
+    // the stack so it is never clipped by a neighbour it passes over.
+    for (size_t i = 0; i < desktopItems.size() && i < desktopIconDraw.size(); ++i) {
+        if (int(i) == dragDesktopIcon) continue;
+        drawOne(i, false);
     }
+    if (dragDesktopIcon >= 0 && size_t(dragDesktopIcon) < desktopIconDraw.size() &&
+        size_t(dragDesktopIcon) < desktopItems.size())
+        drawOne(size_t(dragDesktopIcon), true);
 }
 
 // ---------------------------------------------------------------------------
@@ -467,7 +572,9 @@ void Manager::drawAppTile(const Rect& r, const std::string& name, float radius, 
 // has nothing for this entry so the caller can draw the letter tile instead.
 bool Manager::drawAppIcon(const Rect& r, const std::string& iconName,
                           const std::string& wmClass, float radius, float opacity) {
-    const IconTex t = icons.forApp(iconName, wmClass);
+    // Rasterise at the size the icon is actually drawn, so an SVG source is
+    // sampled 1:1 rather than downscaled from a fixed resolution.
+    const IconTex t = icons.forApp(iconName, wmClass, std::max(r.w, r.h));
     if (!t.valid()) return false;
     // Icons are square in every icon theme worth the name; keep the aspect
     // ratio anyway so a non-square icon is never stretched.
@@ -952,24 +1059,26 @@ void Manager::layoutStartMenu() {
     const int taskbarTop = screenH - metrics::taskbarH;
     startRect = Rect{0, 0, screenW, taskbarTop};
 
-    // Top-centred search field, like macOS Launchpad.
-    const int sw = std::min(400, screenW - 48);
-    const int sh = 34;
-    const int sy = std::max(18, taskbarTop / 14);
+    // Top-centred search field, like the macOS Web launchpad: a small bordered
+    // pill (220x30) sitting in a ~100px band, with the query centred until the
+    // user starts typing.
+    const int sw = std::min(220, screenW - 48);
+    const int sh = 30;
+    const int sy = std::clamp(screenH / 22, 18, 40);
     searchRect = Rect{(screenW - sw) / 2, sy, sw, sh};
 
-    // Grid: big squircles with a name under each, centred between the search
-    // field and the page dots.
-    const int icon = std::clamp(std::min(screenW, screenH) / 16, metrics::kLaunchIconMin,
+    // A plain four-column grid, the way the macOS Web launchpad lays its apps
+    // out: 90% of the screen wide, 25% per cell, big icons with a name below.
+    const int cols = metrics::kLaunchCols;
+    const int cellW = std::max(1, screenW * 90 / 100 / cols);
+    const int icon = std::clamp(std::min(cellW - 32, screenH / 8), metrics::kLaunchIconMin,
                                 metrics::kLaunchIcon);
-    const int cellW = icon + icon / 2 + 24;
     const int cellH = icon + metrics::kLaunchLabelH + metrics::kLaunchRowGap;
-    const int marginX = std::max(24, screenW / 12);
-    const int cols = std::max(3, std::min(7, (screenW - 2 * marginX) / cellW));
 
-    const int gridTop = searchRect.bottom() + 22;
+    const int gridTop = searchRect.bottom() + 18;
     const int gridBottom = taskbarTop - metrics::kLaunchDotsH;
-    const int rows = std::max(1, (gridBottom - gridTop) / cellH);
+    // Four rows to a page, the macOS Web grid; a short screen takes fewer.
+    const int rows = std::clamp((gridBottom - gridTop) / cellH, 1, 4);
     startPageSize = size_t(cols) * size_t(rows);
 
     const size_t total = appFiltered.size();
@@ -1007,69 +1116,79 @@ void Manager::layoutStartMenu() {
 
 void Manager::drawStartMenu() {
     layoutStartMenu();
-    const double eased = fluentEase(startAnim);
-    if (eased <= 0.001) return;
-    const float a = float(eased);
+    // Master progress, straight from the spring. macOS Web plays the whole
+    // launchpad in with a single transition: everything fades from 0 to 1 while
+    // scaling from 1.2 down to 1, so every element is drawn scaled about the
+    // centre of the field rather than growing out of its own source.
+    const double f = clamp01(startAnim);
+    if (f <= 0.001) return;
+    const float a = float(f);
+    const double scale = 1.0 + 0.2 * (1.0 - f);
+    const double ccx = screenW * 0.5;
+    const double ccy = startRect.h * 0.5;
+    const auto sx = [&](int v) { return int(std::lround(ccx + (v - ccx) * scale)); };
+    const auto sy = [&](int v) { return int(std::lround(ccy + (v - ccy) * scale)); };
+    const auto scaled = [&](const Rect& r) {
+        return Rect{sx(r.x), sy(r.y), int(std::lround(r.w * scale)),
+                    int(std::lround(r.h * scale))};
+    };
 
-    // A frosted, semi-transparent glass over the desktop, the way macOS' Launchpad
-    // reads: the blurred wallpaper supplies the blur, the black wash keeps it a
-    // touch dark -- but the acrylic is deliberately NOT opaque. An opaque sample
-    // of a dark wallpaper is what collapsed this to solid black; letting ~34% of
-    // the real desktop through keeps it translucent instead.
-    constexpr float kGlass = 0.66f;
+    // Backdrop: a constant heavy blur with a darkening wash, which is the flat
+    // glass the macOS Web launchpad sits on.
     comp.drawAcrylic(startRect, 0.f, theme::kLaunchTint, 0.10f, Color{0.f, 0.f, 0.f, 0.f},
-                     a * kGlass);
+                     a * 0.66f);
     comp.drawRect(startRect, 0.f, theme::kLaunchDim, a);
 
-    // Top-centred search pill: magnifier on the left, then placeholder or query,
-    // laid out left to right with a real gap. (The glyph used to span 34px from
-    // x+12 while the text began at x+32, so the two overprinted each other, and a
-    // long query ran straight off the end of the pill.)
-    const int sh = searchRect.h;
-    comp.drawRect(searchRect, float(sh) * 0.5f, theme::kLaunchSearch, a);
-    const int glyph = 18;
-    const int padX = 14;
-    drawSearchGlyph(Rect{searchRect.x + padX, searchRect.y + (sh - glyph) / 2, glyph, glyph},
+    // Search field: a small bordered pill. The placeholder is centred until the
+    // user types, then the query is left-aligned after the magnifier, exactly as
+    // the CSS `input:focus { text-align: left }` does.
+    const Rect search = scaled(searchRect);
+    comp.drawRect(search, 4.f, theme::kLaunchSearch, a);
+    const Color edge = theme::kLaunchSearchBorder;
+    comp.drawRect(Rect{search.x, search.y, search.w, 1}, 1.f, edge, a);
+    comp.drawRect(Rect{search.x, search.bottom() - 1, search.w, 1}, 1.f, edge, a);
+    comp.drawRect(Rect{search.x, search.y, 1, search.h}, 1.f, edge, a);
+    comp.drawRect(Rect{search.right() - 1, search.y, 1, search.h}, 1.f, edge, a);
+    const int glyph = 15;
+    const int padX = 10;
+    drawSearchGlyph(Rect{search.x + padX, search.y + (search.h - glyph) / 2, glyph, glyph},
                     theme::kLaunchSearchText);
     {
         const std::string label = searchText.empty() ? std::string("Search") : searchText;
         const Color col = searchText.empty() ? theme::kLaunchSearchText : theme::kLaunchLabel;
-        const int textX = searchRect.x + padX + glyph + 8;
-        const int maxW = searchRect.right() - textX - 14;
-        const TextTex t = text.get(ellipsize(text, label, 14, maxW), 14, Weight::Regular);
+        const int maxW = search.w - 2 * padX - glyph - 10;
+        const TextTex t = text.get(ellipsize(text, label, 13, maxW), 13, Weight::Regular);
         if (t.tex) {
-            comp.drawText(t, Rect{textX, searchRect.y + (sh - t.h) / 2, t.w, t.h}, col, a);
+            const int tx = searchText.empty() ? search.x + (search.w - t.w) / 2
+                                              : search.x + padX + glyph + 8;
+            comp.drawText(t, Rect{tx, search.y + (search.h - t.h) / 2, t.w, t.h}, col, a);
         }
     }
 
-    // Icons. During the open they scale up about their own centres, which never
-    // moves the hit rects (those stay the cells computed by layoutStartMenu).
-    const float pop = 0.90f + 0.10f * float(eased);
-    const int slot = std::clamp(std::min(screenW, screenH) / 16, metrics::kLaunchIconMin,
-                                metrics::kLaunchIcon);
     for (size_t i = 0; i < appRects.size() && i < appFiltered.size(); ++i) {
         const Rect cell = appRects[i];
         const AppEntry& e = apps[appFiltered[startPageBase + i]];
-        const int drawn = int(std::lround(slot * pop));
-        const int ix = cell.x + (cell.w - drawn) / 2;
-        const int iy = cell.y + (slot - drawn) / 2;
-        const Rect box{ix, iy, drawn, drawn};
+        const int icon = std::clamp(std::min(cell.w - 32, screenH / 8), metrics::kLaunchIconMin,
+                                    metrics::kLaunchIcon);
+        const Rect box = scaled(Rect{cell.x + (cell.w - icon) / 2, cell.y, icon, icon});
+
         const double hav = i < appHover.size() ? appHover[i] : 0.0;
         if (hav > 0.001) {
-            const int pad = std::max(4, drawn / 8);
-            comp.drawRect(Rect{ix - pad, iy - pad, drawn + 2 * pad, drawn + 2 * pad},
-                          float(drawn) * 0.30f, theme::kLaunchHover, a * float(hav));
+            const int pad = std::max(4, box.w / 8);
+            comp.drawRect(Rect{box.x - pad, box.y - pad, box.w + 2 * pad, box.h + 2 * pad},
+                          float(box.w) * 0.30f, theme::kLaunchHover, a * float(hav));
         }
-        if (!drawAppIcon(box, e.icon, e.wmClass, float(drawn) * 0.24f, a)) {
-            drawAppTile(box, e.name, float(drawn) * 0.24f, tileTint(e.name), false);
+        if (!drawAppIcon(box, e.icon, e.wmClass, float(box.w) * 0.24f, a)) {
+            drawAppTile(box, e.name, float(box.w) * 0.24f, tileTint(e.name), false);
         }
-        const TextTex t = text.get(ellipsize(text, e.name, 12, cell.w - 12), 12, Weight::Regular);
+        const TextTex t = text.get(ellipsize(text, e.name, 15, cell.w - 12), 15, Weight::Regular);
         if (!t.tex) continue;
-        const int lx = cell.x + (cell.w - t.w) / 2;
-        const int ly = cell.y + slot + 6;
+        const Rect label =
+            scaled(Rect{cell.x + (cell.w - t.w) / 2, cell.y + icon + 6, t.w, t.h});
         // A one pixel shadow keeps the white label legible over a light patch.
-        comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, theme::kLaunchLabelShadow, a);
-        comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kLaunchLabel, a);
+        comp.drawText(t, Rect{label.x + 1, label.y + 1, label.w, label.h},
+                      theme::kLaunchLabelShadow, a);
+        comp.drawText(t, label, theme::kLaunchLabel, a);
     }
 
     if (appFiltered.empty()) {
@@ -1084,7 +1203,7 @@ void Manager::drawStartMenu() {
         const double dv = p < dotHover.size() ? dotHover[p] : 0.0;
         const int r = std::max(1, int(std::lround(active ? 4.0 : lerp(3.0, 4.0, dv))));
         const Rect& d = appDotRects[p];
-        const int cx = d.x + d.w / 2, cy = d.y + d.h / 2;
+        const int cx = sx(d.x + d.w / 2), cy = sy(d.y + d.h / 2);
         const Color col =
             mixColor(theme::kLaunchDot, theme::kLaunchDotActive, active ? 1.f : float(dv));
         comp.drawRect(Rect{cx - r, cy - r, 2 * r, 2 * r}, float(r), col, a);

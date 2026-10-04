@@ -1,5 +1,5 @@
-// Desktop widgets. Manager methods that own the iOS 26 style glass cards on the
-// wallpaper: battery probing, placement, drag/resize, hit-testing and drawing.
+// Desktop widgets. Manager methods that own the iOS 18 style full-colour cards on
+// the wallpaper: battery probing, placement, drag/resize, hit-testing and drawing.
 #include "manager.h"
 
 #include <algorithm>
@@ -56,24 +56,6 @@ BatteryReading probeBattery() {
     return r;
 }
 
-// A wedge of a ring, tiled from small tangential capsules so the shared
-// axis-aligned rect primitive can render a smooth arc.
-void arc(Compositor& comp, int cx, int cy, float radius, float thick, float a0, float a1,
-         const Color& c, float opacity) {
-    const float span = a1 - a0;
-    if (std::fabs(span) < 0.01f || radius <= 0.f) return;
-    const int n = std::max(3, int(std::ceil(std::fabs(span) / (2.f * kPi) * 128.f)));
-    const float step = span / n;
-    for (int i = 0; i < n; ++i) {
-        const float tm = a0 + step * (i + 0.5f);
-        const int px = int(std::lround(cx + std::sin(tm) * radius));
-        const int py = int(std::lround(cy - std::cos(tm) * radius));
-        const float seg = radius * std::fabs(step) * 1.7f + thick * 0.5f;
-        comp.drawRectRotated(px, py, int(std::lround(thick)), int(std::lround(seg)),
-                             tm + kPi * 0.5f, thick * 0.5f, c, opacity);
-    }
-}
-
 // A rounded bar placed along the radial direction at angle `a` (clockwise from
 // 12 o'clock), centred `rAt` from the centre.
 void radialRect(Compositor& comp, int cx, int cy, float a, float rAt, float thick, float len,
@@ -90,6 +72,12 @@ void hand(Compositor& comp, int cx, int cy, float a, float len, float thick, flo
     const float total = len + tail;
     const float mid = (len - tail) * 0.5f;
     radialRect(comp, cx, cy, a, mid, thick, total, c, 1.0f);
+}
+
+// A vertical two-stop gradient rounded panel, the base of an iOS 18 widget.
+void gradientPanel(Compositor& comp, const Rect& r, float radius, const Color& top,
+                   const Color& bottom) {
+    comp.drawGradient(r, radius, top, bottom, 1.0f);
 }
 
 }  // namespace
@@ -291,7 +279,27 @@ void Manager::drawWidgets() {
         const double hv = dragging ? 1.0 : (i < widgetHover.size() ? widgetHover[i] : 0.0);
         const float radius = std::min(float(metrics::kWidgetRadius),
                                       std::min(w.rect.w, w.rect.h) * 0.28f);
-        comp.drawAcrylic(w.rect, radius, theme::kWidgetGlass, 0.62f, theme::kWidgetBorder);
+        // An iOS 18 widget is a full-colour panel, not glass: a vivid two-stop
+        // gradient with crisp white content sitting on it. The clock wears a fixed
+        // blue-violet; the battery panel takes the colour of its reading, so the
+        // card itself says whether the charge is healthy, low, or absent.
+        Color top = theme::kWidgetClockTop, bottom = theme::kWidgetClockBottom;
+        if (w.kind == WidgetKind::Battery) {
+            if (batteryPercent < 0) {
+                top = theme::kWidgetBatteryNoneTop;
+                bottom = theme::kWidgetBatteryNoneBottom;
+            } else if (batteryCharging || batteryFull || batteryPercent > 40) {
+                top = theme::kWidgetBatteryGoodTop;
+                bottom = theme::kWidgetBatteryGoodBottom;
+            } else if (batteryPercent > 20) {
+                top = theme::kWidgetBatteryWarnTop;
+                bottom = theme::kWidgetBatteryWarnBottom;
+            } else {
+                top = theme::kWidgetBatteryLowTop;
+                bottom = theme::kWidgetBatteryLowBottom;
+            }
+        }
+        gradientPanel(comp, w.rect, radius, top, bottom);
         if (hv > 0.001) comp.drawRect(w.rect, radius, theme::kWidgetHover, float(hv));
         if (w.kind == WidgetKind::Clock)
             drawClockWidget(w);
@@ -341,21 +349,21 @@ void Manager::drawClockWidget(const Widget& w) {
     numeral("6", 0, int(nr));
     numeral("9", int(-nr), 0);
 
+    // Black on white: the second hand and hub are white like the rest, thin enough
+    // to stay distinguishable from the minute hand without borrowing a colour.
     hand(comp, cx, cy, hourAng, R * 0.46f, std::max(3.f, R * 0.074f), R * 0.08f, theme::kWidgetHand);
     hand(comp, cx, cy, minAng, R * 0.66f, std::max(2.f, R * 0.052f), R * 0.10f, theme::kWidgetHand);
-    hand(comp, cx, cy, secAng, R * 0.74f, std::max(1.5f, R * 0.022f), R * 0.16f, theme::kWidgetSecond);
-    comp.drawRect(Rect{cx - 3, cy - 3, 6, 6}, 3.f, theme::kWidgetSecond);
+    hand(comp, cx, cy, secAng, R * 0.74f, std::max(1.f, R * 0.018f), R * 0.16f, theme::kWidgetHand);
+    comp.drawRect(Rect{cx - 3, cy - 3, 6, 6}, 3.f, theme::kWidgetHand);
 }
 
 void Manager::drawBatteryWidget(const Widget& w) {
     const int pad = metrics::kWidgetPad;
     const bool has = batteryPercent >= 0;
     const int pct = has ? std::clamp(batteryPercent, 0, 100) : 0;
-    const Color col = !has ? theme::kWidgetSub
-                           : (batteryCharging || batteryFull) ? theme::kWidgetGreen
-                           : pct <= 20 ? theme::kWidgetRed
-                           : pct <= 40 ? theme::kWidgetYellow
-                                       : theme::kWidgetGreen;
+    // The panel's own gradient already carries the charge colour, so the ring and
+    // its contents stay white: a green ring on a green card would read as mud.
+    const Color ink = Color{1.f, 1.f, 1.f, 1.f};
 
     const int ringD = std::max(48, std::min(w.rect.h - 2 * pad - 8, int(w.rect.w * 0.42f)));
     const int rcx = w.rect.x + pad + ringD / 2;
@@ -363,9 +371,9 @@ void Manager::drawBatteryWidget(const Widget& w) {
     const float radius = ringD * 0.5f - 10.f;
     const float thick = std::max(7.f, ringD * 0.13f);
 
-    arc(comp, rcx, rcy, radius, thick, 0.f, 2.f * kPi, theme::kWidgetRingTrack, 1.f);
+    comp.drawArc(rcx, rcy, radius, thick, 0.f, 2.f * kPi, theme::kWidgetRingTrack, 1.f);
     if (has && pct > 0)
-        arc(comp, rcx, rcy, radius, thick, 0.f, 2.f * kPi * pct / 100.f, col, 1.f);
+        comp.drawArc(rcx, rcy, radius, thick, 0.f, 2.f * kPi * pct / 100.f, ink, 1.f);
 
     char buf[16];
     if (has)
@@ -390,7 +398,7 @@ void Manager::drawBatteryWidget(const Widget& w) {
         comp.drawRect(Rect{tx, py, pillW, pillH}, 6.f, theme::kWidgetRingTrack);
         if (has && pct > 0) {
             const int fw = int((pillW - 6) * pct / 100.f);
-            if (fw > 0) comp.drawRect(Rect{tx + 3, py + 3, fw, pillH - 6}, 4.f, col);
+            if (fw > 0) comp.drawRect(Rect{tx + 3, py + 3, fw, pillH - 6}, 4.f, ink);
         }
         comp.drawRect(Rect{tx + pillW + 2, py + pillH / 2 - 5, 5, 10}, 2.f, theme::kWidgetRingTrack);
     }

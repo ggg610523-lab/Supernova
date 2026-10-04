@@ -5,6 +5,8 @@
 #
 #   assets/fonts/MuternVF.ttf            the UI font (variable, wght axis)
 #   assets/icons/<name>.png              Reversal icon theme, rasterised flat
+#   assets/icons/<name>.svg              the same icons as vector art, so the
+#                                        shell can render them at any size
 #   assets/wallpaper/wallpaper.png       the background photo, transcoded
 #
 # Everything here is idempotent and skips work that is already done. Nothing is
@@ -220,7 +222,8 @@ PY
     [[ -n "$name" ]] || continue
     wanted=$((wanted + 1))
     local out="$ICONS/$name.png"
-    if [[ $FORCE -eq 0 && -s "$out" ]]; then
+    local vector="$ICONS/$name.svg"
+    if [[ $FORCE -eq 0 && -s "$out" && -s "$vector" ]]; then
       rendered=$((rendered + 1))
       continue
     fi
@@ -240,6 +243,9 @@ PY
     local tmp="$out.tmp"
     if sed "$LIGHTEN" "$found" > "$WORK/in.svg" && render_one "$WORK/in.svg" "$tmp" 128 "$tool"; then
       mv -f "$tmp" "$out"
+      # Keep the recoloured vector too: the WM renders it directly (crisp at any
+      # size) when librsvg is available, and falls back to the PNG above when not.
+      cp -f "$WORK/in.svg" "$vector"
       rendered=$((rendered + 1))
     fi
   done < <(sort -u "$list")

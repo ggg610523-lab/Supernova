@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 
 namespace wm {
 namespace motion {
@@ -96,8 +97,41 @@ struct Spring {
     double stiffness = 220.0; // k
     double zeta = 1.0;        // damping ratio
 
+    // ---- the two conceptual parameters ---------------------------------
+    // A spring *is* a response frequency and a damping ratio; stiffness and mass
+    // are derived quantities. Tuning should read as "how fast, how bouncy", so
+    // prefer configure(f, zeta) over poking stiffness:
+    //     omega = 2 pi f              (perceived response frequency)
+    //     zeta  = c / (2 sqrt(k m))   (damping / overshoot)
+    double angularFrequency() const { return std::sqrt(stiffness / std::max(mass, 1e-9)); }
+    double frequency() const { return angularFrequency() / (2.0 * kPi); }
+
     // Set the spring's natural frequency directly (Hz), keeping the ratio.
     void setFrequency(double hz) { stiffness = (2.0 * kPi * hz) * (2.0 * kPi * hz) * mass; }
+
+    // The primary tuning entry point: perceived frequency and damping together.
+    void configure(double hz, double damping) {
+        zeta = damping;
+        setFrequency(hz);
+    }
+
+    // Time for the response envelope to decay to `frac` of its initial offset
+    // (seconds), so a feel can be described as "a ~0.3 s transition" rather than
+    // quoted as a stiffness. The envelope is exp(-zeta omega t).
+    double settleTime(double frac = 0.01) const {
+        const double w = angularFrequency();
+        if (w <= 1e-9 || zeta <= 1e-9) return 0.0;
+        return -std::log(clamp(frac, 1e-6, 1.0)) / (zeta * w);
+    }
+
+    // Continuity of a handoff (icon -> window, sample A -> sample B): adopt a new
+    // position without throwing momentum away, unless the caller really wants a
+    // dead stop. Retargeting during a run needs neither of these -- just pass a
+    // new target to step(), which already keeps value and velocity.
+    void adopt(double v, bool resetVelocity = false) {
+        value = v;
+        if (resetVelocity) velocity = 0.0;
+    }
 
     // One frame. For the critically damped case the exact closed-form solution is
     // used, which is unconditionally stable at any dt; otherwise a stable
@@ -134,6 +168,124 @@ struct Spring {
     }
 };
 
+// ------------------------------------------------ 1b. Vector & geometry springs
+//
+// The same scalar dynamics, applied to a *group* of channels so a whole object
+// moves as one physical thing rather than as unrelated properties. Each channel
+// still carries its own velocity, so a target that changes mid-flight bends the
+// trajectory instead of restarting it.
+struct Spring2 {
+    Spring x, y;
+    void configure(double hz, double zeta) {
+        x.configure(hz, zeta);
+        y.configure(hz, zeta);
+    }
+    void setFrequency(double hz) {
+        x.setFrequency(hz);
+        y.setFrequency(hz);
+    }
+    Vec2 value() const { return Vec2{x.value, y.value}; }
+    Vec2 velocity() const { return Vec2{x.velocity, y.velocity}; }
+    void setValue(Vec2 v) {
+        x.value = v.x;
+        y.value = v.y;
+    }
+    void setVelocity(Vec2 v) {
+        x.velocity = v.x;
+        y.velocity = v.y;
+    }
+    void reset(Vec2 v) {
+        setValue(v);
+        setVelocity(Vec2{});
+    }
+    Vec2 step(Vec2 target, double dtSec) {
+        x.step(target.x, dtSec);
+        y.step(target.y, dtSec);
+        return value();
+    }
+    bool settled(Vec2 target, double eps = 1e-3) const {
+        return x.settled(target.x, eps) && y.settled(target.y, eps);
+    }
+};
+
+// A screen-space box: the vector the geometry spring carries. Deliberately free
+// of the UI's Rect so this header stays pure maths.
+struct Box {
+    double x = 0.0, y = 0.0, w = 0.0, h = 0.0;
+};
+
+// Geometry as one continuous state G = (x, y, w, h). Maximise, restore, snap,
+// resize, move, workspace and fullscreen transitions are all *the same* dynamics
+// with a different target, which is what makes them feel like one material.
+struct SpringGeometry {
+    Spring x, y, w, h;
+    void configure(double hz, double zeta) {
+        x.configure(hz, zeta);
+        y.configure(hz, zeta);
+        w.configure(hz, zeta);
+        h.configure(hz, zeta);
+    }
+    void setFrequency(double hz) {
+        x.setFrequency(hz);
+        y.setFrequency(hz);
+        w.setFrequency(hz);
+        h.setFrequency(hz);
+    }
+    Box value() const { return Box{x.value, y.value, w.value, h.value}; }
+    Box velocity() const { return Box{x.velocity, y.velocity, w.velocity, h.velocity}; }
+    void reset(const Box& g) {
+        x.value = g.x;
+        y.value = g.y;
+        w.value = g.w;
+        h.value = g.h;
+        x.velocity = y.velocity = w.velocity = h.velocity = 0.0;
+    }
+    void setVelocity(double vx, double vy, double vw, double vh) {
+        x.velocity = vx;
+        y.velocity = vy;
+        w.velocity = vw;
+        h.velocity = vh;
+    }
+    Box step(const Box& target, double dtSec) {
+        x.step(target.x, dtSec);
+        y.step(target.y, dtSec);
+        w.step(target.w, dtSec);
+        h.step(target.h, dtSec);
+        return value();
+    }
+    bool settled(const Box& target, double eps = 1e-3) const {
+        return x.settled(target.x, eps) && y.settled(target.y, eps) &&
+               w.settled(target.w, eps) && h.settled(target.h, eps);
+    }
+};
+
+// --------------------------------------------------------- 1c. Motion profiles
+//
+// Named feels, so a transition reads as an intent rather than a pair of magic
+// numbers. zeta is the whole overshoot story: just under 1 is the small overshoot
+// Apple and HarmonyOS use to signal energy; exactly 1 is the fastest arrival with
+// no wobble; above it is heavy and restrained.
+struct MotionProfile {
+    double frequency = 3.2;  // Hz: perceived response speed
+    double zeta = 1.0;       // damping / overshoot
+    const char* feel = "";   // the perceptual description
+};
+
+// Crisp and quick; the default for direct manipulation (drag, resize).
+inline constexpr MotionProfile kResponsive{4.0, 1.0, "snappy, no overshoot"};
+// Gentle and long; good for large-area transitions (workspace, launchpad).
+inline constexpr MotionProfile kSoft{2.4, 1.0, "slow, calm settle"};
+// A touch under critical: a small controlled overshoot for playful moments.
+inline constexpr MotionProfile kPlayful{3.0, 0.80, "springy, slight overshoot"};
+// Overdamped: heavy and deliberate, no bounce (a large window slamming home).
+inline constexpr MotionProfile kHeavy{2.0, 1.3, "heavy, restrained"};
+
+inline void applyProfile(Spring& s, const MotionProfile& p) { s.configure(p.frequency, p.zeta); }
+inline void applyProfile(Spring2& s, const MotionProfile& p) { s.configure(p.frequency, p.zeta); }
+inline void applyProfile(SpringGeometry& s, const MotionProfile& p) {
+    s.configure(p.frequency, p.zeta);
+}
+
 // ======================================================= 2. Magnetic attraction
 //
 //   F(x) = k (p - x) exp( -|p - x|^2 / (2 sigma^2) )
@@ -169,6 +321,29 @@ inline Vec2 repulsion(Vec2 x, Vec2 p, double A, double n, double eps = 1.0) {
     return d * (A / std::pow(length(d) + eps, n));
 }
 
+// ----------------------------------------------------- 3b. Bounded repulsion
+//
+//   F(d) = A d (1 - d/R)^2  for d < R,   0 for d >= R
+//
+// The inverse-power form above has an infinite tail: every other object feels it
+// a little, and the force is singular at contact. This bounded form has a finite
+// interaction radius and reaches zero with zero slope at d = R, so behaviour is
+// easy to reason about: inside R neighbours part smoothly, outside R they are
+// exactly at rest. This is the one to use for UI displacement -- icons parting
+// around a dragged tile, a dock item nudging its neighbours.
+inline double repulsionBounded(double d, double R, double A) {
+    if (R <= 0.0 || d <= 0.0 || d >= R) return 0.0;
+    const double u = 1.0 - d / R;
+    return A * d * u * u;
+}
+
+inline Vec2 repulsionBounded(Vec2 d, double R, double A) {
+    const double dist = length(d);
+    if (dist < 1e-9 || dist >= R) return Vec2{};
+    const double u = 1.0 - dist / R;
+    return d * (A * u * u);
+}
+
 // ========================================================== 4. Fluid deformation
 //
 //   x' = x + D(x),   D(x) = A exp( -|x - p|^2 / (2 sigma^2) ) (unit direction)
@@ -183,6 +358,65 @@ inline double deform(double x, double p, double A, double sigma) {
 inline Vec2 deform(Vec2 x, Vec2 p, Vec2 dir, double A, double sigma) {
     const double w = gaussian(length(p - x), sigma);
     return x + dir * (A * w);
+}
+
+// =============================================== 4b. Universal interaction field
+//
+// One spatial weight, many channels. A Gaussian centred anywhere becomes a
+// *field*: an item inside it can be scaled, displaced, blurred, faded, shadowed
+// or deformed by the same w(d), which is what lets a single pointer interaction
+// produce one coherent result instead of six unrelated effects. The caller gives
+// the peak of each channel it cares about (0 disables that channel).
+//
+//   w(d) = exp(-d^2 / (2 sigma^2)),   out_channel = w(d) * gain_channel
+//
+// Displacement is directional; deformation is radial (away from the centre), so
+// a field can both shift and squash.
+struct Field {
+    Vec2 center{};      // where the interaction is
+    double sigma = 1.0; // reach (weight ~0.61 at d = sigma)
+
+    double weight(Vec2 p) const { return gaussian(length(p - center), sigma); }
+    double weight(double distance) const { return gaussian(distance, sigma); }
+};
+
+// Peak response of each channel at the field centre.
+struct FieldGains {
+    double scale = 0.0;        // additive scale (1.0 -> +100%)
+    double dx = 0.0, dy = 0.0; // directional displacement (px)
+    double blur = 0.0;         // additive blur
+    double opacity = 0.0;      // additive opacity
+    double shadow = 0.0;       // additive shadow strength
+    double deform = 0.0;       // radial displacement (px, outward)
+};
+
+// The deltas a point in the field should be nudged by.
+struct FieldEffect {
+    double scale = 0.0;
+    double dx = 0.0, dy = 0.0;
+    double blur = 0.0;
+    double opacity = 0.0;
+    double shadow = 0.0;
+};
+
+inline FieldEffect applyField(const Field& f, Vec2 p, const FieldGains& g) {
+    const double w = f.weight(p);
+    FieldEffect e;
+    e.scale = g.scale * w;
+    e.dx = g.dx * w;
+    e.dy = g.dy * w;
+    e.blur = g.blur * w;
+    e.opacity = g.opacity * w;
+    e.shadow = g.shadow * w;
+    // The radial term pushes away from the centre; on the exact centre there is
+    // no direction, so nothing moves rather than jumping in an arbitrary one.
+    const Vec2 d = p - f.center;
+    const double dist = length(d);
+    if (dist > 1e-9 && g.deform != 0.0) {
+        e.dx += (d.x / dist) * (g.deform * w);
+        e.dy += (d.y / dist) * (g.deform * w);
+    }
+    return e;
 }
 
 // ================================================================= 5. Parallax
@@ -253,16 +487,19 @@ inline double velocityBlur(double speed, double base, double alpha) {
 
 // ============================================== 9. Velocity-based stretching
 //
-//   S_parallel = 1 + alpha |v|,   S_perp = 1 - beta |v|
+//   S_parallel = 1 + A tanh(|v| / v0),   S_perp = 1 - B tanh(|v| / v0)
 //
-// Squash-and-stretch along the direction of travel: an object elongates as it
-// moves fast and recovers when it stops. Kept clamped so a large velocity cannot
-// collapse the perpendicular axis.
-inline void velocityStretch(double speed, double alpha, double beta, double* along,
-                            double* across) {
-    const double v = std::abs(speed);
-    if (along) *along = 1.0 + alpha * v;
-    if (across) *across = std::max(0.05, 1.0 - beta * v);
+// Squash-and-stretch along the direction of travel. The tanh keeps the effect
+// *bounded*: below v0 it is nearly linear, so small motions stretch in
+// proportion, but it saturates above it, so an absurd flick velocity can never
+// deform an object past ~A no matter how fast the pointer moves. v0 is the speed
+// at which the response has reached roughly three quarters of its limit.
+inline void velocityStretch(double speed, double alongGain, double acrossGain, double v0,
+                            double* along, double* across) {
+    if (v0 <= 1e-9) v0 = 1.0;
+    const double n = std::tanh(std::abs(speed) / v0);
+    if (along) *along = 1.0 + alongGain * n;
+    if (across) *across = std::max(0.05, 1.0 - acrossGain * n);
 }
 
 // ============================================================ 10. Smooth morphing
@@ -274,8 +511,13 @@ inline void velocityStretch(double speed, double alpha, double beta, double* alo
 // together and none can pop. f is smoothstep (zero slope at both ends).
 inline double morph(double a, double b, double f) { return a + (b - a) * f; }
 
+// The complete visual state of an element: position, geometry, scale, opacity,
+// radius, depth and rotation in one struct. One struct so a transition is a
+// single Q_A -> Q_B rather than a pile of unrelated property tweens, and so the
+// spring and the morph below speak in the same vocabulary.
 struct MorphState {
     double x = 0.0, y = 0.0;
+    double w = 0.0, h = 0.0;
     double scale = 1.0;
     double opacity = 1.0;
     double radius = 0.0;
@@ -289,6 +531,8 @@ inline MorphState morph(const MorphState& a, const MorphState& b, double t) {
     MorphState r;
     r.x = morph(a.x, b.x, f);
     r.y = morph(a.y, b.y, f);
+    r.w = morph(a.w, b.w, f);
+    r.h = morph(a.h, b.h, f);
     r.scale = morph(a.scale, b.scale, f);
     r.opacity = morph(a.opacity, b.opacity, f);
     r.radius = morph(a.radius, b.radius, f);
@@ -298,6 +542,77 @@ inline MorphState morph(const MorphState& a, const MorphState& b, double t) {
     return r;
 }
 
+// The unified motion state Q = [x, y, w, h, s, alpha, r, theta] and its spring
+// system:
+//
+//   Q'' = omega^2 (Q* - Q) - 2 zeta omega Q' + F
+//
+// The F term is where the spatial fields enter: sample a Field into per-channel
+// gains, add them to Q* before stepping, and the pointer physically pushes the
+// element instead of merely retargeting it. Every shell transition -- window,
+// widget, launchpad tile, control -- is one of these moving between two states.
+// `blur` and `shadow` are carried through but not sprung; they are cross-faded
+// by the caller while the geometry settles.
+using MotionState = MorphState;
+
+struct MotionSpring {
+    Spring x, y, w, h, scale, opacity, radius, rotation;
+
+    void configure(double hz, double zeta) {
+        for (Spring* s : {&x, &y, &w, &h, &scale, &opacity, &radius, &rotation})
+            s->configure(hz, zeta);
+    }
+    void applyProfile(const MotionProfile& p) { configure(p.frequency, p.zeta); }
+
+    void reset(const MotionState& s) {
+        x.value = s.x;
+        y.value = s.y;
+        w.value = s.w;
+        h.value = s.h;
+        scale.value = s.scale;
+        opacity.value = s.opacity;
+        radius.value = s.radius;
+        rotation.value = s.rotation;
+        for (Spring* sp : {&x, &y, &w, &h, &scale, &opacity, &radius, &rotation})
+            sp->velocity = 0.0;
+    }
+
+    MotionState value() const {
+        MotionState s;
+        s.x = x.value;
+        s.y = y.value;
+        s.w = w.value;
+        s.h = h.value;
+        s.scale = scale.value;
+        s.opacity = opacity.value;
+        s.radius = radius.value;
+        s.rotation = rotation.value;
+        return s;
+    }
+
+    MotionState step(const MotionState& target, double dtSec) {
+        x.step(target.x, dtSec);
+        y.step(target.y, dtSec);
+        w.step(target.w, dtSec);
+        h.step(target.h, dtSec);
+        scale.step(target.scale, dtSec);
+        opacity.step(target.opacity, dtSec);
+        radius.step(target.radius, dtSec);
+        rotation.step(target.rotation, dtSec);
+        MotionState s = value();
+        s.blur = target.blur;    // not sprung: handed through for the caller to fade
+        s.shadow = target.shadow;
+        return s;
+    }
+
+    bool settled(const MotionState& target, double eps = 1e-3) const {
+        return x.settled(target.x, eps) && y.settled(target.y, eps) &&
+               w.settled(target.w, eps) && h.settled(target.h, eps) &&
+               scale.settled(target.scale, eps) && opacity.settled(target.opacity, eps) &&
+               radius.settled(target.radius, eps) && rotation.settled(target.rotation, eps);
+    }
+};
+
 // ============================================================= 11. Wave propagation
 //
 //   A_i(t) = A e^(-lambda |i - i0|) f(t - tau |i - i0|)
@@ -305,12 +620,27 @@ inline MorphState morph(const MorphState& a, const MorphState& b, double t) {
 // An interaction at i0 travels outward: neighbouring elements react later (delay
 // tau per step) and weaker (decay lambda per step). The delay is what makes it
 // read as a wave rather than a simultaneous pulse. `duration` is the width of f.
-inline double wave(double amp, double lambda, double tau, int i, int i0, double t,
-                   double duration) {
-    const double dist = std::abs(double(i - i0));
+inline double waveAtDistance(double amp, double lambda, double tau, double dist, double t,
+                             double duration) {
+    if (dist < 0.0) dist = -dist;
     const double local = t - tau * dist;
     if (local <= 0.0 || local >= duration) return 0.0;
     return amp * std::exp(-lambda * dist) * pulse(local, duration);
+}
+
+// 1D form: a row of elements reacting one after another (a taskbar, a menu).
+inline double wave(double amp, double lambda, double tau, int i, int i0, double t,
+                   double duration) {
+    return waveAtDistance(amp, lambda, tau, double(i - i0), t, duration);
+}
+
+// 2D form: the same wave on a lattice (an icon grid, a workspace thumbnail map),
+// where distance is Euclidean so the front is a circle around (i0, j0) rather
+// than a line. This is what lets a launchpad grid ripple out from the tapped
+// tile instead of every tile moving at once.
+inline double wave2D(double amp, double lambda, double tau, double i, double j, double i0,
+                     double j0, double t, double duration) {
+    return waveAtDistance(amp, lambda, tau, std::hypot(i - i0, j - j0), t, duration);
 }
 
 // ===================================================== 12. Spatial magnification
@@ -323,6 +653,23 @@ inline double wave(double amp, double lambda, double tau, int i, int i0, double 
 inline double magnificationTarget(double d, double s0, double A, double sigma) {
     return s0 + A * gaussian(d, sigma);
 }
+
+// ===================================================== 13. Continuity contract
+//
+// The property every transition in this file keeps, and the reason the UI reads
+// as physical rather than as a set of animations:
+//
+//   * Q(t-)  = Q(t+):  position and size never jump when a target changes.
+//   * Q'(t-) = Q'(t+): velocity is never reset -- retargeting a running motion
+//     (A -> B becomes A -> C) bends the trajectory instead of restarting it.
+//   * Q''(t-) ~= Q''(t+): acceleration stays finite because the force fields are
+//     continuous (Gaussian and bounded repulsion both vanish with zero slope).
+//
+// A transition is therefore always "where it is + where it is going + how fast it
+// is already moving", never a fresh animation from a standstill. The pipeline:
+//
+//   input -> target state -> spatial fields -> forces -> spring/inertia
+//         -> deformation -> visual state
 
 }  // namespace motion
 }  // namespace wm

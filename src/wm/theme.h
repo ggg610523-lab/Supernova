@@ -249,7 +249,8 @@ inline constexpr Color kCcLabel = rgb(0xFFFFFF, 0.70f);
 // panel chrome.
 inline constexpr Color kLaunchTint = rgb(0x14141A, 1.0f);      // acrylic tint over the blur
 inline constexpr Color kLaunchDim = rgb(0x000000, 0.16f);      // extra darkening wash
-inline constexpr Color kLaunchSearch = rgb(0xFFFFFF, 0.16f);   // search field pill
+inline constexpr Color kLaunchSearch = rgb(0xFFFFFF, 0.05f);   // search field wash
+inline constexpr Color kLaunchSearchBorder = rgb(0xFFFFFF, 0.22f);  // its 1px hairline
 inline constexpr Color kLaunchSearchText = rgb(0xFFFFFF, 0.60f);
 inline constexpr Color kLaunchLabel = rgb(0xFFFFFF, 0.95f);
 inline constexpr Color kLaunchLabelShadow = rgb(0x000000, 0.60f);
@@ -291,22 +292,31 @@ inline constexpr Color kTabletSplashSub = rgb(0xFFFFFF, 0.55f);
 inline constexpr Color kTabletSplashTrack = rgb(0xFFFFFF, 0.16f);
 inline constexpr Color kTabletSplashFill = rgb(0xFFFFFF, 0.94f);
 
-// --- desktop widgets (iOS 26 "Liquid Glass") ------------------------------
-// Squircles of dark glass sitting directly on the wallpaper. The clock dial and
-// the battery ring stay white/orange/status-tinted, the way iOS tints widget
-// content against a translucent card.
-inline constexpr Color kWidgetGlass = rgb(0x141418, 0.44f);   // acrylic tint over the blur
-inline constexpr Color kWidgetBorder = rgb(0xFFFFFF, 0.16f);  // glass hairline
-inline constexpr Color kWidgetHover = rgb(0xFFFFFF, 0.10f);
-inline constexpr Color kWidgetLabel = rgb(0xFFFFFF, 0.88f);
-inline constexpr Color kWidgetSub = rgb(0xFFFFFF, 0.55f);
-inline constexpr Color kWidgetTick = rgb(0xFFFFFF, 0.90f);
-inline constexpr Color kWidgetTickMinor = rgb(0xFFFFFF, 0.34f);
+// --- desktop widgets (iOS 18 full-colour) ---------------------------------
+// iOS 18 widgets are opaque full-colour panels rather than glass: each card is a
+// gradient with crisp white content on top. The clock is the monochrome one -- a
+// black face with white ticks, numerals and hands -- and the battery panel takes
+// its hue from the charge, so the colour of the card carries the reading.
+inline constexpr Color kWidgetClockTop = rgb(0x1B1B1D);
+inline constexpr Color kWidgetClockBottom = rgb(0x000000);
+inline constexpr Color kWidgetBatteryGoodTop = rgb(0x22B573);
+inline constexpr Color kWidgetBatteryGoodBottom = rgb(0x0E8A63);
+inline constexpr Color kWidgetBatteryWarnTop = rgb(0xF0A21C);
+inline constexpr Color kWidgetBatteryWarnBottom = rgb(0xC0700A);
+inline constexpr Color kWidgetBatteryLowTop = rgb(0xEF4D4D);
+inline constexpr Color kWidgetBatteryLowBottom = rgb(0xB0242A);
+inline constexpr Color kWidgetBatteryNoneTop = rgb(0x6C7480);
+inline constexpr Color kWidgetBatteryNoneBottom = rgb(0x424955);
+inline constexpr Color kWidgetHover = rgb(0xFFFFFF, 0.12f);
+inline constexpr Color kWidgetLabel = rgb(0xFFFFFF, 0.98f);
+inline constexpr Color kWidgetSub = rgb(0xFFFFFF, 0.72f);
+inline constexpr Color kWidgetTick = rgb(0xFFFFFF, 0.92f);
+inline constexpr Color kWidgetTickMinor = rgb(0xFFFFFF, 0.40f);
 inline constexpr Color kWidgetHand = rgb(0xFFFFFF, 1.0f);
 inline constexpr Color kWidgetSecond = rgb(0xFF9F0A);         // iOS systemOrange
 
 inline constexpr Color kWidgetPin = rgb(0xFFFFFF, 0.95f);
-inline constexpr Color kWidgetRingTrack = rgb(0xFFFFFF, 0.16f);
+inline constexpr Color kWidgetRingTrack = rgb(0xFFFFFF, 0.28f);
 inline constexpr Color kWidgetGrip = rgb(0xFFFFFF, 0.28f);
 inline constexpr Color kWidgetGreen = rgb(0x30D158);          // iOS systemGreen
 inline constexpr Color kWidgetYellow = rgb(0xFFD60A);         // iOS systemYellow
@@ -383,8 +393,9 @@ constexpr int kCcPanelRadius = 22;
 constexpr int kCcMaxScale = 100;  // percent; shrinks to fit small screens
 
 // --- Launchpad (macOS) ----------------------------------------------------
-constexpr int kLaunchIcon = 64;      // app icon edge at 100%
+constexpr int kLaunchIcon = 80;      // app icon edge at 100% (the macOS Web size)
 constexpr int kLaunchIconMin = 46;   // floor when the screen is small
+constexpr int kLaunchCols = 4;       // the macOS Web launchpad is four across
 constexpr int kLaunchRowGap = 20;    // vertical gap between icon rows
 constexpr int kLaunchLabelH = 18;    // label strip under each icon
 constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom

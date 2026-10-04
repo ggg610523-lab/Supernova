@@ -65,7 +65,7 @@ Client* Manager::add(Window w, bool existing) {
         c->captionH = 0;
         c->frame = Rect{attr.x, attr.y, attr.width, attr.height};
         c->restore = c->frame;
-        c->drawFrame = c->frame;
+        settleGeometry(c);
     }
 
     // Property changes (title, struts, ...) and clicks: clicks are how we do
@@ -80,7 +80,7 @@ Client* Manager::add(Window w, bool existing) {
         c->vanish = 0.0;
         c->animStart = 0.0;
         c->animMs = 0;
-        c->drawFrame = c->frame;
+        settleGeometry(c);
         if (!focused && !c->isDock && !c->isDesktop) focusClient(c, false);
     } else if (existing && !c->managed) {
         c->mapped = viewable;

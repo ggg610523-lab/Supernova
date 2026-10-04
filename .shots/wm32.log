@@ -1,0 +1,10 @@
+[win11wm] wallpaper: /home/mango/Desktop/Supernova/assets/wallpaper/wallpaper.png unreadable, using the procedural backdrop
+[win11wm] font: MuternVF (static, bundled; bold synthesized)
+[win11wm] tablet mode: starting on the iOS-like home screen
+[win11wm] Intel | Mesa Intel(R) UHD Graphics 620 (KBL GT2) | 4.6 (Core Profile) Mesa 26.2.2-arch1.1
+[win11wm] texture_from_pixmap yes, vsync off (swap interval 0), font "MuternVF"
+[win11wm] canvas 1280x800, 0 managed window(s), 69 launcher entries
+[win11wm] desktop: 12 item(s) from /home/mango/Desktop
+[win11wm] taskbar: 4 pinned launcher(s)
+[win11wm] assets: /home/mango/Desktop/Supernova/assets
+win11wm: ../libepoxy/src/dispatch_common.c:872: epoxy_get_proc_address: Assertion `0 && "Couldn't find current GLX or EGL context.\n"' failed.

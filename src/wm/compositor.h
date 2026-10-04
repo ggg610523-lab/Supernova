@@ -112,6 +112,15 @@ public:
     // hands and ticks, which the axis-aligned drawRect cannot express.
     void drawRectRotated(int cx, int cy, int w, int h, float angle, float radius,
                          const Color& c, float opacity = 1.0f);
+    // A vertical gradient rounded fill: `top` at the top edge, `bottom` at the
+    // bottom edge. Used by the desktop widgets for their iOS 18 colour panels.
+    void drawGradient(const Rect& r, float radius, const Color& top, const Color& bottom,
+                      float opacity = 1.0f);
+    // An annular arc centred on (cx, cy): `radius` is the ring's centre line and
+    // `thick` its stroke width, running clockwise from `a0` to `a1` (0 = 12
+    // o'clock). Analytic, so a ring stays smooth at any size.
+    void drawArc(int cx, int cy, float radius, float thick, float a0, float a1,
+                 const Color& c, float opacity = 1.0f);
     // `saturation` is the backdrop-filter saturate() amount: 1.0 leaves the blur
     // alone, higher values make its colour pop (the Windows 11 web clone uses 3).
     void drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,
@@ -181,6 +190,7 @@ private:
     GLint uMaximized_ = -1, uScreen_ = -1, uShadowPad_ = -1, uTexMix_ = -1;
     GLint uKeepAlpha_ = -1, uTintAmount_ = -1, uSaturate_ = -1, uClipTop_ = -1, uTex_ = -1,
           uBlur_ = -1;
+    GLint uArc_ = -1, uThick_ = -1;
     GLint uBlurDir_ = -1, uWallRes_ = -1;
     GLint uPivot_ = -1, uRot_ = -1;
     float proj_[16] = {};

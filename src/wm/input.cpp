@@ -75,7 +75,7 @@ void Manager::onConfigureRequest(XConfigureRequestEvent& ev) {
         XConfigureWindow(dpy, ev.window, mask, &wc);
         if (c) {
             c->frame = Rect{ev.x, ev.y, ev.width, ev.height};
-            c->drawFrame = c->frame;
+            settleGeometry(c);
             if (c->isDock) {
                 readStruts(c);
                 updateWorkArea();
@@ -109,7 +109,7 @@ void Manager::onConfigureRequest(XConfigureRequestEvent& ev) {
             // a size wider than the screen pushes its right edge (and with it the
             // close button) off the display, where nobody can click it.
             c->frame = clampRect(c->frame, Rect{0, 0, screenW, screenH});
-            c->drawFrame = c->frame;
+            settleGeometry(c);
             c->animMs = 0;
             syncClientGeometry(c);
         }
@@ -118,7 +118,7 @@ void Manager::onConfigureRequest(XConfigureRequestEvent& ev) {
         // Only honoured before the window is first placed.
         if (mask & CWX) c->frame.x = ev.x;
         if (mask & CWY) c->frame.y = ev.y;
-        c->drawFrame = c->frame;
+        settleGeometry(c);
     }
     dirty = true;
 }
@@ -141,7 +141,7 @@ void Manager::onConfigureNotify(XConfigureEvent& ev) {
         c->frame.w = ev.width + 2 * metrics::kBorder;
         c->frame.h = ev.height + c->captionH + metrics::kBorder;
         c->frame = clampRect(c->frame, Rect{0, 0, screenW, screenH});
-        c->drawFrame = c->frame;
+        settleGeometry(c);
         c->animMs = 0;
         dirty = true;
     }
@@ -447,6 +447,12 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         endWidgetDrag();
         return;
     }
+    // A desktop icon that was picked up: a drag leaves it where it was dropped,
+    // a press that never moved opens it.
+    if (dragDesktopIcon >= 0) {
+        endDesktopIconDrag(x, y, ev.button);
+        return;
+    }
     // Dropping a pin: the reorder is committed, unless the press never became a
     // drag, in which case this release is the click the press stood for.
     if (pinDrag >= 0) {
@@ -556,6 +562,10 @@ void Manager::onMotion(XMotionEvent& ev) {
     }
     if (dragWidget >= 0) {
         updateWidgetDrag(x, y);
+        return;
+    }
+    if (dragDesktopIcon >= 0) {
+        updateDesktopIconDrag(x, y);
         return;
     }
     if (ccDrag >= 0) {
@@ -1289,8 +1299,10 @@ int Manager::desktopItemAt(int x, int y) const {
     return -1;
 }
 
-// A desktop icon opens on a single click, the way a launcher should; a click on
-// bare wallpaper clears the selection.
+// A press on an icon selects it and arms a drag; whether it turns out to be a
+// click (opens the item) or a drag (moves it) is decided on motion and release,
+// so an icon can be picked up and carried without opening it. A press on bare
+// wallpaper clears the selection and falls through to the chrome.
 bool Manager::handleDesktopPress(int x, int y, Time time) {
     (void)time;
     const int index = desktopItemAt(x, y);
@@ -1301,10 +1313,19 @@ bool Manager::handleDesktopPress(int x, int y, Time time) {
             const Rect cell = desktopIconDraw.size() == desktopIconRects.size()
                                   ? desktopIconDraw[size_t(index)]
                                   : desktopIconRects[size_t(index)];
-            // Grow the placeholder out of the icon's own glyph, not its cell, so
-            // the animation starts exactly where the user clicked.
-            const Rect fromIcon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
-            openDesktopItem(desktopItems[size_t(index)], fromIcon);
+            // Hold the pointer for the whole gesture: the drag has to keep
+            // tracking even when it wanders off the icon, and the release has to
+            // come back here to tell a click from a drop.
+            dragDesktopIcon = index;
+            desktopIconDragging = false;
+            desktopIconGrab = Point{x - cell.x, y - cell.y};
+            desktopIconPressPos = Point{x, y};
+            // Fresh speed estimate, so a flick only counts motion since the grab.
+            desktopIconVelX = desktopIconVelY = 0.0;
+            desktopIconLastMs = nowMs();
+            desktopIconLastX = x;
+            desktopIconLastY = y;
+            grabPointer();
         }
         dirty = true;
         return true;
@@ -1314,6 +1335,100 @@ bool Manager::handleDesktopPress(int x, int y, Time time) {
         dirty = true;
     }
     return false;
+}
+
+// The press has been held and the pointer has moved: past a few pixels it stops
+// being a click and becomes a free placement. The icon is pinned to the pointer
+// (its shown cell snaps to the target rather than easing, or it would lag the
+// cursor) while the rest of the grid reflows around the hole it leaves.
+void Manager::updateDesktopIconDrag(int x, int y) {
+    if (dragDesktopIcon < 0 || dragDesktopIcon >= int(desktopItems.size())) return;
+    if (!desktopIconDragging) {
+        const int dx = x - desktopIconPressPos.x, dy = y - desktopIconPressPos.y;
+        if (dx * dx + dy * dy < 25) return;  // 5px slop before a click becomes a drag
+        desktopIconDragging = true;
+    }
+    const int cellW = 92, cellH = 92;
+    const int maxX = std::max(0, screenW - cellW);
+    const int maxY = std::max(0, screenH - metrics::taskbarH - cellH);
+    const int px = std::clamp(x - desktopIconGrab.x, 0, maxX);
+    const int py = std::clamp(y - desktopIconGrab.y, 0, maxY);
+    desktopIconPlacement[desktopItems[size_t(dragDesktopIcon)].path] = Point{px, py};
+    layoutDesktopIcons();
+    // Pin the carried icon exactly under the pointer -- shown cell and spring
+    // alike -- so it never lags the cursor; only the icons reflowing around it
+    // glide.
+    const size_t di = size_t(dragDesktopIcon);
+    if (di < desktopIconPos.size()) {
+        desktopIconPos[di].setValue(motion::Vec2{double(px), double(py)});
+        desktopIconPos[di].setVelocity(motion::Vec2{});
+    }
+    if (di < desktopIconDraw.size()) desktopIconDraw[di] = Rect{px, py, desktopIconDraw[di].w, desktopIconDraw[di].h};
+    // Estimate the pointer's speed so the release can flick the icon on. A short
+    // exponential average keeps one jittery motion event from flinging it.
+    const double now = nowMs();
+    const double dts = (now - desktopIconLastMs) / 1000.0;
+    if (dts > 1e-3 && dts < 0.2) {
+        desktopIconVelX = 0.65 * desktopIconVelX + 0.35 * double(x - desktopIconLastX) / dts;
+        desktopIconVelY = 0.65 * desktopIconVelY + 0.35 * double(y - desktopIconLastY) / dts;
+    } else if (dts >= 0.2) {
+        desktopIconVelX = desktopIconVelY = 0.0;
+    }
+    desktopIconLastMs = now;
+    desktopIconLastX = x;
+    desktopIconLastY = y;
+    hoverDesktopIcon = dragDesktopIcon;
+    dirty = true;
+}
+
+// Release ends the gesture. A press that never became a drag is the click it
+// stood for, so the item opens out of the cell it is sitting in; a real drag
+// simply leaves the icon where it was dropped.
+void Manager::endDesktopIconDrag(int x, int y, unsigned button) {
+    const int index = dragDesktopIcon;
+    const bool dragged = desktopIconDragging;
+    // A real drop carries the pointer's speed into the springs: the icon coasts a
+    // little past where it was let go, then the spring reels it back, which is
+    // what makes a flick feel weighted rather than dead-stopped.
+    if (dragged && index >= 0 && index < int(desktopItems.size())) {
+        constexpr double kMaxFlick = 1200.0;   // px/s ceiling on the throw
+        constexpr double kCoast = 0.08;        // seconds of projected travel
+        const double vx = std::clamp(desktopIconVelX, -kMaxFlick, kMaxFlick);
+        const double vy = std::clamp(desktopIconVelY, -kMaxFlick, kMaxFlick);
+        const int cellW = 92, cellH = 92;
+        const int maxX = std::max(0, screenW - cellW);
+        const int maxY = std::max(0, screenH - metrics::taskbarH - cellH);
+        if (size_t(index) < desktopIconDraw.size()) {
+            const Rect drop = desktopIconDraw[size_t(index)];
+            const int tx = std::clamp(
+                drop.x + int(std::lround(vx * kCoast)), 0, maxX);
+            const int ty = std::clamp(
+                drop.y + int(std::lround(vy * kCoast)), 0, maxY);
+            desktopIconPlacement[desktopItems[size_t(index)].path] = Point{tx, ty};
+            layoutDesktopIcons();
+            if (size_t(index) < desktopIconPos.size()) {
+                desktopIconPos[size_t(index)].setValue(
+                    motion::Vec2{double(drop.x), double(drop.y)});
+                desktopIconPos[size_t(index)].setVelocity(motion::Vec2{vx, vy});
+            }
+        }
+    }
+    dragDesktopIcon = -1;
+    desktopIconDragging = false;
+    ungrabPointer();
+    if (index >= 0 && index < int(desktopItems.size()) && !dragged && button == Button1) {
+        const Rect cell = desktopIconDraw.size() == desktopIconRects.size()
+                              ? desktopIconDraw[size_t(index)]
+                              : desktopIconRects[size_t(index)];
+        // Grow the placeholder out of the icon's own glyph, not its cell, so the
+        // animation starts exactly where the icon sits.
+        const Rect fromIcon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
+        openDesktopItem(desktopItems[size_t(index)], fromIcon);
+    }
+    // A drag may have left the pointer on a different icon.
+    (void)x;
+    (void)y;
+    dirty = true;
 }
 
 // Opens one desktop item: a launcher runs its Exec, anything else is handed to
@@ -1355,7 +1470,7 @@ void Manager::beginMove(Client* c, int x, int y) {
         c->frame = restore;
         c->frame.x = x - int(frac * double(restore.w));
         c->frame.y = y - metrics::kCaptionH / 2;
-        c->drawFrame = c->frame;
+        settleGeometry(c);
         c->animMs = 0;
         syncClientGeometry(c);
         updateStateAtoms(c);
@@ -1366,6 +1481,12 @@ void Manager::beginMove(Client* c, int x, int y) {
     dragEdge = 0;
     dragGrab = Point{x - c->frame.x, y - c->frame.y};
     dragFrameStart = c->frame;
+    // Start a fresh velocity estimate: the flick speed only means something
+    // relative to when the pointer was last seen.
+    dragLastX = x;
+    dragLastY = y;
+    dragLastMs = nowMs();
+    dragVelX = dragVelY = 0.0;
     snapZonePreview = kSnapNone;
     raiseClient(c);
     XGrabPointer(dpy, comp.overlay(), False,
@@ -1400,12 +1521,33 @@ void Manager::updateDrag(int x, int y) {
     if (dragIsMove) {
         // Pure translation: the frame moves, the client size never changes, so
         // this costs one XMoveWindow and a re-draw. Nothing else.
-        c->frame.x = x - dragGrab.x;
-        c->frame.y = y - dragGrab.y;
-        // Keep a strip of the caption on screen, like Windows does.
-        if (c->frame.y < 0) c->frame.y = 0;
-        if (c->frame.x > screenW - 90) c->frame.x = screenW - 90;
-        if (c->frame.x + c->frame.w < 90) c->frame.x = 90 - c->frame.w;
+        const double rawX = double(x - dragGrab.x);
+        const double rawY = double(y - dragGrab.y);
+        // The frame may be pulled a little past the screen edge, with growing
+        // resistance (motion::rubberBand), and springs back on release. The
+        // bounds keep a strip of the caption reachable, like Windows does.
+        const double w = double(c->frame.w);
+        c->frame.x = int(std::lround(
+            motion::rubberBand(rawX, 90.0 - w, double(screenW) - 90.0, w)));
+        c->frame.y = int(std::lround(
+            motion::rubberBand(rawY, 0.0, double(screenH), double(c->frame.h))));
+        // Estimate the pointer's speed so the release can carry it into the
+        // springs. A short exponential average keeps one jittery motion event
+        // from flinging the window across the screen.
+        const double now = nowMs();
+        const double dts = (now - dragLastMs) / 1000.0;
+        if (dts > 1e-3 && dts < 0.2) {
+            dragVelX = 0.65 * dragVelX + 0.35 * double(x - dragLastX) / dts;
+            dragVelY = 0.65 * dragVelY + 0.35 * double(y - dragLastY) / dts;
+        } else if (dts >= 0.2) {
+            dragVelX = dragVelY = 0.0;
+        }
+        dragLastMs = now;
+        dragLastX = x;
+        dragLastY = y;
+        // While the window is held it tracks the pointer exactly: settle the
+        // springs rather than integrating them, so there is no lag.
+        settleGeometry(c);
         syncClientGeometry(c);
         const int zone = snapZoneFor(x, y);
         if (zone != snapZonePreview) {
@@ -1434,6 +1576,7 @@ void Manager::updateDrag(int x, int y) {
         // syncClientGeometry sees a size change and invalidates the pixmap; the
         // next frame re-binds it, so a resize costs one pixmap per frame rather
         // than one per motion event.
+        settleGeometry(c);
         syncClientGeometry(c);
     }
     dirty = true;
@@ -1472,9 +1615,17 @@ void Manager::endDrag(int x, int y) {
             snapClient(c, zone);
             return;
         }
+        // Rubber-band settles back into the work area, carrying the release
+        // speed into the springs (inertia) so a flick glides to rest instead of
+        // stopping dead. The drag left the springs settled at the (possibly
+        // stretched) position, so they already hold the "from" and the clamped
+        // frame is the target.
         c->frame = clampRect(c->frame, Rect{0, 0, screenW, screenH});
-        c->drawFrame = c->frame;
-        c->animMs = 0;
+        if (!c->geoLive) settleGeometry(c);
+        constexpr double kMaxFlick = 1400.0;  // px/s
+        c->geo.setVelocity(motion::clamp(dragVelX, -kMaxFlick, kMaxFlick),
+                           motion::clamp(dragVelY, -kMaxFlick, kMaxFlick), 0.0, 0.0);
+        applyFrame(c, true);
         syncClientGeometry(c);
         updateStateAtoms(c);
     } else {

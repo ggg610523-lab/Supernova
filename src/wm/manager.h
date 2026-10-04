@@ -19,6 +19,7 @@
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/Xrender.h>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -169,6 +170,17 @@ struct Client {
     Rect animFrom;            // frame at the start of a geometry animation
     double animStart = 0.0;
     int animMs = metrics::kAnimMs;
+    // ---- fluid geometry (motion.h)
+    // The painted frame is a physical state rather than a stopwatch-eased
+    // interpolant. `geo` carries (x, y, w, h) as one continuous box (motion::
+    // SpringGeometry), keeping every channel's velocity across retargets so
+    // reversing a maximise mid-flight bends the trajectory instead of restarting
+    // it. `geoSpring` is set the first time a transition is routed through the
+    // springs; until then the legacy timed lerp is used for the launch
+    // placeholder and the tablet zoom, which share their own timelines.
+    motion::SpringGeometry geo;
+    bool geoLive = false;     // springs primed from a real frame
+    bool geoSpring = false;   // geometry is integrated by the springs
     double attentionPulse = 0.0;
     // Opened from a desktop icon's launch placeholder: the placeholder already
     // supplies the reveal, so the usual zoom-in scale would only fight it and
@@ -236,6 +248,12 @@ private:
     void tickFluidMotion(double dtMs);
     void updateHoverStates(int px, int py);
 
+    // ---- Launchpad transition (motion.h)
+    // The open/close progress is a spring, not a timed ramp. The launchpad is
+    // drawn straight from it: the whole field fades in while scaling from 1.2 to
+    // 1, the way the macOS Web launchpad animates.
+    void stepStartSpring(double dtSec, double now);
+
     // ---- client bookkeeping (windows.cpp)
     Client* find(Window w);
     Client* add(Window w, bool existing);
@@ -258,6 +276,11 @@ private:
     bool refreshCopy(Client* c);
     void syncClientGeometry(Client* c);
     void applyFrame(Client* c, bool animate);
+    // Geometry springs (motion.h): settle drops them onto `frame` at rest (an
+    // instant move, e.g. under the pointer during a drag) and step advances one
+    // frame toward `frame`.
+    void settleGeometry(Client* c);
+    void stepGeometry(Client* c, double dtSec);
     Rect clientRect(const Client* c) const;
 
     // ---- policy
@@ -405,6 +428,12 @@ private:
     void drawDesktopIcons();
     // Returns true when the press landed on an icon (and was consumed).
     bool handleDesktopPress(int x, int y, Time time);
+    // Carries an icon being dragged: once the press has moved past the slop it
+    // stops being a click and becomes a free placement, following the pointer.
+    void updateDesktopIconDrag(int x, int y);
+    // Drops the drag. A press that never moved is the click it stood for, so the
+    // item opens; one that did leaves the icon where the user put it.
+    void endDesktopIconDrag(int x, int y, unsigned button);
     void openDesktopItem(const DesktopItem& item, const Rect& fromIcon);
     // The icon under a point, or -1. Tests the cells the user is actually looking
     // at, so a press mid-reflow lands on the icon it visibly hit.
@@ -610,6 +639,12 @@ private:
     Point dragGrab;         // pointer offset inside the frame when the drag began
     Rect dragFrameStart;
     bool dragWasMaximized = false;
+    // Pointer velocity while a move drag is live, in screen pixels per second.
+    // Smoothed across the last few motion events so a release carries a stable
+    // flick speed into the geometry springs (inertia).
+    double dragVelX = 0.0, dragVelY = 0.0;
+    double dragLastMs = 0.0;
+    int dragLastX = 0, dragLastY = 0;
     int snapZonePreview = kSnapNone;
     int hoverEdge = 0;
     Client* hoverResizeClient = nullptr;
@@ -725,6 +760,23 @@ private:
     std::vector<Rect> desktopIconDraw;   // shown cells, eased toward the targets
     int hoverDesktopIcon = -1;
     int selectedDesktopIcon = -1;
+    // Icons the user has dragged have their cell remembered here, keyed by path
+    // so a rescan or rename does not lose the spot. Anything absent is laid out
+    // automatically by the grid.
+    std::map<std::string, Point> desktopIconPlacement;
+    int dragDesktopIcon = -1;             // icon being press-dragged, -1 when none
+    bool desktopIconDragging = false;     // press has moved past the click slop
+    Point desktopIconGrab;                // pointer offset inside the cell at grab
+    Point desktopIconPressPos;            // where the press landed (slop test)
+    // One 2D spring per icon (position only): icons settle with a little life
+    // instead of a dead exponential, and keep their velocity when retargeted
+    // mid-flight. The lift raises the icon being carried (scale + shadow) and
+    // sinks it on release.
+    std::vector<motion::Spring2> desktopIconPos;
+    motion::Spring desktopIconLift;
+    double desktopIconVelX = 0.0, desktopIconVelY = 0.0;  // pointer speed at drop
+    double desktopIconLastMs = 0.0;
+    int desktopIconLastX = 0, desktopIconLastY = 0;
 
     // ---- desktop folders: the entry the desktop menu was opened on, and the two
     // modal dialogs that can sit over the wallpaper while one is being named or
@@ -771,6 +823,8 @@ private:
     Time lastClickTime = 0;
     Client* lastClickClient = nullptr;
     double startAnim = 0.0;
+    motion::Spring startSpring;
+    bool startTargetOpen = false;  // the target the spring is currently running to
     double taskViewAnim = 0.0;
     double altTabAnim = 0.0;
     int  taskViewHover = -1;

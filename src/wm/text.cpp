@@ -8,6 +8,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_MULTIPLE_MASTERS_H
+#include FT_SYNTHESIS_H
 
 #include <algorithm>
 #include <cstdint>
@@ -140,6 +141,20 @@ bool loadVariableFont(FT_Library lib, const std::string& path, void* faces[3],
     return true;
 }
 
+// The bundled face opened as an ordinary static font. MuternVF ships as a
+// variable font upstream, but a plain build of the same face carries no fvar
+// table, and then loadVariableFont() above cannot drive a wght axis at all. In
+// that case open the one file once per weight so the whole shell still renders in
+// MuternVF (Bold is synthesized from it -- see faceFor()).
+bool loadBundledStatic(FT_Library lib, const std::string& path, void* faces[3]) {
+    for (int i = 0; i < 3; ++i) {
+        FT_Face face = nullptr;
+        if (FT_New_Face(lib, path.c_str(), 0, &face) != 0 || !face) return false;
+        faces[i] = face;
+    }
+    return true;
+}
+
 // Static per-weight instances shipped next to the variable font; used when the
 // FreeType we link against cannot set variation coordinates.
 bool loadStaticFont(FT_Library lib, const std::string& dir, void* faces[3]) {
@@ -192,6 +207,18 @@ bool Text::init(const std::string& fontDir) {
             for (int i = 0; i < 3; ++i) facePx_[i] = 0;
             ready_ = true;
             log("font: MuternVF (variable, bundled)");
+            return true;
+        }
+        // 1b. The same file as a plain static face (no variable axes). This is
+        // what actually ships today, so without it the whole shell silently fell
+        // through to fontconfig and rendered in whatever face that resolved to.
+        if (loadBundledStatic(lib, variable, faces_)) {
+            family_ = "MuternVF";
+            bundled_ = true;
+            synthBold_ = true;
+            for (int i = 0; i < 3; ++i) facePx_[i] = 0;
+            ready_ = true;
+            log("font: MuternVF (static, bundled; bold synthesized)");
             return true;
         }
         // 2. Static Text instances from the same family.
@@ -247,6 +274,7 @@ void Text::shutdown() {
     }
     cache_.clear();
     order_.clear();
+    synthBold_ = false;
     for (void*& f : faces_) {
         if (f) FT_Done_Face(static_cast<FT_Face>(f));
         f = nullptr;
@@ -305,6 +333,9 @@ void Text::layout(const std::string& s, void* facePtr, int* outW, int* outH) {
         // Same flags as the render pass so measurement and drawing agree on the
         // hinted advances and the texture is never one pixel short.
         if (FT_Load_Char(face, cp, kLoadFlags) != 0) continue;
+        // A static bundled face has no real Bold: thicken its outline so the
+        // measured advance matches what rasterise() draws.
+        if (synthBold_ && facePtr == faces_[2]) FT_GlyphSlot_Embolden(face->glyph);
         pen += static_cast<int>(face->glyph->advance.x >> 6);
     }
     *outW = pen > 0 ? pen : 0;
@@ -323,6 +354,8 @@ void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int widt
     for (size_t i = 0; i < s.size();) {
         const uint32_t cp = nextCodepoint(s, &i);
         if (FT_Load_Char(face, cp, kRenderFlags) != 0) continue;
+        // Match layout(): synthesize the missing Bold from the static face.
+        if (synthBold_ && facePtr == faces_[2]) FT_GlyphSlot_Embolden(face->glyph);
         const FT_Bitmap& bm = face->glyph->bitmap;
         const int gx = pen + face->glyph->bitmap_left;
         const int gy = baseline - face->glyph->bitmap_top;

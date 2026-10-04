@@ -65,3 +65,15 @@ target_link_libraries(win11wm PRIVATE
   PkgConfig::ZLIB
 )
 
+# ---------------------------------------------------------------------------
+# Optional: render an icon's SVG source at load time, so icons stay crisp at any
+# size instead of being sampled from a fixed raster. Only src/wm/icons.cpp uses
+# this; without librsvg/cairo the WM falls back to the raster PNG path and still
+# builds, so neither is a hard dependency.
+pkg_check_modules(CAIRO IMPORTED_TARGET cairo)
+pkg_check_modules(RSVG  IMPORTED_TARGET librsvg-2.0)
+if(CAIRO_FOUND AND RSVG_FOUND)
+  target_compile_definitions(win11wm PRIVATE WIN11WM_HAVE_RSVG)
+  target_link_libraries(win11wm PRIVATE PkgConfig::CAIRO PkgConfig::RSVG)
+endif()
+

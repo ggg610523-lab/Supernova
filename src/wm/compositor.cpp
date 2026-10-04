@@ -71,6 +71,8 @@ uniform float uKeepAlpha; // 1 = take alpha from the texture
 uniform float uTintAmount;
 uniform float uSaturate;  // backdrop-filter saturate() amount (mode 1)
 uniform float uClipTop;   // mode 0: discard fragments above this screen y
+uniform vec2  uArc;       // annular arc: start/end angle (radians, 0 = 12 o'clock)
+uniform float uThick;     // annular arc stroke width
 uniform sampler2D uTex;
 uniform sampler2D uBlur;
 
@@ -206,6 +208,35 @@ void main() {
         float bodyA = shape * uOpacity * alphaMul;
         float a = bodyA + sh * (1.0 - bodyA);
         fragColor = vec4(body * bodyA + uShadow.rgb * sh * (1.0 - bodyA), a);
+        return;
+    }
+
+    if (uMode == 4) {                    // vertical gradient rounded fill
+        float d = sdRound(p - c, uRect.zw * 0.5, uRadius);
+        vec4 col = mix(uColor, uColor2, clamp(vQ.y, 0.0, 1.0));
+        float a = cover(d) * uOpacity * col.a;
+        fragColor = vec4(col.rgb * a, a);
+        return;
+    }
+
+    if (uMode == 5) {                    // annular arc / ring
+        vec2 v = p - c;
+        float rr = length(v);
+        float band = abs(rr - uRadius) - uThick * 0.5;  // 0 on the ring's centre line
+        float ang = atan(v.x, -v.y);                    // 0 at 12 o'clock, clockwise
+        if (ang < 0.0) ang += 6.28318530718;
+        float span = uArc.y - uArc.x;
+        if (span < 0.0) span += 6.28318530718;
+        float d = band;
+        if (span < 6.28318530718 - 0.0001) {            // partial: antialias the two ends
+            float da = ang - uArc.x;
+            da -= 6.28318530718 * floor(da / 6.28318530718);  // wrap into [0, TAU)
+            float over = da - span;                     // > 0 means outside the wedge
+            float edge = over > 0.0 ? over : -min(da, span - da);
+            d = max(band, edge * max(rr, 1.0));
+        }
+        float a = cover(d) * uOpacity * uColor.a;
+        fragColor = vec4(uColor.rgb * a, a);
         return;
     }
 
@@ -696,6 +727,8 @@ bool Compositor::buildShaders(std::string* error) {
     uTintAmount_ = loc("uTintAmount");
     uSaturate_ = loc("uSaturate");
     uClipTop_ = loc("uClipTop");
+    uArc_ = loc("uArc");
+    uThick_ = loc("uThick");
     uTex_ = loc("uTex");
     uBlur_ = loc("uBlur");
     uPivot_ = loc("uPivot");
@@ -1084,6 +1117,38 @@ void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, floa
     glUniform2f(uRot_, std::cos(angle), std::sin(angle));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glUniform2f(uRot_, 1.f, 0.f);  // leave the shared state axis-aligned
+}
+
+void Compositor::drawGradient(const Rect& r, float radius, const Color& top, const Color& bottom,
+                              float opacity) {
+    if (r.empty()) return;
+    glUseProgram(prog_);
+    glBindVertexArray(vao_);
+    glUniform1i(uMode_, 4);
+    glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
+    glUniform1f(uRadius_, radius);
+    glUniform1f(uOpacity_, opacity);
+    glUniform4f(uColor_, top.r, top.g, top.b, top.a);
+    glUniform4f(uColor2_, bottom.r, bottom.g, bottom.b, bottom.a);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+void Compositor::drawArc(int cx, int cy, float radius, float thick, float a0, float a1,
+                         const Color& c, float opacity) {
+    if (thick <= 0.f || radius <= 0.f) return;
+    const float reach = radius + thick * 0.5f + 1.f;
+    const int side = int(std::ceil(reach * 2.f));
+    glUseProgram(prog_);
+    glBindVertexArray(vao_);
+    glUniform1i(uMode_, 5);
+    glUniform4f(uRect_, float(cx) - side * 0.5f, float(cy) - side * 0.5f, float(side),
+                float(side));
+    glUniform1f(uRadius_, radius);
+    glUniform1f(uThick_, thick);
+    glUniform1f(uOpacity_, opacity);
+    glUniform4f(uColor_, c.r, c.g, c.b, c.a);
+    glUniform2f(uArc_, a0, a1);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
 void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,

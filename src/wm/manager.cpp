@@ -449,7 +449,13 @@ void Manager::tickAnimations(double now) {
         const double p = c->animMs > 0 ? clamp01((now - c->animStart) / double(c->animMs)) : 1.0;
         const double eased = fluentEase(p);
 
-        if (p < 1.0) {
+        // Geometry either integrates through the springs (a continuous physical
+        // trajectory, used by maximise/snap/restore/reflow and the release of a
+        // move) or follows the legacy timed lerp that the launch placeholder and
+        // the tablet zoom share. The two never run at the same time.
+        if (c->geoSpring) {
+            stepGeometry(c, dt);
+        } else if (p < 1.0) {
             c->drawFrame = lerpRect(c->animFrom, c->frame, eased);
             dirty = true;
         } else {
@@ -505,7 +511,9 @@ void Manager::tickAnimations(double now) {
         v = target > v ? std::min(target, v + d) : std::max(target, v - d);
         dirty = true;
     };
-    step(startAnim, startOpen ? 1.0 : 0.0, 170.0);
+    // The Launchpad is a spring, not a linear step: it overshoots a touch on the
+    // way in and settles decisively on the way out (see stepStartSpring).
+    stepStartSpring(dt, now);
     step(taskViewAnim, taskViewOpen ? 1.0 : 0.0, 170.0);
     step(altTabAnim, altTabOpen ? 1.0 : 0.0, 120.0);
     // Control Centre: a slightly longer ease so the grid reads as rising out
@@ -1132,6 +1140,9 @@ void Manager::updateHoverStates(int px, int py) {
         wantedCursor = widgetResizing ? 3 : 5;
     else if (newWidget >= 0)
         wantedCursor = overGrip ? 3 : 5;
+    // A desktop icon reads as draggable under the pointer, and keeps the hand
+    // while it is being carried.
+    if (dragDesktopIcon >= 0 || newDesktop >= 0) wantedCursor = 5;
     if (wantedCursor != cursorShown) setCursor(wantedCursor);
 
     if (changed) dirty = true;
@@ -1288,19 +1299,62 @@ void Manager::syncClientGeometry(Client* c) {
     c->pixH = 0;
 }
 
-// Applies `frame` (already updated) either instantly -- dragging must never be
-// animated -- or through the Fluent geometry animation.
+namespace {
+// One shared (omega, zeta) for every window transition. zeta = 1 is critically
+// damped -- the fastest arrival with no wobble -- and omega ~= 20 rad/s is the
+// "standard" shell preset from the motion design. Using the same pair all over
+// is what makes a maximise, a snap and a released drag feel like one material.
+constexpr double kGeometryHz = 3.2;  // omega = 2 pi f ~= 20 rad/s
+}  // namespace
+
+// Prime the springs from the drawn frame and drop them onto `frame` at rest.
+void Manager::settleGeometry(Client* c) {
+    if (!c) return;
+    // (f, zeta) rather than a raw stiffness: the whole geometry system moves at
+    // one response frequency so a maximise, a snap and a released drag all read
+    // as the same material.
+    c->geo.configure(kGeometryHz, 1.0);
+    c->geo.reset(motion::Box{double(c->frame.x), double(c->frame.y), double(c->frame.w),
+                             double(c->frame.h)});
+    c->drawFrame = c->frame;
+    c->geoLive = true;
+    c->geoSpring = false;
+}
+
+// One frame of the geometry system toward the current `frame`.
+void Manager::stepGeometry(Client* c, double dtSec) {
+    if (!c) return;
+    if (!c->geoLive) settleGeometry(c);
+    const Rect t = c->frame;
+    const motion::Box g = c->geo.step(
+        motion::Box{double(t.x), double(t.y), double(t.w), double(t.h)}, dtSec);
+    const Rect next{int(std::lround(g.x)), int(std::lround(g.y)), int(std::lround(g.w)),
+                    int(std::lround(g.h))};
+    if (next != c->drawFrame) {
+        c->drawFrame = next;
+        dirty = true;
+    }
+}
+
+// Applies `frame` (already updated). `animate` routes the change through the
+// geometry springs, which keep their velocity so a retarget mid-flight bends the
+// trajectory; otherwise the springs are snapped onto the new frame, which is
+// what a drag under the pointer needs.
 void Manager::applyFrame(Client* c, bool animate) {
     if (!c) return;
-    if (animate) {
-        c->animFrom = c->drawFrame.empty() ? c->frame : c->drawFrame;
-        c->animStart = nowMs();
-        c->animMs = metrics::kZoomMs;
+    if (!animate) {
+        settleGeometry(c);
+    } else if (!c->geoLive) {
+        settleGeometry(c);
+        c->geoSpring = true;
     } else {
-        c->drawFrame = c->frame;
-        c->animMs = metrics::kZoomMs;
-        c->animStart = nowMs() - double(metrics::kZoomMs);
+        c->geoSpring = true;
     }
+    // The open/close/vanish timelines still key off animMs; geometry does not,
+    // so this only restarts those fades.
+    c->animFrom = c->drawFrame;
+    c->animStart = nowMs();
+    c->animMs = metrics::kZoomMs;
     dirty = true;
 }
 
@@ -1644,7 +1698,7 @@ void Manager::placeNewClient(Client* c) {
         ++cascade;
     }
     c->frame = clampRect(Rect{x, y, want.w, want.h}, Rect{0, 0, screenW, screenH});
-    c->drawFrame = c->frame;
+    settleGeometry(c);
     c->restore = c->frame;
     updateStateAtoms(c);
 }
@@ -2000,6 +2054,41 @@ void Manager::ungrabPointer() {
     // never leaks through to the apps sitting behind it.
     if (dragClient || dragWidget >= 0 || tabletSwitcher) return;
     XUngrabPointer(dpy, CurrentTime);
+}
+
+namespace {
+// Launchpad transition presets. Enter is critically damped at a moderate
+// frequency, so the field arrives without the overshoot that would push the
+// 1.2 -> 1 scale back under 1; exit is faster still, so leaving reads as crisp.
+// Because the spring keeps its value and velocity across the retarget, an open
+// reversed mid-flight bends its trajectory instead of restarting it.
+constexpr double kStartEnterHz = 2.7;     // omega ~= 17 rad/s
+constexpr double kStartEnterZeta = 1.0;   // critically damped
+constexpr double kStartExitHz = 4.1;      // omega ~= 26 rad/s
+constexpr double kStartExitZeta = 0.95;   // no visible overshoot
+}  // namespace
+
+// One frame of the Launchpad progress. The whole field is drawn straight from
+// this value -- a fade plus a scale about the centre -- so there is no trajectory
+// ring to keep any more.
+void Manager::stepStartSpring(double dtSec, double now) {
+    (void)now;
+    const double target = startOpen ? 1.0 : 0.0;
+    if (target != startTargetOpen) {
+        startTargetOpen = target;
+        const bool enter = target > 0.5;
+        startSpring.setFrequency(enter ? kStartEnterHz : kStartExitHz);
+        startSpring.zeta = enter ? kStartEnterZeta : kStartExitZeta;
+    }
+    startSpring.step(target, dtSec);
+    // Terminate exactly at rest: a spring that never quite arrives keeps the
+    // shell repainting forever, which is a battery leak rather than a transition.
+    if (startSpring.settled(target)) {
+        startSpring.value = target;
+        startSpring.velocity = 0.0;
+    }
+    startAnim = startSpring.value;
+    if (startSpring.value != target) dirty = true;
 }
 
 void Manager::openStartMenu() {

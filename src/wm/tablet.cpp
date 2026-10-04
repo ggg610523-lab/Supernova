@@ -1294,7 +1294,7 @@ void Manager::makeTabletApp(Client* c) {
     const int top = metrics::kTabletStatusH;
     const int h = std::max(metrics::kMinH, screenH - top - metrics::kTabletHomeBarZone);
     c->frame = Rect{0, top, screenW, h};
-    c->drawFrame = c->frame;
+    settleGeometry(c);
     // The iOS 26 zoom transition anchors on the icon the app was launched from.
     // `animFrom == frame` keeps drawFrame still; drawClientSprite() morphs the
     // sprite between this rect and the frame on its own.
@@ -1381,7 +1381,7 @@ void Manager::endTabletApp(Client* c) {
         want.y = (screenH - want.h) / 2;
     }
     c->frame = clampRect(want, wa);
-    c->drawFrame = c->frame;
+    settleGeometry(c);
     c->animMs = 0;
     syncClientGeometry(c);
     updateStateAtoms(c);

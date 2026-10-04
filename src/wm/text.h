@@ -79,6 +79,9 @@ private:
     double opszMax_[3] = {0.0, 0.0, 0.0};
     std::string family_;
     bool bundled_ = false;
+    // A static bundled face has no real Bold; the Bold slot is thickened with
+    // FT_GlyphSlot_Embolden so headings keep their emphasis in the one family.
+    bool synthBold_ = false;
     bool ready_ = false;
     bool attempted_ = false;
     std::unordered_map<Key, Entry, KeyHash> cache_;
