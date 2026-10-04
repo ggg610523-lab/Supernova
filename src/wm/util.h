@@ -30,6 +30,15 @@ struct Rect {
         return !(o.x >= right() || o.right() <= x || o.y >= bottom() || o.bottom() <= y);
     }
     Rect inflated(int d) const { return Rect{x - d, y - d, w + 2 * d, h + 2 * d}; }
+    // The smallest rect covering both: used to keep a hover target steady while
+    // the thing it decorates animates out from under the pointer.
+    Rect unionWith(const Rect& o) const {
+        const int L = x < o.x ? x : o.x;
+        const int T = y < o.y ? y : o.y;
+        const int R = right() > o.right() ? right() : o.right();
+        const int B = bottom() > o.bottom() ? bottom() : o.bottom();
+        return Rect{L, T, R - L, B - T};
+    }
     Rect moved(int dx, int dy) const { return Rect{x + dx, y + dy, w, h}; }
     bool operator==(const Rect& o) const {
         return x == o.x && y == o.y && w == o.w && h == o.h;

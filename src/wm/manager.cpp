@@ -658,32 +658,60 @@ void Manager::tickFluidMotion(double dtMs) {
     for (size_t i = 0; i < taskPress.size(); ++i) {
         if (approach(taskPress[i], 0.0, dtMs, 70.0)) dirty = true;
     }
-    // macOS-dock magnification. A button grows by how near the pointer is to its
-    // centre, with a raised-cosine fall-off so the neighbours swell too as the
-    // cursor travels -- the effect the macOS web clones reproduce. It only runs
-    // while the pointer is over the bar; away from it everything returns to rest.
-    if (taskMagnify.size() != taskItems.size()) {
-        taskMagnify.resize(taskItems.size(), 1.0);
-        dirty = true;
-    }
+    // Dock magnification, following Plank (PositionManager::update_draw_values):
+    //
+    //   radius = iconSize * (1 + peak)            Plank's ZoomIconSize
+    //   p      = min(|x - cx|, radius) / radius   normalised distance to the icon
+    //   u      = 1 - p^2                          Plank's zoom curve
+    //   scale  = 1 + peak * u * gate              gate = Plank's zoom_in_progress
+    //   push   = min(|x - cx|, radius) * peak * (1 - p/3) * gate
+    //   shift  = pushed *away* from the pointer, so the row opens around it
+    //
+    // The curve has finite support -- it is exactly 1 at the radius -- so the row
+    // truly comes to rest. The earlier Gaussian never reached 1 and left the whole
+    // row subtly breathing under the cursor. The icons also *translate* apart,
+    // which is the half of Plank's effect that makes the swell read as one smooth
+    // wave instead of a lone icon popping out of a static row.
     {
-        constexpr double kPi = 3.14159265358979323846;
-        constexpr double kRange = 120.0;   // px the cursor reaches to either side
-        constexpr double kMaxMag = 0.08;   // growth directly under the cursor
-        const bool onBar = pointerY >= screenH - metrics::taskbarH;
-        const auto fallOff = [&](int centerX) {
-            const double d = std::fabs(double(pointerX) - double(centerX));
-            if (!onBar || d >= kRange) return 1.0;
-            const double t = 1.0 - d / kRange;
-            return 1.0 + kMaxMag * (0.5 - 0.5 * std::cos(t * kPi));
+        constexpr double kPeak = 0.45;   // peak growth at the hovered icon
+        const double icon = double(metrics::taskIconSize());
+        const double radius = std::max(1.0, icon * (1.0 + kPeak));
+        const double dtSec = std::min(dtMs, 50.0) / 1000.0;
+
+        // One spring for the whole field, exactly Plank's zoom_in_progress: it
+        // eases in when the pointer reaches the bar and back out when it leaves,
+        // so entering and leaving swells the row instead of snapping it.
+        const double gateTarget = pointerOnTaskbar ? 1.0 : 0.0;
+        dockZoomSpring.step(gateTarget, dtSec);
+        if (!dockZoomSpring.settled(gateTarget)) dirty = true;
+        const double gate = motion::clamp(dockZoomSpring.value, 0.0, 1.0);
+
+        // Lay the field over the row: item 0 is the Start button, then the task
+        // buttons. The distance is horizontal -- a dock row only cares how far
+        // along it the pointer is, not how high up the bar it sits.
+        const size_t n = taskItems.size();
+        if (taskScale.size() != n) taskScale.resize(n, 1.0);
+        if (taskShift.size() != n) taskShift.resize(n, 0);
+
+        const auto place = [&](double cx, double& scale, int& shift) {
+            const double delta = double(pointerX) - cx;
+            const double d = std::min(std::abs(delta), radius);
+            const double p = d / radius;
+            const double u = 1.0 - p * p;               // 1 at the icon, 0 at radius
+            const double ns = 1.0 + kPeak * u * gate;
+            const double push = d * kPeak * (1.0 - p / 3.0) * gate;
+            const int nsh = int(std::lround(
+                delta > 0.0 ? -push : (delta < 0.0 ? push : 0.0)));
+            if (std::abs(ns - scale) > 1e-4 || nsh != shift) dirty = true;
+            scale = ns;
+            shift = nsh;
         };
-        for (size_t i = 0; i < taskItems.size(); ++i) {
-            const double target = fallOff(taskItems[i].rect.x + taskItems[i].rect.w / 2);
-            if (approach(taskMagnify[i], target, dtMs, 70.0)) dirty = true;
+
+        place(startButtonRect.x + startButtonRect.w / 2.0, startScale, startShift);
+        for (size_t i = 0; i < n; ++i) {
+            place(taskItems[i].rect.x + taskItems[i].rect.w / 2.0, taskScale[i],
+                  taskShift[i]);
         }
-        if (approach(startMagnify,
-                     fallOff(startButtonRect.x + startButtonRect.w / 2), dtMs, 70.0))
-            dirty = true;
     }
     // The button being carried eases up out of the bar and settles back on drop.
     if (approach(pinDragLift, pinDragMoved ? 1.0 : 0.0, dtMs, kHoverMs)) dirty = true;
@@ -904,6 +932,7 @@ void Manager::updateHoverStates(int px, int py) {
     // dock icons and the Control Centre panel. None of the desktop chrome --
     // taskbar, captions, resize edges, desktop icons -- exists here.
     if (tabletMode) {
+        pointerOnTaskbar = false;
         const bool blocked = overlayOpen();
         const int newWidget = blocked ? -1 : widgetAt(px, py);
         if (newWidget != hoverWidget) {
@@ -939,7 +968,15 @@ void Manager::updateHoverStates(int px, int py) {
     }
 
     const int taskbarTop = screenH - metrics::taskbarH;
-    const bool overTaskbar = py >= taskbarTop;
+    // A magnified icon grows up out of the bar, so the field must not collapse the
+    // instant the cursor follows it off the top edge. The band reaches a little
+    // above the bar; the per-button hover tests below still use the real rects, so
+    // the extra band never lights a button the pointer is not actually on.
+    const int dockReach = metrics::taskIconSize() / 2 + 8;
+    const bool overTaskbar = py >= taskbarTop - dockReach;
+    // The magnification field relaxes as soon as this goes false, including on a
+    // LeaveNotify, which sends no motion event of its own.
+    pointerOnTaskbar = overTaskbar;
 
     bool newStart = false, newShowDesktop = false, newClock = false;
     int newTask = -1;
@@ -949,7 +986,7 @@ void Manager::updateHoverStates(int px, int py) {
             newShowDesktop = showDesktopRect.contains(px, py);
             newClock = clockRect.contains(px, py);
             for (size_t i = 0; i < taskItems.size(); ++i) {
-                if (taskItems[i].rect.contains(px, py)) {
+                if (taskHitRect(i).contains(px, py)) {
                     newTask = int(i);
                     break;
                 }

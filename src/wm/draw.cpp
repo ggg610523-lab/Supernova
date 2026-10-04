@@ -675,6 +675,22 @@ void Manager::layoutTaskbar() {
     showDesktopRect = Rect{screenW - 14, y, 14, metrics::taskbarH};
 }
 
+// The on-screen box of a taskbar button's icon: the static cell slid by the dock's
+// spread and grown upward by the zoom, unioned with the cell itself so the target
+// never slips out from under the pointer while the row swells (Plank unions the
+// item's draw region into its hover region for the same reason).
+Rect Manager::taskHitRect(size_t index) const {
+    if (index >= taskItems.size()) return Rect{};
+    const Rect cell = taskItems[index].rect;
+    const double scale = index < taskScale.size() ? taskScale[index] : 1.0;
+    const int shift = index < taskShift.size() ? taskShift[index] : 0;
+    const int side = std::max(4, int(std::lround(metrics::taskIconSize() * scale)));
+    const int cx = cell.x + cell.w / 2 + shift;
+    const int cy = cell.y + cell.h / 2;
+    const Rect glyph{cx - side / 2, cy - side / 2, side, side};
+    return cell.unionWith(glyph);
+}
+
 void Manager::drawTaskbar() {
     const int y = screenH - metrics::taskbarH;
     const Rect bar{0, y, screenW, metrics::taskbarH};
@@ -730,17 +746,16 @@ void Manager::drawTaskbar() {
 
     {
         const double g = lifted(startHoverAnim);
-        const int cx = startButtonRect.x + startButtonRect.w / 2;
-        const int cy = startButtonRect.y + startButtonRect.h / 2;
         // Sized like every app icon, not the whole button: a launcher drawn at
-        // button width (44px) read as a bigger, louder neighbour than the 32px
-        // app icons beside it.
-        const int baseBox = std::max(8, int(std::lround(metrics::taskIconSize() *
-                                                         (1.0 + 0.12 * g))));
-        // Dock magnification grows the glyph upward out of the bar.
-        const int box = std::max(8, int(std::lround(baseBox * startMagnify)));
-        const Rect icon{cx - box / 2, cy - box / 2 - int(std::lround(g)) - (box - baseBox) / 2,
-                        box, box};
+        // button width (44px) read as a bigger, louder neighbour than the 32px app
+        // icons beside it. The magnification field scales it, so the launcher is
+        // simply item 0 of the row.
+        const int baseBox = std::max(8, int(std::lround(metrics::taskIconSize())));
+        const int box = std::max(8, int(std::lround(baseBox * startScale)));
+        const int up = (box - baseBox) / 2;
+        const int cx = startButtonRect.x + startButtonRect.w / 2 + startShift;
+        const int cy = startButtonRect.y + startButtonRect.h / 2;
+        const Rect icon{cx - box / 2, cy - box / 2 - int(std::lround(g)) - up, box, box};
         drawStartGlyph(icon, theme::kGlyph);
     }
 
@@ -753,6 +768,9 @@ void Manager::drawTaskbar() {
         // the plate, the icon and the pill all animate as one object.
         const double appear = i < taskAppear.size() ? taskAppear[i] : 1.0;
         const double press = i < taskPress.size() ? taskPress[i] : 0.0;
+        // The dock's slide for this button, shared by its icon, plate and pill so
+        // they move as one object.
+        const int shift = i < taskShift.size() ? taskShift[i] : 0;
 
         // A pin lights up when the window it stands for is the focused one; a
         // window button lights up when it is focused itself.
@@ -769,8 +787,10 @@ void Manager::drawTaskbar() {
             const bool liftedPin = pinDragMoved && it.pin == pinDrag;
             // The hovered icon grows, and the focused one keeps a fraction of the
             // growth so the active app is readable at a glance.
-            const double mag = i < taskMagnify.size() ? taskMagnify[i] : 1.0;
-            const double restGrow = (1.0 + 0.12 * g + (active ? 0.05 : 0.0)) *
+            const double mag = i < taskScale.size() ? taskScale[i] : 1.0;
+            // Hover is only a vertical rise now; the size comes from the
+            // magnification field, so the two no longer stack into one big zoom.
+            const double restGrow = (active ? 1.05 : 1.0) *
                                     (0.82 + 0.18 * appear) * (1.0 - 0.07 * press);
             const int restSide =
                 std::max(4, int(std::lround(metrics::taskIconSize() * restGrow)));
@@ -778,22 +798,21 @@ void Manager::drawTaskbar() {
             // The dock grows an icon upward out of the bar rather than about its
             // middle, so a magnified glyph reads as rising off the shelf.
             const int up = (side - restSide) / 2;
-            Rect area{it.rect.x + (it.rect.w - side) / 2,
+            Rect area{it.rect.x + (it.rect.w - side) / 2 + shift,
                       it.rect.y + (it.rect.h - side) / 2 - int(std::lround(g)) - up, side, side};
             if (liftedPin) {
                 // Carried: eases up out of the bar, so the eye can follow it across.
                 side = side + int(std::lround(pinDragLift * (metrics::taskIconDragSize() -
                                                              side)));
-                area = Rect{it.rect.x + (it.rect.w - side) / 2,
+                area = Rect{it.rect.x + (it.rect.w - side) / 2 + shift,
                             it.rect.y + (it.rect.h - side) / 2 - int(std::lround(pinDragLift * 2)),
                             side, side};
             }
             // Only the focused app gets a backplate; hovering leaves the bar bare
-            // and lets the enlarged icon do the talking. The bloom sits under the
-            // plate, so the light reads as coming from under the button.
-            bloom(it.rect, (active ? 0.45 : 0.0) * appear, 4.f);
+            // and lets the enlarged icon do the talking.
+            bloom(it.rect.moved(shift, 0), (active ? 0.45 : 0.0) * appear, 4.f);
             if (active) {
-                comp.drawRect(Rect{it.rect.x + 2, it.rect.y + 2, it.rect.w - 4,
+                comp.drawRect(Rect{it.rect.x + 2 + shift, it.rect.y + 2, it.rect.w - 4,
                                    it.rect.h - 4},
                               4.f, theme::kTaskActivePlate, float(appear));
             }
@@ -804,21 +823,21 @@ void Manager::drawTaskbar() {
             if (!w) continue;
             active = (w == focused) && !w->minimized;
             running = true;
-            const double mag = i < taskMagnify.size() ? taskMagnify[i] : 1.0;
-            const double restGrow = (1.0 + 0.12 * g + (active ? 0.05 : 0.0)) *
+            const double mag = i < taskScale.size() ? taskScale[i] : 1.0;
+            const double restGrow = (active ? 1.05 : 1.0) *
                                     (0.82 + 0.18 * appear) * (1.0 - 0.07 * press);
             const int restSide =
                 std::max(4, int(std::lround(metrics::taskIconSize() * restGrow)));
             const int side = std::max(4, int(std::lround(restSide * mag)));
             const int up = (side - restSide) / 2;
-            const Rect iconArea{it.rect.x + (it.rect.w - side) / 2,
+            const Rect iconArea{it.rect.x + (it.rect.w - side) / 2 + shift,
                                 it.rect.y + (it.rect.h - side) / 2 - int(std::lround(g)) - up,
                                 side, side};
             // The same accent bloom as a pinned button, then the active plate. No
             // hover wash: the icon's own growth is the whole hover response.
-            bloom(it.rect, (active ? 0.45 : 0.0) * appear, 4.f);
+            bloom(it.rect.moved(shift, 0), (active ? 0.45 : 0.0) * appear, 4.f);
             if (active) {
-                comp.drawRect(Rect{it.rect.x + 2, it.rect.y + 2, it.rect.w - 4,
+                comp.drawRect(Rect{it.rect.x + 2 + shift, it.rect.y + 2, it.rect.w - 4,
                                    it.rect.h - 4},
                               4.f, theme::kTaskActivePlate, float(appear));
             }
@@ -841,7 +860,7 @@ void Manager::drawTaskbar() {
             const int ph = active ? 4 : 3;
             const Color ic = active ? theme::kAccent
                                     : mixColor(theme::kTextDim, theme::kTextMuted, float(g));
-            const Rect pill{it.rect.x + (it.rect.w - iw) / 2,
+            const Rect pill{it.rect.x + (it.rect.w - iw) / 2 + shift,
                             bar.bottom() - 6 - int(std::lround(press * 1.5)), iw, ph};
             // A short, faint copy underneath is enough to read as a glow, which is
             // what makes the focused app's indicator look lit rather than painted.

@@ -273,12 +273,15 @@ void Manager::onCrossing(XCrossingEvent& ev) {
         updateHoverStates(ev.x, ev.y);
         return;
     }
-// Pointer left our chrome: clear every hover so nothing looks stuck.
-if (hoverStart || hoverShowDesktop || hoverClock || hoverTaskIndex >= 0 ||
-        tabletHover >= 0) {
+// Pointer left our chrome: clear every hover so nothing looks stuck. The dock
+// magnification field reads pointerOnTaskbar, so it relaxes here too -- a
+// LeaveNotify carries no motion of its own.
+    if (hoverStart || hoverShowDesktop || hoverClock || hoverTaskIndex >= 0 ||
+        tabletHover >= 0 || pointerOnTaskbar) {
         hoverStart = hoverShowDesktop = hoverClock = false;
         hoverTaskIndex = -1;
         tabletHover = -1;
+        pointerOnTaskbar = false;
         dirty = true;
     }
     // A caption button pressed and then abandoned (pointer slid off the shell,
@@ -981,7 +984,7 @@ void Manager::handleTaskbarPress(int x, int y, unsigned button) {
         return;
     }
     for (size_t i = 0; i < taskItems.size(); ++i) {
-        if (!taskItems[i].rect.contains(x, y)) continue;
+        if (!taskHitRect(i).contains(x, y)) continue;
         // A pinned button right clicks into its own pin/unpin menu, so its
         // button is never the same target as its window button.
         if (taskItems[i].pin >= 0) {

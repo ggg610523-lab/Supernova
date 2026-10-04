@@ -26,6 +26,7 @@
 #include "apps.h"
 #include "compositor.h"
 #include "icons.h"
+#include "motion.h"
 #include "sysctl.h"
 #include "text.h"
 #include "theme.h"
@@ -346,6 +347,12 @@ private:
     void drawContextMenu();
     void drawStats();
     void layoutTaskbar();
+    // The rectangle a taskbar button's icon occupies on screen right now: its
+    // static cell, slid by the dock's spread and grown by the zoom. Hover and
+    // clicks test this unioned with the static cell, so the icon the pointer is
+    // actually over is the one that answers (Plank unions the item draw region
+    // into its hover region for the same reason).
+    Rect taskHitRect(size_t index) const;
     void layoutStartMenu();
     void drawTextAt(const std::string& s, int px, Weight w, const Color& c, int x, int y);
     void drawTextCentered(const std::string& s, int px, Weight w, const Color& c, const Rect& r);
@@ -684,10 +691,22 @@ private:
     std::vector<double> taskAppear;        // per taskbar button, ease-in of a new button
     bool taskAppearPrimed = false;         // first layout fills in, later ones animate
     std::vector<double> taskPress;         // per taskbar button, the press pop
-    // macOS-dock magnification: each button's 1..1+max scale as the cursor nears
-    // its centre. The Start button magnifies with the same fall-off.
-    std::vector<double> taskMagnify;
-    double startMagnify = 1.0;
+    // Dock magnification, following Plank (PositionManager::update_draw_values):
+    // each icon's scale is a parabola in the normalised distance to the pointer,
+    // which reaches *exactly* rest at the zoom radius, and each icon also slides
+    // away from the pointer so the row opens up around it. A single spring holds
+    // Plank's zoom_in_progress, so entering and leaving the bar swells the whole
+    // field instead of snapping it. The Start button is item 0 of the same row.
+    std::vector<double> taskScale;    // per task button, 1.0 .. 1 + peak
+    std::vector<int> taskShift;       // per task button, pixels slid from its cell
+    double startScale = 1.0;          // the Start button (item 0)
+    int startShift = 0;
+    motion::Spring dockZoomSpring{0.0, 0.0};  // Plank's zoom_in_progress (0..1)
+    // Whether the pointer is over the taskbar (or the strip just above it that a
+    // magnified icon grows into). The field reads this rather than pointerY so it
+    // relaxes the moment the pointer leaves, even if no further motion event
+    // arrives.
+    bool pointerOnTaskbar = false;
     double startHoverAnim = 0.0;           // Start button wash
     double showDesktopHoverAnim = 0.0;     // show-desktop sliver
     double clockHoverAnim = 0.0;           // clock/date cluster wash
