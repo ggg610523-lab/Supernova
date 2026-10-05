@@ -3,10 +3,13 @@
 #include "manager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <dirent.h>
 #include <fstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace wm {
 namespace {
@@ -54,6 +57,154 @@ BatteryReading probeBattery() {
     }
     closedir(d);
     return r;
+}
+
+// Calendar helpers. day count is the only calendar maths the card needs, and it
+// is kept here rather than pulling in a date library for one month grid.
+int daysInMonth(int year, int mon /*0-11*/) {
+    static const int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (mon == 1 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) return 29;
+    return kDays[mon];
+}
+
+// Weather card reading. The shell never touches the network: the iOS 18 panel is
+// drawn from ~/.config/win11wm/weather when the user has written one, and from a
+// pleasant default when they have not, so the card is never blank and the shell
+// never blocks on a fetch.
+struct WeatherReading {
+    std::string city;
+    int temp = 0;
+    std::string condition;
+    int high = 0;
+    int low = 0;
+    std::vector<std::pair<std::string, int>> hourly;  // label, temperature
+};
+
+std::string lower(std::string s) {
+    for (char& c : s) c = char(std::tolower((unsigned char)c));
+    return s;
+}
+
+// Collapses the many condition names into the four glyphs the card can draw:
+// clear, partly cloudy, overcast, and wet. Everything unmatched reads as grey
+// sky, which is the safest thing to show when the text is unrecognised.
+enum class SkyGlyph { Clear, Partly, Overcast, Wet };
+
+SkyGlyph skyGlyphFor(const std::string& condition) {
+    const std::string s = lower(condition);
+    const auto has = [&s](const char* w) { return s.find(w) != std::string::npos; };
+    if (has("rain") || has("drizzle") || has("shower") || has("thunder") || has("storm") ||
+        has("snow") || has("sleet") || has("hail"))
+        return SkyGlyph::Wet;
+    if (has("part") || has("mostly sunny") || has("few") || has("scattered") || has("breaks"))
+        return SkyGlyph::Partly;
+    if (has("clear") || has("sun") || has("fair")) return SkyGlyph::Clear;
+    return SkyGlyph::Overcast;
+}
+
+WeatherReading readWeatherConfig() {
+    WeatherReading r;
+    r.city = "Cupertino";
+    r.temp = 72;
+    r.condition = "Partly Cloudy";
+    r.high = 78;
+    r.low = 64;
+    r.hourly = {{"Now", 72}, {"1PM", 74}, {"2PM", 76}, {"3PM", 77}, {"4PM", 76}};
+
+    std::ifstream f(configPath("weather"));
+    std::string line;
+    while (f && std::getline(f, line)) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = trim(line.substr(0, eq));
+        const std::string val = trim(line.substr(eq + 1));
+        if (key == "city") r.city = val;
+        else if (key == "condition") r.condition = val;
+        else if (key == "temp") r.temp = std::atoi(val.c_str());
+        else if (key == "high") r.high = std::atoi(val.c_str());
+        else if (key == "low") r.low = std::atoi(val.c_str());
+        else if (key == "hourly") {
+            r.hourly.clear();
+            size_t i = 0;
+            while (i < val.size()) {
+                const size_t comma = val.find(',', i);
+                const size_t end = comma == std::string::npos ? val.size() : comma;
+                const std::string item = trim(val.substr(i, end - i));
+                const size_t colon = item.rfind(':');
+                if (colon != std::string::npos) {
+                    const std::string lab = trim(item.substr(0, colon));
+                    const int tp = std::atoi(trim(item.substr(colon + 1)).c_str());
+                    if (!lab.empty()) r.hourly.push_back({lab, tp});
+                }
+                if (comma == std::string::npos) break;
+                i = comma + 1;
+            }
+        }
+    }
+    if (r.hourly.size() > 6) r.hourly.resize(6);
+    if (r.hourly.empty()) r.hourly.push_back({"Now", r.temp});
+    if (r.city.empty()) r.city = "My Location";
+    return r;
+}
+
+// The sky gradient: a clear blue by day, a night blue after dark, and a muted
+// grey-blue under cloud or rain -- the same shift the iOS Weather panel makes.
+void weatherPalette(SkyGlyph sky, bool night, Color& top, Color& bottom) {
+    if (night) {
+        top = theme::kWidgetWeatherNightTop;
+        bottom = theme::kWidgetWeatherNightBottom;
+        return;
+    }
+    if (sky == SkyGlyph::Clear) {
+        top = theme::kWidgetWeatherClearTop;
+        bottom = theme::kWidgetWeatherClearBottom;
+    } else if (sky == SkyGlyph::Wet) {
+        top = theme::kWidgetWeatherRainTop;
+        bottom = theme::kWidgetWeatherRainBottom;
+    } else {
+        top = theme::kWidgetWeatherCloudTop;
+        bottom = theme::kWidgetWeatherCloudBottom;
+    }
+}
+
+// A condition glyph built from primitives, so the card needs no icon theme and
+// stays crisp at any widget size. `s` is the glyph's nominal diameter.
+void weatherGlyph(Compositor& comp, int cx, int cy, float s, SkyGlyph sky, const Color& ink,
+                  const Color& sun) {
+    auto circle = [&](float x, float y, float r, const Color& c) {
+        comp.drawRect(Rect{int(std::lround(x - r)), int(std::lround(y - r)),
+                           int(std::lround(2 * r)), int(std::lround(2 * r))},
+                      r, c);
+    };
+    auto cloud = [&](float x, float y, float cs) {
+        circle(x - cs * 0.22f, y - cs * 0.06f, cs * 0.30f, ink);
+        circle(x + cs * 0.20f, y - cs * 0.02f, cs * 0.24f, ink);
+        comp.drawRect(Rect{int(std::lround(x - cs * 0.55f)), int(std::lround(y + cs * 0.06f)),
+                           int(std::lround(cs * 1.10f)), int(std::lround(cs * 0.34f))},
+                      cs * 0.17f, ink);
+    };
+
+    if (sky == SkyGlyph::Clear) {
+        circle(cx, cy, s * 0.30f, sun);
+        for (int i = 0; i < 8; ++i) {
+            const float a = i * float(kPi) / 4.f;
+            const int px = int(std::lround(cx + std::sin(a) * s * 0.44f));
+            const int py = int(std::lround(cy - std::cos(a) * s * 0.44f));
+            comp.drawRectRotated(px, py, int(std::max(2.f, s * 0.055f)), int(std::max(3.f, s * 0.16f)),
+                                 a, s * 0.03f, sun, 1.f);
+        }
+    } else if (sky == SkyGlyph::Partly) {
+        circle(cx + s * 0.17f, cy - s * 0.20f, s * 0.19f, sun);
+        cloud(cx - s * 0.04f, cy + s * 0.10f, s * 0.86f);
+    } else if (sky == SkyGlyph::Wet) {
+        cloud(cx, cy - s * 0.10f, s * 0.92f);
+        for (int i = -1; i <= 1; ++i)
+            comp.drawRectRotated(int(std::lround(cx + i * s * 0.26f)), int(std::lround(cy + s * 0.34f)),
+                                 int(std::max(2.f, s * 0.05f)), int(std::lround(s * 0.22f)), 0.35f,
+                                 s * 0.025f, ink, 1.f);
+    } else {
+        cloud(cx, cy + s * 0.02f, s * 0.98f);
+    }
 }
 
 // A rounded bar placed along the radial direction at angle `a` (clockwise from
@@ -122,7 +273,34 @@ void Manager::initWidgets() {
     widgets.clear();
     addWidget(WidgetKind::Clock);
     addWidget(WidgetKind::Battery);
+    addWidget(WidgetKind::Calendar);
+    addWidget(WidgetKind::Weather);
+    addWidget(WidgetKind::DigitalClock);
     refreshBattery(true);
+    refreshWeather(true);
+}
+
+// Reads ~/.config/win11wm/weather (or the built-in default) and folds the time
+// of day in, so the panel darkens after sunset. Runs on the same slow timer as
+// the battery: the file changes rarely and the card must not reread it per frame.
+void Manager::refreshWeather(bool force) {
+    const WeatherReading r = readWeatherConfig();
+    time_t t = time(nullptr);
+    struct tm lt {};
+    localtime_r(&t, &lt);
+    const bool night = lt.tm_hour < 6 || lt.tm_hour >= 19;
+    if (force || r.city != weatherCity || r.temp != weatherTemp || r.condition != weatherCondition ||
+        r.high != weatherHigh || r.low != weatherLow || r.hourly != weatherHourly ||
+        night != weatherNight) {
+        weatherCity = r.city;
+        weatherTemp = r.temp;
+        weatherCondition = r.condition;
+        weatherHigh = r.high;
+        weatherLow = r.low;
+        weatherHourly = r.hourly;
+        weatherNight = night;
+        dirty = true;
+    }
 }
 
 // Tablet mode has nowhere to put the cards -- its grid is a page of app icons, not
@@ -151,8 +329,20 @@ void Manager::restoreWidgets() {
 }
 
 void Manager::addWidget(WidgetKind kind) {
-    const int w = kind == WidgetKind::Clock ? metrics::kWidgetClock : metrics::kWidgetBatteryW;
-    const int h = kind == WidgetKind::Clock ? metrics::kWidgetClock : metrics::kWidgetBatteryH;
+    int w = metrics::kWidgetClock, h = metrics::kWidgetClock;
+    switch (kind) {
+        case WidgetKind::Clock: break;
+        case WidgetKind::Battery: w = metrics::kWidgetBatteryW; h = metrics::kWidgetBatteryH; break;
+        case WidgetKind::Calendar:
+            w = metrics::kWidgetCalendarW;
+            h = metrics::kWidgetCalendarH;
+            break;
+        case WidgetKind::Weather: w = metrics::kWidgetWeatherW; h = metrics::kWidgetWeatherH; break;
+        case WidgetKind::DigitalClock:
+            w = metrics::kWidgetDigitalW;
+            h = metrics::kWidgetDigitalH;
+            break;
+    }
     const int bottom = screenH - metrics::taskbarH;
     int x = screenW - w - metrics::kWidgetPad;
     int y = metrics::kWidgetPad;
@@ -180,6 +370,7 @@ void Manager::addWidget(WidgetKind kind) {
     y = std::clamp(y, metrics::kWidgetPad, std::max(metrics::kWidgetPad, bottom - h - metrics::kWidgetPad));
     widgets.push_back(Widget{kind, Rect{x, y, w, h}, page});
     if (kind == WidgetKind::Battery) refreshBattery(true);
+    else if (kind == WidgetKind::Weather) refreshWeather(true);
     layoutDesktopIcons();
     dirty = true;
 }
@@ -298,13 +489,28 @@ void Manager::drawWidgets() {
                 top = theme::kWidgetBatteryLowTop;
                 bottom = theme::kWidgetBatteryLowBottom;
             }
+        } else if (w.kind == WidgetKind::Calendar) {
+            top = theme::kWidgetCalendarTop;
+            bottom = theme::kWidgetCalendarBottom;
+        } else if (w.kind == WidgetKind::Weather) {
+            weatherPalette(skyGlyphFor(weatherCondition), weatherNight, top, bottom);
         }
-        gradientPanel(comp, w.rect, radius, top, bottom);
-        if (hv > 0.001) comp.drawRect(w.rect, radius, theme::kWidgetHover, float(hv));
-        if (w.kind == WidgetKind::Clock)
-            drawClockWidget(w);
-        else
-            drawBatteryWidget(w);
+        // The digital clock is bare type on the wallpaper: no card, and no hover
+        // wash either -- a panel appearing under the pointer would be exactly the
+        // background it is meant not to have. It stays draggable and resizable; the
+        // corner grip is what shows when it is hot.
+        const bool bare = w.kind == WidgetKind::DigitalClock;
+        if (!bare) {
+            gradientPanel(comp, w.rect, radius, top, bottom);
+            if (hv > 0.001) comp.drawRect(w.rect, radius, theme::kWidgetHover, float(hv));
+        }
+        switch (w.kind) {
+            case WidgetKind::Clock: drawClockWidget(w); break;
+            case WidgetKind::Battery: drawBatteryWidget(w); break;
+            case WidgetKind::Calendar: drawCalendarWidget(w); break;
+            case WidgetKind::Weather: drawWeatherWidget(w); break;
+            case WidgetKind::DigitalClock: drawDigitalClock(w); break;
+        }
         if (hot) {  // diagonal resize grip
             const Rect g = widgetGripRect(w);
             for (int k = 0; k < 3; ++k) {
@@ -402,6 +608,152 @@ void Manager::drawBatteryWidget(const Widget& w) {
         }
         comp.drawRect(Rect{tx + pillW + 2, py + pillH / 2 - 5, 5, 10}, 2.f, theme::kWidgetRingTrack);
     }
+}
+
+// The iOS 18 Calendar widget: a white card, the month and year, a Sunday-first
+// weekday header, and a six-week grid with today ringed in systemRed. Leading
+// and trailing days of the neighbouring months are drawn faintly so the block
+// reads as a whole month rather than a ragged patch.
+void Manager::drawCalendarWidget(const Widget& w) {
+    const int pad = metrics::kWidgetPad;
+    const int gx = w.rect.x + pad;
+    const int gw = std::max(1, w.rect.w - 2 * pad);
+
+    time_t t = time(nullptr);
+    struct tm lt {};
+    localtime_r(&t, &lt);
+    const int year = lt.tm_year + 1900;
+    const int mon = lt.tm_mon;
+    const int today = lt.tm_mday;
+
+    static const char* kMonths[] = {"January",  "February", "March",    "April",
+                                    "May",      "June",     "July",     "August",
+                                    "September", "October",  "November", "December"};
+    drawTextCentered(std::string(kMonths[mon]) + " " + std::to_string(year), 18, Weight::Medium,
+                     theme::kWidgetCalText, Rect{gx, w.rect.y + pad - 3, gw, 24});
+
+    static const char* kWeek[] = {"S", "M", "T", "W", "T", "F", "S"};
+    const int cellW = std::max(1, gw / 7);
+    const int gridX = gx + (gw - cellW * 7) / 2;
+    const int weekY = w.rect.y + pad + 24;
+    for (int c = 0; c < 7; ++c)
+        drawTextCentered(kWeek[c], 11, Weight::Medium, theme::kWidgetCalMuted,
+                         Rect{gridX + c * cellW, weekY, cellW, 14});
+
+    const int divY = weekY + 17;
+    comp.drawRect(Rect{gx, divY, gw, 1}, 0.f, theme::kWidgetCalLine);
+
+    struct tm first {};
+    first.tm_year = year - 1900;
+    first.tm_mon = mon;
+    first.tm_mday = 1;
+    mktime(&first);
+    const int lead = first.tm_wday;  // 0 = Sunday
+    const int dim = daysInMonth(year, mon);
+    const int prevDim = daysInMonth(year, (mon + 11) % 12);
+
+    const int gridY = divY + 5;
+    const int rowH = std::max(1, (w.rect.bottom() - pad - gridY) / 6);
+    for (int i = 0; i < 42; ++i) {
+        const int col = i % 7;
+        const int rowi = i / 7;
+        const int dayNo = i - lead + 1;
+        const bool other = dayNo < 1 || dayNo > dim;
+        const int num = dayNo < 1 ? prevDim + dayNo : (dayNo > dim ? dayNo - dim : dayNo);
+
+        const int cx = gridX + col * cellW + cellW / 2;
+        const int cy = gridY + rowi * rowH + rowH / 2;
+        const bool isToday = !other && num == today;
+        const int r = std::min(cellW, rowH) / 2 - 2;
+        if (isToday && r > 3)
+            comp.drawRect(Rect{cx - r, cy - r, 2 * r, 2 * r}, float(r), theme::kWidgetCalAccent);
+
+        const Color ink = isToday ? theme::kWidgetCalAccentInk
+                                  : (other ? theme::kWidgetCalMuted : theme::kWidgetCalText);
+        drawTextCentered(std::to_string(num), std::max(10, std::min(14, rowH - 8)),
+                         other ? Weight::Regular : Weight::Medium, ink,
+                         Rect{cx - cellW / 2, cy - rowH / 2, cellW, rowH});
+    }
+}
+
+// The iOS 18 Weather widget: a sky gradient carrying the city, a very large
+// temperature, the condition, the day's high and low, a condition glyph, and a
+// row of hourly readings along the bottom.
+void Manager::drawWeatherWidget(const Widget& w) {
+    const int pad = metrics::kWidgetPad;
+    const int x0 = w.rect.x + pad;
+    const int gw = std::max(1, w.rect.w - 2 * pad);
+
+    drawTextAt(weatherCity, 15, Weight::Medium, theme::kWidgetWeatherInk, x0, w.rect.y + pad - 4);
+
+    char temp[16];
+    std::snprintf(temp, sizeof temp, "%d\u00b0", weatherTemp);
+    const int bigY = w.rect.y + pad + 10;
+    drawTextAt(temp, 40, Weight::Medium, theme::kWidgetWeatherInk, x0 - 2, bigY);
+
+    drawTextAt(weatherCondition, 14, Weight::Regular, theme::kWidgetWeatherSub, x0, bigY + 46);
+
+    char hl[32];
+    std::snprintf(hl, sizeof hl, "H:%d\u00b0  L:%d\u00b0", weatherHigh, weatherLow);
+    drawTextAt(hl, 13, Weight::Regular, theme::kWidgetWeatherFaint, x0, bigY + 64);
+
+    weatherGlyph(comp, w.rect.right() - pad - 34, w.rect.y + pad + 38, 56.f,
+                 skyGlyphFor(weatherCondition), theme::kWidgetWeatherInk, theme::kWidgetWeatherSun);
+
+    const int n = int(weatherHourly.size());
+    if (n > 0) {
+        const int stripH = 38;
+        const int stripY = w.rect.bottom() - 14 - stripH;
+        const int cellW = std::max(1, gw / n);
+        for (int i = 0; i < n; ++i) {
+            const int cx = x0 + i * cellW + cellW / 2;
+            drawTextCentered(weatherHourly[size_t(i)].first, 11, Weight::Medium,
+                             theme::kWidgetWeatherSub, Rect{cx - cellW / 2, stripY, cellW, 14});
+            drawTextCentered(std::to_string(weatherHourly[size_t(i)].second) + "\u00b0", 14,
+                             Weight::Medium, theme::kWidgetWeatherInk,
+                             Rect{cx - cellW / 2, stripY + 20, cellW, 20});
+        }
+    }
+}
+
+// A bedside-style digital clock: no card, just the time set huge in the Poppins
+// ExtraBold display face with the date beneath it in the UI font. The point size
+// is chosen to fill the widget's footprint -- as large as the width and the clock
+// band both allow -- so resizing it scales the digits rather than leaving them at
+// a fixed size.
+void Manager::drawDigitalClock(const Widget& w) {
+    const int pad = metrics::kWidgetPad;
+    const int gx = w.rect.x + pad;
+    const int gw = std::max(1, w.rect.w - 2 * pad);
+
+    time_t t = time(nullptr);
+    struct tm lt {};
+    localtime_r(&t, &lt);
+    char hhmm[16];
+    std::snprintf(hhmm, sizeof hhmm, "%02d:%02d", lt.tm_hour, lt.tm_min);
+
+    Text& display = displayText();
+
+    // The time owns the space above the date line. Start the face at the band's
+    // own height and shrink it until both the rendered height and the advance
+    // width fit, which lands on the largest size the widget can carry.
+    const int topPad = 10;
+    const int band = std::max(24, w.rect.h - topPad - pad - 26);  // reserve the date line
+    int px = band;
+    int mh = 0;
+    const int mw = measureIn(display, hhmm, px, Weight::Bold, &mh);
+    if (mh > band || mw > gw) {
+        const double s = std::min(double(band) / std::max(1, mh), double(gw) / std::max(1, mw));
+        px = std::max(18, int(px * s));
+    }
+    const Rect timeArea{gx, w.rect.y + topPad, gw, band};
+    const Rect dateArea{gx, w.rect.y + topPad + band + 4, gw, 22};
+
+    char dateStr[64];
+    strftime(dateStr, sizeof dateStr, "%A, %d %B", &lt);
+
+    drawTextCenteredIn(display, hhmm, px, Weight::Bold, theme::kWidgetDigitalInk, timeArea);
+    drawTextCentered(dateStr, 15, Weight::Medium, theme::kWidgetDigitalDim, dateArea);
 }
 
 }  // namespace wm

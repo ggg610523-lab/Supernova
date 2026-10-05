@@ -524,6 +524,27 @@ void Manager::drawTextRight(const std::string& s, int px, Weight w, const Color&
     comp.drawText(t, Rect{right - t.w, y, t.w, t.h}, c, 1.0f);
 }
 
+// drawTextCentered() against a chosen Text instance, for content that is set in
+// a face other than the UI font (the digital clock's display characters).
+void Manager::drawTextCenteredIn(Text& t, const std::string& s, int px, Weight w, const Color& c,
+                                 const Rect& area) {
+    if (s.empty()) return;
+    const TextTex tx = t.get(s, px, w);
+    if (!tx.tex) return;
+    comp.drawText(tx, Rect{area.x + (area.w - tx.w) / 2, area.y + (area.h - tx.h) / 2, tx.w, tx.h},
+                  c, 1.0f);
+}
+
+int Manager::measureIn(Text& t, const std::string& s, int px, Weight w, int* outH) {
+    if (s.empty()) {
+        if (outH) *outH = 0;
+        return 0;
+    }
+    return t.measure(s, px, w, outH);
+}
+
+Text& Manager::displayText() { return clockText.ready() ? clockText : text; }
+
 // The Windows 11 Start logo. The bundled PNG (assets/icons/2048.png) is asked
 // for by name so it wins over the vector source (2048.svg), which librsvg would
 // otherwise prefer: the raster is the artwork that should show. The "2048"

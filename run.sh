@@ -52,11 +52,19 @@ fi
 # ---------------------------------------------------------------------- assets
 STAMP="$ROOT/assets/.stamp"
 if [[ "$FETCH" != no ]]; then
-  # A stamp written before Hatter existed has no hatter= line, so those checkouts
-  # fetch once more to pick the app icon theme up.
+  # A bare command is not a valid [[ ]] operand, so the stamp grep runs outside
+  # it. Any missing piece -- the wallpaper, the clock font, or a stamp written
+  # before Hatter existed -- means fetch once more to pick it up.
+  need_fetch=0
   if [[ "$FETCH" == force || ! -f "$STAMP" ||
         ! -s "$ROOT/assets/wallpaper/wallpaper.png" ||
-        ! grep -q '^hatter=' "$STAMP" ]]; then
+        ! -s "$ROOT/assets/fonts/Poppins-ExtraBold.ttf" ]]; then
+    need_fetch=1
+  fi
+  if ! grep -q '^hatter=' "$STAMP" 2>/dev/null; then
+    need_fetch=1
+  fi
+  if [[ $need_fetch -eq 1 ]]; then
     say "fetching bundled assets (Hatter + Reversal icons, MuternVF, wallpaper)"
     [[ "$FETCH" == force ]] && "$ROOT/scripts/fetch-assets.sh" --force \
                              || "$ROOT/scripts/fetch-assets.sh"

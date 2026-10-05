@@ -265,6 +265,43 @@ bool Text::init(const std::string& fontDir) {
     return true;
 }
 
+bool Text::initFromFile(const std::string& path) {
+    if (ready_ || attempted_) return ready_;
+    attempted_ = true;
+
+    if (!FcInit()) {
+        log("fontconfig: init failed");
+        return false;
+    }
+    FT_Library lib = nullptr;
+    if (FT_Init_FreeType(&lib) != 0) {
+        log("FreeType: init failed");
+        return false;
+    }
+    lib_ = lib;
+
+    // One face per weight slot: an FT_Face holds the pixel size it was last set
+    // to, and the cache may hold the same string at several sizes at once, so the
+    // three slots must not share a single handle.
+    for (int i = 0; i < 3; ++i) {
+        FT_Face face = nullptr;
+        if (FT_New_Face(lib, path.c_str(), 0, &face) != 0 || !face) {
+            log("display font: cannot open %s", path.c_str());
+            shutdown();
+            return false;
+        }
+        faces_[i] = face;
+        facePx_[i] = 0;
+        if (i == 0 && face->family_name) family_ = face->family_name;
+    }
+    if (family_.empty()) family_ = "display";
+    bundled_ = true;
+    synthBold_ = false;  // already a heavy cut; emboldening it would only smear
+    ready_ = true;
+    log("font: \"%s\" (display, %s)", family_.c_str(), path.c_str());
+    return true;
+}
+
 void Text::shutdown() {
     for (auto& kv : cache_) {
         if (kv.second.tex.tex) {

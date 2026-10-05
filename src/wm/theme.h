@@ -318,6 +318,45 @@ inline constexpr Color kWidgetTickMinor = rgb(0xFFFFFF, 0.40f);
 inline constexpr Color kWidgetHand = rgb(0xFFFFFF, 1.0f);
 inline constexpr Color kWidgetSecond = rgb(0xFF9F0A);         // iOS systemOrange
 
+// --- calendar widget (iOS 18 Calendar) ------------------------------------
+// The calendar card is the one light widget in the set: a white panel with the
+// system font in near-black, a muted weekday header, and today ringed in the
+// iOS systemRed. Weekends and the trailing days of the month are muted rather
+// than hidden, which is what makes the month read at a glance.
+inline constexpr Color kWidgetCalendarTop = rgb(0xFFFFFF);
+inline constexpr Color kWidgetCalendarBottom = rgb(0xF4F4F7);
+inline constexpr Color kWidgetCalText = rgb(0x1C1C1E);
+inline constexpr Color kWidgetCalMuted = rgb(0x9A9AA0);
+inline constexpr Color kWidgetCalWeekend = rgb(0xB0B0B8);
+inline constexpr Color kWidgetCalAccent = rgb(0xFF3B30);      // iOS systemRed
+inline constexpr Color kWidgetCalAccentInk = rgb(0xFFFFFF);
+inline constexpr Color kWidgetCalLine = rgb(0x1C1C1E, 0.10f);
+
+// --- weather widget (iOS 18 Weather) --------------------------------------
+// A sky gradient keyed to the condition, with the white type iOS uses on top:
+// the city, a very large temperature, the condition, the day's high and low,
+// and a row of hourly readings along the bottom.
+inline constexpr Color kWidgetWeatherClearTop = rgb(0x54A9E8);
+inline constexpr Color kWidgetWeatherClearBottom = rgb(0x1E6FB4);
+inline constexpr Color kWidgetWeatherCloudTop = rgb(0x7E93A8);
+inline constexpr Color kWidgetWeatherCloudBottom = rgb(0x4A5C70);
+inline constexpr Color kWidgetWeatherRainTop = rgb(0x5A6B7E);
+inline constexpr Color kWidgetWeatherRainBottom = rgb(0x333F4D);
+inline constexpr Color kWidgetWeatherNightTop = rgb(0x2A3550);
+inline constexpr Color kWidgetWeatherNightBottom = rgb(0x121A2E);
+inline constexpr Color kWidgetWeatherInk = rgb(0xFFFFFF);
+inline constexpr Color kWidgetWeatherSub = rgb(0xFFFFFF, 0.78f);
+inline constexpr Color kWidgetWeatherFaint = rgb(0xFFFFFF, 0.55f);
+inline constexpr Color kWidgetWeatherPane = rgb(0xFFFFFF, 0.14f);
+inline constexpr Color kWidgetWeatherSun = rgb(0xFFD60A);   // iOS systemYellow
+
+// --- digital clock widget -------------------------------------------------
+// The clock carries no card: it is bare type floating on the wallpaper, the way
+// a bedside clock is, so these are only its ink and the dimmer date beneath it.
+// The time is set in the bundled Poppins ExtraBold display face.
+inline constexpr Color kWidgetDigitalInk = rgb(0xFFFFFF);
+inline constexpr Color kWidgetDigitalDim = rgb(0xFFFFFF, 0.55f);
+
 inline constexpr Color kWidgetPin = rgb(0xFFFFFF, 0.95f);
 inline constexpr Color kWidgetRingTrack = rgb(0xFFFFFF, 0.28f);
 inline constexpr Color kWidgetGrip = rgb(0xFFFFFF, 0.28f);
@@ -493,6 +532,12 @@ constexpr int kWidgetGrip = 22;        // bottom-right resize handle (hit box)
 constexpr int kWidgetClock = 168;      // small square widget edge
 constexpr int kWidgetBatteryW = 344;   // medium widget
 constexpr int kWidgetBatteryH = 168;
+constexpr int kWidgetCalendarW = 344;  // month grid needs the width
+constexpr int kWidgetCalendarH = 232;
+constexpr int kWidgetWeatherW = 344;   // matches the battery's medium footprint
+constexpr int kWidgetWeatherH = 168;
+constexpr int kWidgetDigitalW = 344;   // wide enough for a huge HH:MM
+constexpr int kWidgetDigitalH = 168;
 constexpr int kWidgetPad = 16;         // widget origin inset
 
 }  // namespace metrics

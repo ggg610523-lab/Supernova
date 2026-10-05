@@ -35,6 +35,13 @@ public:
     // when it holds MuternVF.ttf that variable font is used directly, with the
     // static Text instances and fontconfig as fallbacks.
     bool init(const std::string& fontDir = std::string());
+    // Loads one specific file for every weight slot. The digital clock's display
+    // face is a single heavy weight, not a family with Regular/Medium/Bold, so all
+    // three slots open the same cut and the widget can ask for Bold and still get
+    // the display weight it wants. False leaves the instance unusable, which the
+    // caller falls back from.
+    bool initFromFile(const std::string& path);
+    bool ready() const { return ready_; }
     void shutdown();
 
     // Rasterise `utf8` at `px` pixels and return its GL texture (cached).

@@ -934,7 +934,10 @@ void Manager::applyContextAction(int index) {
             return;
         }
         if (index == row++) addWidget(WidgetKind::Clock);
-        else if (index == row) addWidget(WidgetKind::Battery);
+        else if (index == row++) addWidget(WidgetKind::Battery);
+        else        if (index == row++) addWidget(WidgetKind::Calendar);
+        else if (index == row++) addWidget(WidgetKind::Weather);
+        else if (index == row) addWidget(WidgetKind::DigitalClock);
         return;
     }
     Client* c = contextClient;

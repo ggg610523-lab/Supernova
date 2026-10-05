@@ -8,8 +8,11 @@
 namespace wm {
 
 enum class WidgetKind {
-    Clock,    // analog clock, small square
-    Battery,  // battery / charging state, medium
+    Clock,     // analog clock, small square
+    Battery,   // battery / charging state, medium
+    Calendar,     // month grid with today marked, iOS 18 Calendar style
+    Weather,      // current conditions + hourly strip, iOS 18 Weather style
+    DigitalClock,  // huge HH:MM in the Poppins ExtraBold display face
 };
 
 struct Widget {

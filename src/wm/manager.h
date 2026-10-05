@@ -382,6 +382,15 @@ private:
     void drawTextAt(const std::string& s, int px, Weight w, const Color& c, int x, int y);
     void drawTextCentered(const std::string& s, int px, Weight w, const Color& c, const Rect& r);
     void drawTextRight(const std::string& s, int px, Weight w, const Color& c, int right, int y);
+    // The same two draws against an explicit Text instance, so the digital clock
+    // can set its time in the display face while the rest of the shell stays in
+    // the UI font. measureIn() is the matching metrics-only call.
+    void drawTextCenteredIn(Text& t, const std::string& s, int px, Weight w, const Color& c,
+                            const Rect& r);
+    int measureIn(Text& t, const std::string& s, int px, Weight w, int* outH = nullptr);
+    // The display face when it loaded, the UI font otherwise, so a missing
+    // Poppins-ExtraBold.ttf degrades to an in-family clock rather than no clock.
+    Text& displayText();
     void drawStartGlyph(const Rect& box, const Color& c);
     void drawSearchGlyph(const Rect& box, const Color& c);
     void drawCaptionGlyph(int which, const Rect& box, const Color& c);
@@ -496,6 +505,9 @@ private:
     void drawWidgets();
     void drawClockWidget(const Widget& w);
     void drawBatteryWidget(const Widget& w);
+    void drawCalendarWidget(const Widget& w);
+    void drawWeatherWidget(const Widget& w);
+    void drawDigitalClock(const Widget& w);
     int  widgetAt(int x, int y) const;        // index, or -1
     bool widgetOnPage(const Widget& w) const;  // is this card on the page shown?
     bool handleWidgetPress(int x, int y, Time time);  // true when consumed
@@ -508,6 +520,7 @@ private:
     void restoreWidgets();                    // put back when tablet mode is left
     void openDesktopMenu(int x, int y);       // right click on the desktop
     void refreshBattery(bool force);
+    void refreshWeather(bool force);
     // Corner grip of a widget, for the resize cursor / press test.
     Rect widgetGripRect(const Widget& w) const;
 
@@ -629,6 +642,10 @@ private:
 
     Compositor comp;
     Text text;
+    // The digital clock's display face (Poppins ExtraBold), loaded from the same
+    // fonts directory. A separate instance keeps its glyph cache and its heavy
+    // weight out of the UI font's.
+    Text clockText;
     IconStore icons;
 
     std::vector<std::unique_ptr<Client>> clients;  // bottom .. top
@@ -842,6 +859,18 @@ private:
     bool batteryCharging = false;
     bool batteryFull = false;
     double lastBatteryProbe = 0.0;
+    // Weather card reading. Offline by design: the shell draws the iOS 18 panel
+    // from ~/.config/win11wm/weather when the user has written one, and from a
+    // pleasant default when they have not. Read at startup, when a Weather card
+    // is added, and on the same slow timer as the battery.
+    std::string weatherCity = "Cupertino";
+    int weatherTemp = 72;
+    std::string weatherCondition = "Partly Cloudy";
+    int weatherHigh = 78;
+    int weatherLow = 64;
+    std::vector<std::pair<std::string, int>> weatherHourly;
+    bool weatherNight = false;
+    double lastWeatherProbe = 0.0;
     time_t lastClockSecond = 0;
     int hoverApp = -1;
     int startHoverDot = -1;

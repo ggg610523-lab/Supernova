@@ -307,6 +307,9 @@ int Manager::run(const Options& options) {
     // rasterised Hatter fallback for builds without librsvg.
     icons.init(assetDir + "/icons", assetDir + "/icons-hatter");
     text.init(assetDir + "/fonts");
+    // The digital clock's display face. A miss is not fatal: displayText()
+    // falls back to the UI font, so the clock still tells the time.
+    clockText.initFromFile(assetDir + "/fonts/Poppins-ExtraBold.ttf");
 
     std::string keyError;
     grabKeys(&keyError);
@@ -591,6 +594,7 @@ void Manager::tickAnimations(double now) {
         if (now - lastBatteryProbe > 5000.0) {
             lastBatteryProbe = now;
             refreshBattery(false);
+            refreshWeather(false);
         }
     }
     if (opts->stats) dirty = true;
@@ -2338,6 +2342,9 @@ void Manager::openDesktopMenu(int x, int y) {
     contextItems.push_back("New Folder");
     contextItems.push_back("Add Clock Widget");
     contextItems.push_back("Add Battery Widget");
+    contextItems.push_back("Add Calendar Widget");
+    contextItems.push_back("Add Weather Widget");
+    contextItems.push_back("Add Digital Clock Widget");
 
     const int itemH = 32;
     const int width = 210;
