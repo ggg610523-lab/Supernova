@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "theme.h"
@@ -18,6 +19,23 @@ namespace metrics {
 // moves it while the bar's edge is being dragged.
 int taskbarH = kTaskbarDefaultH;
 }  // namespace metrics
+
+// Layers render() can skip, for WIN11WM_LAYERS profiling. Each bit masks one
+// stage of the paint order so a headless run can attribute frame cost.
+enum : unsigned {
+    kLayWallpaper = 1u << 0,  // wallpaper, desktop icons, widgets
+    kLayClients = 1u << 1,    // managed client windows + launch placeholders
+    kLaySnap = 1u << 2,       // snap preview
+    kLayTaskbar = 1u << 3,    // taskbar
+    kLayStart = 1u << 4,      // Start menu
+    kLayTaskView = 1u << 5,   // task view
+    kLayAltTab = 1u << 6,     // Alt-Tab switcher
+    kLayContext = 1u << 7,    // context menu
+    kLayTablet = 1u << 8,     // tablet chrome / switcher / splash
+    kLayCC = 1u << 9,         // Control Centre
+    kLayDialogs = 1u << 10,   // rename + confirm dialogs
+    kLayAll = 0x7FFu,
+};
 
 namespace {
 
@@ -49,11 +67,19 @@ void Manager::render() {
     if (startOpen) layoutStartMenu();
 
     comp.beginFrame();
-    drawDesktop();
+    // Benchmark hook (WIN11WM_LAYERS): a bitmask that skips whole layers, so a
+    // headless run can attribute GPU time to a specific part of the shell.
+    // Unset in normal use, where every layer is drawn.
+    unsigned layers = ~0u;
+    if (const char* v = std::getenv("WIN11WM_LAYERS")) layers = std::strtoul(v, nullptr, 0);
+    const auto on = [&](unsigned bit) { return (layers & bit) != 0; };
+
+    if (on(kLayWallpaper)) drawDesktop();
 
     // Bottom to top, exactly like the X stacking order, so the focused window
     // is painted last (and therefore on top).
     for (auto& cp : clients) {
+        if (!on(kLayClients)) break;
         Client* c = cp.get();
         if (!c->mapped || c->unredirected) continue;
         // A minimising window stays on screen (warping into its taskbar icon)
@@ -66,29 +92,30 @@ void Manager::render() {
         drawClientSprite(c);
     }
 
-    // App launch placeholders sit above the windows but below the taskbar, so a
-    // just-launched app reads as "opening" the instant it is double-clicked.
-    drawLaunches();
+    if (on(kLayClients)) drawLaunches();
 
-    drawSnapPreview();
-    if (tabletAnim < 0.999) drawTaskbar();
-    if (startOpen || startAnim > 0.0) drawStartMenu();
-    if (taskViewOpen || taskViewAnim > 0.0) drawTaskView();
-    if (altTabOpen || altTabAnim > 0.0) drawAltTab();
-    if (contextOpen || contextAnim > 0.0) drawContextMenu();
+    if (on(kLaySnap)) drawSnapPreview();
+    if (on(kLayTaskbar) && tabletAnim < 0.999) drawTaskbar();
+    if (on(kLayStart) && (startOpen || startAnim > 0.0)) drawStartMenu();
+    if (on(kLayTaskView) && (taskViewOpen || taskViewAnim > 0.0)) drawTaskView();
+    if (on(kLayAltTab) && (altTabOpen || altTabAnim > 0.0)) drawAltTab();
+    if (on(kLayContext) && (contextOpen || contextAnim > 0.0)) drawContextMenu();
     // The iOS app switcher (swipe up and hold on the home bar) sits under the
     // status bar and the home indicator.
-    if (tabletSwitcher || tabletSwitcherAnim > 0.0) drawTabletSwitcher();
+    if (on(kLayTablet) && (tabletSwitcher || tabletSwitcherAnim > 0.0))
+        drawTabletSwitcher();
     // The tablet status bar and home indicator float above an open app, the way
     // iOS keeps them over the app that is running.
-    if (tabletAnim > 0.001) drawTabletChrome();
-    if (ccOpen || ccAnim > 0.0) drawControlCenter();
+    if (on(kLayTablet) && tabletAnim > 0.001) drawTabletChrome();
+    if (on(kLayCC) && (ccOpen || ccAnim > 0.0)) drawControlCenter();
     // The desktop's own dialogs are the last word on the screen while they are up,
     // so nothing behind them reads as actionable.
-    drawDesktopRename();
-    drawConfirmDelete();
+    if (on(kLayDialogs)) {
+        drawDesktopRename();
+        drawConfirmDelete();
+    }
     // The mode transition splash owns the whole screen, so it is painted last.
-    if (modeSwitching) drawTabletSplash();
+    if (on(kLayTablet) && modeSwitching) drawTabletSplash();
     if (opts->stats) drawStats();
 }
 
@@ -1343,27 +1370,52 @@ void Manager::drawContextMenu() {
     const float a = float(eased);
     const int itemH = 32;
     const int pad = contextRing ? 8 : 6;
+    // The ring menu pops out of the ring button exactly the way Control Centre pops
+    // out of the clock: a 0.86 -> 1.0 zoom about the button under the pointer, with
+    // the whole panel fading in as it grows, reversed cleanly on dismissal. Rects
+    // scale and glyphs keep their size, which is what drawControlCenter does too.
+    // The plain context flyout keeps its own drop-and-settle, so its zoom is 1.0
+    // and grow() is the identity.
+    const float zoom = contextRing ? 0.86f + 0.14f * float(eased) : 1.0f;
+    const float ax = float(circleButtonRect.x + circleButtonRect.w / 2);
+    const float ay = float(circleButtonRect.y + circleButtonRect.h / 2);
+    const auto grow = [&](const Rect& r) {
+        if (zoom >= 0.999f) return r;
+        const float cx = float(r.x + r.w / 2), cy = float(r.y + r.h / 2);
+        const float w = float(r.w) * zoom, h = float(r.h) * zoom;
+        return Rect{int(std::lround(cx - w / 2 + (ax - cx) * (1.f - zoom))),
+                    int(std::lround(cy - h / 2 + (ay - cy) * (1.f - zoom))),
+                    int(std::lround(w)), int(std::lround(h))};
+    };
+    // A hairline must stay one pixel tall however far the panel is zoomed out, so
+    // it rides grow() for its position and width only.
+    const auto growHairline = [&](const Rect& r) {
+        const Rect g = grow(r);
+        return Rect{g.x, g.y, g.w, 1};
+    };
     // The flyout drops the last few pixels into place as it fades in, the way
-    // Windows 11 menus do, and reverses cleanly when it is dismissed.
-    const int dy = int(std::lround(-8.0 * (1.0 - eased)));
+    // Windows 11 menus do, and reverses cleanly when it is dismissed. The ring menu
+    // zooms instead of sliding, so it takes no dy.
+    const int dy = contextRing ? 0 : int(std::lround(-8.0 * (1.0 - eased)));
     // The ring menu's height is already settled by layoutRingMenu (it depends on
     // how many rows the recent grid needs), so the panel reads it back rather
     // than recomputing it from the item list.
-    const Rect panel{contextRect.x, contextRect.y + dy, contextRect.w,
-                     contextRing ? contextRect.h
-                                 : int(contextItems.size()) * itemH + 2 * pad};
+    const Rect panel = grow(Rect{contextRect.x, contextRect.y + dy, contextRect.w,
+                                 contextRing ? contextRect.h
+                                             : int(contextItems.size()) * itemH + 2 * pad});
     if (contextRing) {
         // The ring menu wears the taskbar's frosted surface -- the same tint,
         // tint amount, saturate() and hairline -- so the two read as one
-        // material. A soft shadow lifts it off the desktop.
+        // material. A soft shadow lifts it off the desktop. The corner rides the
+        // zoom, the way drawControlCenter scales its panel radius.
+        const float radius = float(metrics::kFlyoutRadius) * zoom;
         for (int i = 8; i >= 1; --i) {
             const float t = float(i) / 8.0f;
-            comp.drawRect(panel.inflated(i), float(metrics::kFlyoutRadius) + float(i),
-                          theme::kShadow, 0.22f * a * (1.0f - t) * (1.0f - t));
+            comp.drawRect(panel.inflated(i), radius + float(i), theme::kShadow,
+                          0.22f * a * (1.0f - t) * (1.0f - t));
         }
-        comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kTaskbarTint,
-                         theme::kTaskbarTintOpacity, theme::kShellLine, a,
-                         theme::kTaskbarSaturate);
+        comp.drawAcrylic(panel, radius, theme::kTaskbarTint, theme::kTaskbarTintOpacity,
+                         theme::kShellLine, a, theme::kTaskbarSaturate);
     } else {
         comp.drawAcrylic(panel, float(metrics::kFlyoutRadius), theme::kFlyoutTint, 0.90f,
                          theme::kShellBorder, a);
@@ -1407,8 +1459,7 @@ void Manager::drawContextMenu() {
                              Rect{panel.x, top, panel.w, ringGridH});
         }
         for (size_t i = 0; i < contextRecents.size() && i < ringRecentRects.size(); ++i) {
-            const Rect cell{ringRecentRects[i].x, ringRecentRects[i].y + dy,
-                            ringRecentRects[i].w, ringRecentRects[i].h};
+const Rect cell = grow(ringRecentRects[i]);
             const double hv = i < ctxHover.size() ? ctxHover[i] : 0.0;
             if (hv > 0.001)
                 comp.drawRect(cell.inflated(-10), 12.f, theme::kItemHover, float(hv) * a);
@@ -1423,20 +1474,22 @@ void Manager::drawContextMenu() {
         // A hairline separates the grid from the power row, so the two read as
         // distinct groups the way the greeting does from the grid.
         if (!ringPowerRects.empty()) {
-            comp.drawRect(Rect{panel.x + 10, ringPowerRects[0].y - 5 + dy, panel.w - 20, 1},
+            // contextRect, not the grown panel: grow() needs the unscaled span, and
+            // for the ring the two differ by exactly that zoom.
+            comp.drawRect(growHairline(Rect{contextRect.x + 10, ringPowerRects[0].y - 5,
+                                            contextRect.w - 20, 1}),
                           0.f, theme::kShellBorder, a * 0.8f);
         }
 
-        // The power row, in the order runRingPower() switches on. The Reversal
-        // glyphs are the Control Centre's own set, so the two surfaces agree about
-        // what "sleep" and "restart" look like.
+        // The power row, in the order runRingPower() switches on. The glyphs are
+        // Lucide, the same set the Control Centre is drawn against, so the two
+        // surfaces agree about what "sleep" and "restart" look like.
         static const char* const kPowerGlyph[metrics::kRingPowerCount] = {
-            "system-suspend", "system-log-out", "system-reboot", "system-shutdown"};
+            "lucide-moon", "lucide-log-out", "lucide-rotate-cw", "lucide-power"};
         static const char* const kPowerLabel[metrics::kRingPowerCount] = {
             "Sleep", "Log out", "Restart", "Power"};
         for (size_t i = 0; i < ringPowerRects.size() && i < metrics::kRingPowerCount; ++i) {
-            const Rect cell{ringPowerRects[i].x, ringPowerRects[i].y + dy,
-                            ringPowerRects[i].w, ringPowerRects[i].h};
+const Rect cell = grow(ringPowerRects[i]);
             const size_t idx = contextRecents.size() + i;
             const double hv = idx < ctxHover.size() ? ctxHover[idx] : 0.0;
             if (hv > 0.001)
@@ -1465,7 +1518,7 @@ void Manager::drawContextMenu() {
 }
 
 void Manager::drawStats() {
-    const Rect box{12, 12, 340, 104};
+    const Rect box{12, 12, 340, 128};
     comp.drawRect(box, 6.f, theme::kFlyoutTint, 0.93f);
     comp.drawRect(box, 6.f, theme::kShellBorder, 1.0f);
     char line[220];
@@ -1473,16 +1526,26 @@ void Manager::drawStats() {
              comp.sampledFps(), comp.lastFrameSeconds() * 1000.0,
              comp.vsyncActive() ? "on" : "off", comp.swapInterval());
     drawTextAt(line, 12, Weight::Regular, theme::kText, box.x + 12, box.y + 10);
-    snprintf(line, sizeof line, "%s", comp.rendererName().c_str());
+    if (comp.hasTimerQuery()) {
+        snprintf(line, sizeof line, "cpu %.2f ms   gpu %.2f ms",
+                 comp.cpuFrameMs(), comp.gpuFrameMs());
+    } else {
+        snprintf(line, sizeof line, "cpu %.2f ms   gpu n/a", comp.cpuFrameMs());
+    }
     drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 32);
+    snprintf(line, sizeof line, "%ld draw call(s)/frame   %s", comp.drawCallsLastFrame(),
+             comp.rendererName().c_str());
+    drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 52);
+    snprintf(line, sizeof line, "draws fill=%ld acrylic=%ld win=%ld tex=%ld grad=%ld arc=%ld",
+             comp.drawsByMode()[0], comp.drawsByMode()[1], comp.drawsByMode()[2],
+             comp.drawsByMode()[3], comp.drawsByMode()[4], comp.drawsByMode()[5]);
+    drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 72);
     snprintf(line, sizeof line, "%zu window(s) | texture_from_pixmap %s | font %s",
              clients.size(), comp.hasTextureFromPixmap() ? "yes" : "MISSING", text.family().c_str());
-    drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 52);
+    drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 92);
     snprintf(line, sizeof line, "drag: %s   focus: %s", dragClient ? (dragIsMove ? "move" : "resize") : "idle",
              focused ? focused->title.c_str() : "none");
-    drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 72);
-    snprintf(line, sizeof line, "display %dx%d", screenW, screenH);
-    drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 88);
+    drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 112);
 }
 
 // The Alt-Tab switcher: a row of live window thumbnails with the selection

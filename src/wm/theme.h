@@ -228,10 +228,12 @@ inline constexpr Color kTileTints[6] = {
 // A deliberately different skin from the Fluent flyouts above: Control Centre is
 // a grid of dark glass tiles on a heavily blurred backdrop, and the "on" colour
 // of a control is the system fill (iOS blue), not the Windows accent.
+// kCcTile is the tile fill *inside* the panel; the panel's own background borrows
+// the taskbar's acrylic tokens (kTaskbarTint/kTaskbarTintOpacity/kShellLine/
+// kTaskbarSaturate) so the flyout and the bar read as the same glass.
 inline constexpr Color kCcBackdrop = rgb(0x000000, 0.38f);
 inline constexpr Color kCcTile = rgb(0x1C1C1E, 0.72f);
 inline constexpr Color kCcTileHover = rgb(0x2C2C2E, 0.82f);
-inline constexpr Color kCcTileBorder = rgb(0xFFFFFF, 0.08f);
 inline constexpr Color kCcActive = rgb(0x0A84FF);   // iOS systemBlue
 inline constexpr Color kCcActiveGlyph = rgb(0xFFFFFF);
 inline constexpr Color kCcGlyph = rgb(0xFFFFFF, 0.92f);
@@ -438,7 +440,7 @@ constexpr int kCcMaxScale = 100;  // percent; shrinks to fit small screens
 constexpr int kLaunchIcon = 80;      // app icon edge at 100% (the macOS Web size)
 constexpr int kLaunchIconMin = 46;   // floor when the screen is small
 constexpr int kLaunchCols = 4;       // the macOS Web launchpad is four across
-constexpr int kLaunchRowGap = 40;    // vertical gap between icon rows
+constexpr int kLaunchRowGap = 78;    // vertical gap between icon rows
 constexpr int kLaunchLabelH = 18;    // label strip under each icon
 constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
 // Turning a Launchpad page. A sideways drag on the empty backdrop has to pass

@@ -56,6 +56,25 @@ ALIASES=(
   "smartphone:phone"
 )
 
+# Lucide (ISC), the shell's monochrome glyph set: the Control Centre's controls,
+# its tablet/light switches and the ring menu's power row all ask for these by the
+# `lucide-<name>` the code uses. Each is stored under that prefix so it can never
+# shadow a Reversal or freedesktop name, and each ships both an SVG source and a
+# 128px raster so it works with or without librsvg at runtime.
+# Lucide has no `ethernet`; `cable` is its wired-network glyph. The two `-dark`
+# entries are the same artwork in black, for the Control Centre sliders that invert
+# their glyph once the white fill reaches it.
+LUCIDE_ICONS=(
+  plane wifi bluetooth cable sun volume-2 bell-off moon monitor lock camera
+  folder terminal play pause skip-back skip-forward log-out rotate-cw power tablet
+)
+LUCIDE_DARK_ICONS=(sun volume-2)
+LUCIDE_BASE="https://cdn.jsdelivr.net/npm/lucide-static@latest/icons"
+# Lucide strokes in `currentColor` at width 2; the shell's glyphs are solid white
+# at 2.4, matching the hand-drawn cc-* set these replaced.
+LUCIDE_TIDY='s/stroke="currentColor"/stroke="#ffffff"/; s/stroke-width="2"/stroke-width="2.4"/'
+LUCIDE_TIDY_DARK='s/stroke="currentColor"/stroke="#000000"/; s/stroke-width="2"/stroke-width="2.4"/'
+
 FORCE=0
 WANT_ICONS=1
 WANT_FONTS=1
@@ -73,6 +92,21 @@ done
 
 say() { printf '[assets] %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Downloads $1 to $2, preferring curl and falling back to wget. Returns non-zero
+# when neither is available or the transfer fails, so callers can warn and carry on
+# with whatever is already on disk.
+fetch_url() {
+  local url="$1" dest="$2"
+  if have curl && curl -fsSL --retry 2 -m 30 -o "$dest" "$url" 2>/dev/null && [[ -s "$dest" ]]; then
+    return 0
+  fi
+  if have wget && wget -q -T 30 -O "$dest" "$url" 2>/dev/null && [[ -s "$dest" ]]; then
+    return 0
+  fi
+  rm -f "$dest"
+  return 1
+}
 
 WORK="$(mktemp -d)"
 cleanup() { rm -rf "$WORK"; }
@@ -232,8 +266,7 @@ LIGHTEN='s/#363636/#dedede/g; s/#3b3b3b/#dedede/g'
 fetch_icons() {
   mkdir -p "$ICONS" "$HATTER_ICONS"
   # Hatter supplies the app icons, so it is fetched first. Reversal still backs
-  # the shell chrome (the Control Centre's cc-* set, the search glyph) and any
-  # name Hatter does not ship.
+  # the shell chrome (the search glyph) and any name Hatter does not ship.
   fetch_hatter || true
   # The clone is ~130MB of upstream SVG, so it lives in the user cache rather
   # than in the checkout; --force refreshes it, normal runs never touch the net.
@@ -342,6 +375,35 @@ PY
 
   say "icons: $rendered/$wanted app/shell names rendered ($HATTER_ICONS + $ICONS)"
   render_local_svgs "$tool"
+  # Lucide lands in the same directory, so it is rasterised by the same pass.
+  fetch_lucide && render_local_svgs "$tool"
+}
+
+# Lucide ships as currentColor strokes; recolour and thin the markup down to what
+# the shell's other glyphs look like, then drop it in beside them.
+fetch_lucide() {
+  local tool; tool="$(pick_renderer)"
+  [[ "$tool" == none ]] && return 1
+  local got=0 name raw svg
+  for name in "${LUCIDE_ICONS[@]}"; do
+    svg="$ICONS/lucide-$name.svg"
+    if [[ $FORCE -eq 0 && -s "$svg" ]]; then got=$((got + 1)); continue; fi
+    raw="$WORK/$name.svg"
+    if ! fetch_url "$LUCIDE_BASE/$name.svg" "$raw"; then
+      say "warning: Lucide '$name' unavailable; the shell falls back to a dot"
+      continue
+    fi
+    sed -e '/@license lucide-static/d' -e '/class="lucide lucide-/d' \
+        -e "$LUCIDE_TIDY" "$raw" > "$svg"
+  done
+  # The inverted copies the sliders reach for by appending "-dark".
+  for name in "${LUCIDE_DARK_ICONS[@]}"; do
+    [[ -s "$ICONS/lucide-$name.svg" ]] || continue
+    sed -e "$LUCIDE_TIDY_DARK" "$ICONS/lucide-$name.svg" > "$ICONS/lucide-$name-dark.svg"
+    got=$((got + 1))
+  done
+  say "lucide: $got glyph(s) in $ICONS"
+  return 0
 }
 
 # SVGs the project ships itself (assets/icons/*.svg) are already coloured, so

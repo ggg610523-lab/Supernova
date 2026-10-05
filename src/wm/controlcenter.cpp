@@ -409,8 +409,11 @@ void Manager::drawControlCenter() {
 
     // iOS blurs and darkens whatever is behind the panel.
     comp.drawRect(Rect{0, 0, screenW, screenH}, 0.f, theme::kCcBackdrop, a);
-    comp.drawAcrylic(grow(ccRect), float(metrics::kCcPanelRadius) * zoom, theme::kCcTile, 0.92f,
-                     theme::kCcTileBorder, a);
+    // The panel itself is the taskbar's acrylic verbatim -- same tint, alpha,
+    // border and saturate() amount (draw.cpp's drawTaskbar) -- so the flyout is
+    // visibly the same pane of glass the bar is, just rounded and floating.
+    comp.drawAcrylic(grow(ccRect), float(metrics::kCcPanelRadius) * zoom, theme::kTaskbarTint,
+                     theme::kTaskbarTintOpacity, theme::kShellLine, a, theme::kTaskbarSaturate);
 
     const int scale = ccScale();
     const int cell = metrics::kCcCell * scale / 100;
@@ -484,10 +487,10 @@ void Manager::drawControlCenter() {
             bool on;
             bool enabled;
         } rows[] = {
-            {kCcAirplane, 0, "cc-airplane", s.airplane, s.wifiPresent || s.btPresent},
-            {kCcWifi, 1, "cc-wifi", s.wifi, s.wifiPresent},
-            {kCcBluetooth, 2, "cc-bluetooth", s.bt, s.btPresent},
-            {kCcWired, 3, "cc-ethernet", s.wired, s.wiredPresent},
+            {kCcAirplane, 0, "lucide-plane", s.airplane, s.wifiPresent || s.btPresent},
+            {kCcWifi, 1, "lucide-wifi", s.wifi, s.wifiPresent},
+            {kCcBluetooth, 2, "lucide-bluetooth", s.bt, s.btPresent},
+            {kCcWired, 3, "lucide-cable", s.wired, s.wiredPresent},
         };
         for (const auto& r : rows) {
             const Rect b = controlRect(r.id, r.slot);
@@ -519,9 +522,9 @@ void Manager::drawControlCenter() {
             drawTextCentered(who, artistPx, Weight::Regular, theme::kCcGlyphOff,
                              grow(Rect{area.x, area.y + area.h * 3 / 5, area.w, area.h * 2 / 5}));
         }
-        const char* prev = "cc-skip-back";
-        const char* play = s.playing ? "cc-pause" : "cc-play";
-        const char* next = "cc-skip-forward";
+        const char* prev = "lucide-skip-back";
+        const char* play = s.playing ? "lucide-pause" : "lucide-play";
+        const char* next = "lucide-skip-forward";
         glyph(controlRect(kCcMediaPrev, 0), prev, false, has);
         glyph(controlRect(kCcMediaPlay, 1), play, false, has);
         glyph(controlRect(kCcMediaNext, 2), next, false, has);
@@ -565,10 +568,10 @@ void Manager::drawControlCenter() {
         comp.drawRect(Rect{box.x + (box.w - dot) / 2, box.y + (box.h - dot) / 2, dot, dot},
                       float(dot) * 0.5f, enabled ? theme::kCcGlyph : theme::kCcGlyphOff, a);
     };
-    slider(kCcBrightness, "cc-sun",
+    slider(kCcBrightness, "lucide-sun",
            ccDrag == ccControlIndex(kCcBrightness, 0) ? ccDragValue : s.brightness,
            s.brightnessUsable());
-    slider(kCcVolume, "cc-volume",
+    slider(kCcVolume, "lucide-volume-2",
            ccDrag == ccControlIndex(kCcVolume, 0) ? ccDragValue : (s.muted ? 0 : s.volume),
            s.audioPresent);
 
@@ -577,12 +580,12 @@ void Manager::drawControlCenter() {
         const Rect m = cellRect(0, 2, 1, 1);
         const bool on = s.dndPresent ? s.dnd : dnd;
         circle(m, controlFill(on, true, hoverAmt(kCcDnd, 0)));
-        glyph(m, "cc-bell-off", on, true);
+        glyph(m, "lucide-bell-off", on, true);
     }
     {
         const Rect m = cellRect(1, 2, 1, 1);
         circle(m, controlFill(s.nightLight, s.nightPresent, hoverAmt(kCcNight, 0)));
-        glyph(m, "cc-moon", s.nightLight, s.nightPresent);
+        glyph(m, "lucide-moon", s.nightLight, s.nightPresent);
     }
     {
         // "Show desktop" is the 2-wide module iOS gives to Screen Mirroring: a
@@ -593,24 +596,27 @@ void Manager::drawControlCenter() {
                      : mixColor(theme::kCcTile, theme::kCcTileHover, hoverAmt(kCcShowDesktop, 0)),
                metrics::kCcTileRadius * scale / 100);
         const int d = int(m.h * 0.34);
-        const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
-        drawAppIcon(box, "cc-monitor", "cc-monitor", 0.f, 1.0f, IconTheme::Shell);
+        // Five pixels further left than the grid gap puts it, so the row does not
+        // read as pushed into its tile. The label follows the icon, box.right()
+        // moves with it.
+        const Rect box = grow(Rect{m.x + gap - 5, m.y + (m.h - d) / 2, d, d});
+        drawAppIcon(box, "lucide-monitor", "lucide-monitor", 0.f, 1.0f, IconTheme::Shell);
         drawTextAt("Show desktop", int(m.h * 0.20), Weight::Medium, theme::kCcLabel,
                    box.right() + gap, m.y + (m.h - int(m.h * 0.20) * 3 / 2) / 2);
     }
     {
         const Rect m = cellRect(0, 4, 1, 1);
         circle(m, controlFill(false, s.lockPresent, hoverAmt(kCcLock, 0)));
-        glyph(m, "cc-lock", false, s.lockPresent);
+        glyph(m, "lucide-lock", false, s.lockPresent);
     }
     {
         const Rect m = cellRect(1, 4, 1, 1);
         circle(m, controlFill(false, s.shotPresent, hoverAmt(kCcScreenshot, 0)));
-        glyph(m, "cc-camera", false, s.shotPresent);
+        glyph(m, "lucide-camera", false, s.shotPresent);
     }
 
     // --- launcher row -----------------------------------------------------
-    static const char* const kLauncherIcons[kCcLauncherCount] = {"cc-folder", "cc-terminal"};
+    static const char* const kLauncherIcons[kCcLauncherCount] = {"lucide-folder", "lucide-terminal"};
     for (int i = 0; i < kCcLauncherCount; ++i) {
         const Rect m = cellRect(2 + i, 4, 1, 1);
         const bool have = i < int(ccLaunchers.size()) && !ccLaunchers[size_t(i)].empty();
@@ -623,44 +629,31 @@ void Manager::drawControlCenter() {
         }
     }
 
-    // --- tablet / mobile mode, and light mode ----------------------------------
+// --- tablet / mobile mode, and light mode ----------------------------------
     // Two wide plates sharing the bottom row. Both turn systemBlue while they are
-    // on, the way an iOS toggle reads. The tablet glyph is a device outline and the
-    // light glyph a sun, both drawn as vectors so they never depend on the asset
-    // pipeline. The sun's rays appear only once light mode is on, so the icon
-    // lights up along with the shell it controls.
+    // on, the way an iOS toggle reads. Both glyphs are Lucide, like every other
+    // icon on this surface, so nothing here is drawn by hand any more.
     {
         const auto switchPlate = [&](const Rect& m, int id, bool on) {
             plateC(m, on ? theme::kCcActive
                          : mixColor(theme::kCcTile, theme::kCcTileHover, hoverAmt(id, 0)),
-                   metrics::kCcTileRadius * scale / 100);
+                    metrics::kCcTileRadius * scale / 100);
             const int d = int(m.h * 0.34);
             const Rect box = grow(Rect{m.x + gap, m.y + (m.h - d) / 2, d, d});
             return box;
         };
-        // The sun: a disc, plus eight rays once it is on.
-        const auto sun = [&](const Rect& box, const Color& c, bool rays) {
-            const int d = std::max(6, int(std::min(box.w, box.h) * 0.40f));
-            const Rect disc{box.x + (box.w - d) / 2, box.y + (box.h - d) / 2, d, d};
-            comp.drawRect(disc, float(d) * 0.5f, c, a);
-            if (!rays) return;
-            const int t = std::max(1, d / 5);
-            const float cx = float(disc.x + disc.w / 2), cy = float(disc.y + disc.h / 2);
-            const float reach = float(d) * 0.5f + float(d) * 0.24f;
-            for (int i = 0; i < 8; ++i) {
-                const float ang = float(i) * 3.14159265f / 4.0f;
-                comp.drawRectRotated(int(std::lround(cx + std::cos(ang) * reach)),
-                                     int(std::lround(cy + std::sin(ang) * reach)), t, t * 2,
-                                     ang, float(t) * 0.5f, c, a);
-            }
+        // A switch glyph, in the same two whites the round controls use.
+        const auto switchGlyph = [&](const Rect& box, const char* icon, bool on) {
+            drawAppIcon(box, icon, icon, 0.f,
+                        on ? theme::kCcActiveGlyph.a : theme::kCcGlyph.a, IconTheme::Shell);
         };
 
         {
             const Rect m = cellRect(0, 5, 2, 1);
             const bool on = tabletMode;
             const Rect box = switchPlate(m, kCcTablet, on);
-            drawTabletGlyph(box, on ? theme::kCcActiveGlyph : theme::kCcGlyph, a);
-            const std::string label = on ? "Tablet mode: on" : "Tablet mode";
+            switchGlyph(box, "lucide-tablet", on);
+            const std::string label = "Tablet mode";
             const int px = int(m.h * 0.20);
             drawTextAt(label, px, Weight::Medium, theme::kCcLabel, box.right() + gap,
                        m.y + (m.h - px * 3 / 2) / 2);
@@ -669,8 +662,11 @@ void Manager::drawControlCenter() {
             const Rect m = cellRect(2, 5, 2, 1);
             const bool on = theme::isLight();
             const Rect box = switchPlate(m, kCcLight, on);
-            sun(box, on ? theme::kCcActiveGlyph : theme::kCcGlyph, on);
-            const std::string label = on ? "Light mode: on" : "Light mode";
+            // Both halves of the toggle are Lucide, and the glyph names the mode the
+            // shell is actually in -- moon while it is dark, sun once it is light --
+            // rather than always advertising the one you would switch to.
+            switchGlyph(box, on ? "lucide-sun" : "lucide-moon", on);
+            const std::string label = "Light mode";
             const int px = int(m.h * 0.20);
             drawTextAt(label, px, Weight::Medium, theme::kCcLabel, box.right() + gap,
                        m.y + (m.h - px * 3 / 2) / 2);

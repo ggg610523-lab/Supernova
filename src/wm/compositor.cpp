@@ -453,7 +453,10 @@ void Compositor::shutdown() {
     if (!dpy_) return;
 
     if (ctx_) {
-        glXMakeCurrent(dpy_, None, nullptr);
+        // Delete every GL object *before* releasing the context. Doing it the
+        // other way round -- glXMakeCurrent(None) first -- leaves the deletes
+        // with no current context, which trips libepoxy's dispatch assertion
+        // and aborts the process during shutdown.
         if (vao_) glDeleteVertexArrays(1, &vao_);
         if (vbo_) glDeleteBuffers(1, &vbo_);
         if (prog_) glDeleteProgram(prog_);
@@ -465,6 +468,15 @@ void Compositor::shutdown() {
         if (meshVbo_) glDeleteBuffers(1, &meshVbo_);
         if (meshIbo_) glDeleteBuffers(1, &meshIbo_);
         vao_ = vbo_ = meshVao_ = meshVbo_ = meshIbo_ = 0;
+        if (timerQueryPending_) {
+            glEndQuery(GL_TIME_ELAPSED);
+            glDeleteQueries(1, &timerQueryPending_);
+            timerQueryPending_ = 0;
+        }
+        if (timerQuery_) {
+            glDeleteQueries(1, &timerQuery_);
+            timerQuery_ = 0;
+        }
         const auto delTex = [](GLuint& t) {
             if (t) glDeleteTextures(1, &t);
             t = 0;
@@ -484,6 +496,8 @@ void Compositor::shutdown() {
         }
         bound_.clear();
         fbcCache_.clear();
+        // Context last: everything above needs it to still be current.
+        glXMakeCurrent(dpy_, None, nullptr);
         glXDestroyContext(dpy_, ctx_);
         ctx_ = nullptr;
     }
@@ -693,6 +707,10 @@ bool Compositor::createContext(std::string* error) {
     vendorName_ = glStr(GL_VENDOR);
     rendererName_ = glStr(GL_RENDERER);
     glVersion_ = glStr(GL_VERSION);
+
+    // GL 3.3 has no timer query (it arrived in 4.3 / ARB_timer_query), so this is
+    // strictly optional: profiling falls back to CPU-side timing when absent.
+    glGenQueries(1, &timerQuery_);
     return true;
 }
 
@@ -972,6 +990,15 @@ void Compositor::tfiRelease(GLuint tex) {
     }
 }
 
+void Compositor::useMainProgram() {
+    // The main program and the quad VAO are bound for the whole frame by
+    // beginFrame(); re-binding them per draw call is pure driver overhead.
+    if (mainProgramBound_) return;
+    glUseProgram(prog_);
+    glBindVertexArray(vao_);
+    mainProgramBound_ = true;
+}
+
 GLuint Compositor::bindPixmap(Pixmap pixmap, VisualID visualId, int depth, int w, int h,
                               bool alpha) {
     if (!tfi_ || !pixmap || w <= 0 || h <= 0) return 0;
@@ -1057,14 +1084,25 @@ void Compositor::destroyTexture(GLuint tex) {
 }
 
 // ------------------------------------------------------------------- drawing
-void Compositor::drawQuad(GLuint tex, int mode) {
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glUniform1i(uMode_, mode);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-}
-
 void Compositor::beginFrame() {
+    cpuFrameStart_ = nowMs();
+    drawsThisFrame_ = 0;
+
+    // Collect the query issued last frame, if the driver has already finished
+    // it. Reading a pending query would stall the pipeline, so it is left
+    // in flight and picked up on a later frame instead.
+    if (timerQueryPending_) {
+        GLuint done = 0;
+        glGetQueryObjectuiv(timerQueryPending_, GL_QUERY_RESULT_AVAILABLE, &done);
+        if (done) {
+            GLuint64 ns = 0;
+            glGetQueryObjectui64v(timerQueryPending_, GL_QUERY_RESULT, &ns);
+            gpuFrameMs_ = double(ns) / 1e6;
+            glDeleteQueries(1, &timerQueryPending_);
+            timerQueryPending_ = 0;
+        }
+    }
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, width_, height_);
     glDisable(GL_DEPTH_TEST);
@@ -1090,6 +1128,12 @@ void Compositor::beginFrame() {
     glUniform2f(uPivot_, 0.f, 0.f);
     glUniform2f(uRot_, 1.f, 0.f);
     glBindVertexArray(vao_);
+    mainProgramBound_ = true;
+
+    if (timerQuery_ && !timerQueryPending_) {
+        glBeginQuery(GL_TIME_ELAPSED, timerQuery_);
+        timerQueryPending_ = timerQuery_;
+    }
 }
 
 void Compositor::drawWallpaper() {
@@ -1100,8 +1144,9 @@ void Compositor::drawWallpaper() {
 void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opacity,
                           int clipTop) {
     if (r.empty()) return;
-    glUseProgram(prog_);
-    glBindVertexArray(vao_);
+    useMainProgram();
+    ++drawsThisFrame_;
+    ++drawsByMode_[0];
     glUniform1i(uMode_, 0);
     glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
     glUniform1f(uRadius_, radius);
@@ -1114,8 +1159,9 @@ void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opa
 void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, float radius,
                                  const Color& c, float opacity) {
     if (w <= 0 || h <= 0) return;
-    glUseProgram(prog_);
-    glBindVertexArray(vao_);
+    useMainProgram();
+    ++drawsThisFrame_;
+    ++drawsByMode_[0];
     glUniform1i(uMode_, 0);
     glUniform4f(uRect_, float(cx) - w * 0.5f, float(cy) - h * 0.5f, float(w), float(h));
     glUniform1f(uRadius_, radius);
@@ -1131,8 +1177,9 @@ void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, floa
 void Compositor::drawGradient(const Rect& r, float radius, const Color& top, const Color& bottom,
                               float opacity) {
     if (r.empty()) return;
-    glUseProgram(prog_);
-    glBindVertexArray(vao_);
+    useMainProgram();
+    ++drawsThisFrame_;
+    ++drawsByMode_[4];
     glUniform1i(uMode_, 4);
     glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
     glUniform1f(uRadius_, radius);
@@ -1147,8 +1194,9 @@ void Compositor::drawArc(int cx, int cy, float radius, float thick, float a0, fl
     if (thick <= 0.f || radius <= 0.f) return;
     const float reach = radius + thick * 0.5f + 1.f;
     const int side = int(std::ceil(reach * 2.f));
-    glUseProgram(prog_);
-    glBindVertexArray(vao_);
+    useMainProgram();
+    ++drawsThisFrame_;
+    ++drawsByMode_[5];
     glUniform1i(uMode_, 5);
     glUniform4f(uRect_, float(cx) - side * 0.5f, float(cy) - side * 0.5f, float(side),
                 float(side));
@@ -1163,8 +1211,9 @@ void Compositor::drawArc(int cx, int cy, float radius, float thick, float a0, fl
 void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,
                              const Color& border, float opacity, float saturation) {
     if (r.empty()) return;
-    glUseProgram(prog_);
-    glBindVertexArray(vao_);
+    useMainProgram();
+    ++drawsThisFrame_;
+    ++drawsByMode_[1];
     glUniform1i(uMode_, 1);
     glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
     glUniform1f(uRadius_, radius);
@@ -1179,8 +1228,9 @@ void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint, flo
 void Compositor::drawTex(GLuint tex, const Rect& dst, float radius, const Color& tint,
                          float opacity, bool textureColor, bool textureAlpha) {
     if (!tex || dst.empty()) return;
-    glUseProgram(prog_);
-    glBindVertexArray(vao_);
+    useMainProgram();
+    ++drawsThisFrame_;
+    ++drawsByMode_[3];
     glUniform4f(uRect_, float(dst.x), float(dst.y), float(dst.w), float(dst.h));
     glUniform1f(uRadius_, radius);
     glUniform1f(uOpacity_, opacity);
@@ -1227,8 +1277,9 @@ void Compositor::drawWindow(const WindowSprite& s) {
                        mixc(border.b, theme::kAccentDeep.b), 1.f};
     }
 
-    glUseProgram(prog_);
-    glBindVertexArray(vao_);
+    ++drawsThisFrame_;
+    ++drawsByMode_[2];
+    useMainProgram();
     glUniform4f(uRect_, float(quad.x), float(quad.y), float(quad.w), float(quad.h));
     glUniform4f(uFrame_, float(s.frame.x), float(s.frame.y), float(s.frame.w),
                 float(s.frame.h));
@@ -1272,6 +1323,12 @@ bool Compositor::drawGenie(const WindowSprite& s) {
     if (content.w < 2 || content.h < 2) return false;
     if (!tfiBind(s.tex.tex)) return false;  // binds the texture on unit 0
 
+    // This effect borrows the genie program and the subdivided mesh VAO, so the
+    // main-program cache is no longer valid. Without this the next primitive
+    // that reaches for the cache believes prog_/vao_ are still current, skips
+    // the rebind, and rasterises with the genie shader and no VAO -- which is
+    // why the taskbar vanished for the frame after a minimize.
+    mainProgramBound_ = false;
     glUseProgram(genieProg_);
     glBindVertexArray(meshVao_);
     glUniformMatrix4fv(gProj_, 1, GL_FALSE, proj_);
@@ -1291,7 +1348,12 @@ bool Compositor::drawGenie(const WindowSprite& s) {
 }
 
 void Compositor::present() {
+    if (timerQueryPending_) glEndQuery(GL_TIME_ELAPSED);
+    cpuFrameMs_ = nowMs() - cpuFrameStart_;
+    drawCalls_ += drawsThisFrame_;
+
     glBindVertexArray(0);
+    mainProgramBound_ = false;
     glUseProgram(0);
     const double before = nowMs();
     glXSwapBuffers(dpy_, glxWin_ ? glxWin_ : overlay_);
@@ -1305,6 +1367,17 @@ void Compositor::present() {
         fps_ = int(double(fpsFrames_) * 1000.0 / span + 0.5);
         fpsFrames_ = 0;
         fpsWindowStart_ = after;
+        // A machine-readable line once per sampling window, so a headless
+        // benchmark can read the same numbers the HUD paints.
+        if (verbose_) {
+            log("PERF fps=%d cpu=%.2f gpu=%.2f draws=%ld drawsAvg=%.1f", fps_, cpuFrameMs_,
+                gpuFrameMs_, drawsThisFrame_,
+                drawsFrames_ ? double(drawsWindow_) / double(drawsFrames_) : 0.0);
+            drawsWindow_ = 0;
+            drawsFrames_ = 0;
+        }
+        drawsWindow_ += drawsThisFrame_;
+        ++drawsFrames_;
     }
 }
 

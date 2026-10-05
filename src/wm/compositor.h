@@ -134,6 +134,24 @@ public:
     double lastFrameSeconds() const { return lastFrameSec_; }
     int sampledFps() const { return fps_; }
 
+    // ------------------------------------------------------------- profiling
+    // Wall-clock split of the last frame: CPU time spent issuing GL calls vs the
+    // GPU time the driver reports for the same span. Timer queries are optional
+    // (GL_ARB_timer_query), so gpuMs stays 0 when the driver has none.
+    double cpuFrameMs() const { return cpuFrameMs_; }
+    double gpuFrameMs() const { return gpuFrameMs_; }
+    long drawCalls() const { return drawCalls_; }
+    long drawCallsLastFrame() const { return drawsThisFrame_; }
+    // Draw calls this frame split by shader mode, so a profile can show whether
+    // the cost is in solid fills (0), acrylic (1), windows (2) or textures (3).
+    const long* drawsByMode() const { return drawsByMode_; }
+    // Set once at init; false when the platform has no timer queries.
+    bool hasTimerQuery() const { return timerQuery_ != 0; }
+    // Enables the machine-readable "PERF ..." line on stderr, once per 500ms
+    // sampling window. Used by scripts/bench.sh; off by default so a normal
+    // session is quiet.
+    void setVerbosePerf(bool on) { verbose_ = on; }
+
 private:
     bool createContext(std::string* error);
     // An FBConfig whose visual matches `visualId`, needed by glXCreatePixmap
@@ -143,6 +161,9 @@ private:
     bool buildWallpaper(std::string* error);
     void destroyGl();
     void drawQuad(GLuint tex, int mode);
+    // Binds the main program + quad VAO once per frame; every primitive goes
+    // through this instead of repeating glUseProgram/glBindVertexArray.
+    void useMainProgram();
     // Binds/releases an XComposite pixmap texture around a draw (texture_from
     // _pixmap semantics: the server may not write the pixmap while it is bound).
     bool tfiBind(GLuint tex);
@@ -217,6 +238,21 @@ private:
     int fps_ = 0;
     double fpsWindowStart_ = 0.0;
     int fpsFrames_ = 0;
+
+    // Profiling state: one query in flight, resolved on a later frame, so the
+    // frame cost is reported a frame late rather than stalling on a fence.
+    GLuint timerQuery_ = 0;
+    GLuint timerQueryPending_ = 0;
+    long drawCalls_ = 0;
+    long drawsThisFrame_ = 0;
+    long drawsByMode_[8] = {0};
+    double cpuFrameMs_ = 0.0;
+    double gpuFrameMs_ = 0.0;
+    double cpuFrameStart_ = 0.0;
+    bool mainProgramBound_ = false;
+    bool verbose_ = false;
+    long drawsWindow_ = 0;
+    int drawsFrames_ = 0;
 };
 
 }  // namespace wm

@@ -860,20 +860,6 @@ bool Manager::runTabletMenuAction(int row) {
     return true;
 }
 
-void Manager::drawTabletGlyph(const Rect& box, const Color& c, float opacity) {
-    const int w = std::max(10, int(box.w * 0.46f));
-    const int h = std::max(14, int(box.h * 0.86f));
-    const Rect body{box.x + (box.w - w) / 2, box.y + (box.h - h) / 2, w, h};
-    const int t = std::max(1, w / 8);
-    const float r = float(t) * 0.5f;
-    comp.drawRect(Rect{body.x, body.y, t, body.h}, r, c, opacity);
-    comp.drawRect(Rect{body.right() - t, body.y, t, body.h}, r, c, opacity);
-    comp.drawRect(Rect{body.x, body.y, body.w, t}, r, c, opacity);
-    comp.drawRect(Rect{body.x, body.bottom() - t, body.w, t}, r, c, opacity);
-    comp.drawRect(Rect{body.x + body.w / 3, body.bottom() - 2 * t, body.w / 3, t}, r,
-                  c, opacity * 0.7f);
-}
-
 // The small round badge the dock carries while rearranging: the remove "x" in an
 // icon's corner, and the row's "+" tile. Drawn as a filled circle with a glyph so
 // it needs no icon asset and stays legible at any dock size.

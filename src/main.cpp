@@ -32,6 +32,7 @@ void usage(const char* argv0) {
         "  -d, --display :N    X display to manage (default: $DISPLAY)\n"
         "  --no-vsync          do not force a swap interval (benchmark / tearing)\n"
         "  --stats             show a live FPS, frame time and renderer HUD\n"
+        "  --perf              like --stats, plus machine-readable PERF lines on stderr\n"
         "  --no-unredirect     keep fullscreen windows inside the compositor\n"
         "  -n, --frames N      render N frames then exit (self test)\n"
         "  -e, --exec CMD      launch CMD once the WM is up (repeatable);\n"
@@ -86,6 +87,12 @@ int main(int argc, char** argv) {
         }
         if (a == "--stats") {
             options.stats = true;
+            continue;
+        }
+        if (a == "--perf") {
+            // Machine-readable PERF lines on stderr, for scripts/bench.sh.
+            options.stats = true;
+            options.perfLog = true;
             continue;
         }
         if (a == "--no-unredirect") {

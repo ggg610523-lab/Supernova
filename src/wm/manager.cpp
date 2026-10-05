@@ -53,6 +53,12 @@ void Manager::shutdown() {
     if (!dpy) return;
     ungrabPointer();
     XUngrabKeyboard(dpy, CurrentTime);
+    // The glyph and icon caches own GL textures, so they have to go *before*
+    // the compositor tears the context down: glDeleteTextures after
+    // glXMakeCurrent(None) trips libepoxy's "no current context" assertion and
+    // aborts the process on the way out.
+    text.shutdown();
+    icons.clear();
     comp.shutdown();
     // Release the compositing manager selection before the window that owns it
     // goes away, so clients do not keep talking to a dead compositor.
@@ -67,8 +73,6 @@ void Manager::shutdown() {
             c = 0;
         }
     }
-    text.shutdown();
-    icons.clear();
     XSync(dpy, False);
     XCloseDisplay(dpy);
     dpy = nullptr;
@@ -296,6 +300,7 @@ int Manager::run(const Options& options) {
     // resolved before the compositor starts because it bakes the wallpaper as
     // part of init; each degrades gracefully when absent.
     assetDir = defaultAssetDir();
+    comp.setVerbosePerf(options.perfLog);
     if (!comp.init(dpy, screen, screenW, screenH, options.vsync,
                    assetDir + "/wallpaper/wallpaper.png", &error)) {
         log("compositor: %s", error.c_str());
@@ -845,7 +850,14 @@ void Manager::tickFluidMotion(double dtMs) {
 
     // The dropdown panel opens and closes with a short fade + slide. Its stale
     // contents are dropped only once the close animation has fully played out.
-    if (approach(contextAnim, contextOpen ? 1.0 : 0.0, dtMs, kFlyoutMs)) dirty = true;
+    // The ring menu is not a dropdown -- it pops out of its button the way Control
+    // Centre pops out of the clock, so it runs that surface's 210ms instead of the
+    // flyout's 140ms (see step(ccAnim, ...) in the tick). contextRing survives the
+    // close animation, so this paces the way out as well as the way in.
+    constexpr double kRingMenuMs = 210.0;  // Control Centre's open/close duration
+    if (approach(contextAnim, contextOpen ? 1.0 : 0.0, dtMs,
+                 contextRing ? kRingMenuMs : kFlyoutMs))
+        dirty = true;
     if (!contextOpen && contextAnim <= 0.0 && (!contextItems.empty() || contextRing)) {
         contextItems.clear();
         contextClient = nullptr;

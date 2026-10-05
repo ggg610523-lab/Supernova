@@ -214,6 +214,9 @@ struct Options {
     // single GPU compositor just starts the apps and manages them normally,
     // with DAMAGE-driven repaint and vsynced presentation.
     std::vector<std::string> launch;
+    // Emit a machine-readable "PERF fps=... cpu=... gpu=... draws=..." line on
+    // stderr once per sampling window. Used by scripts/bench.sh.
+    bool perfLog = false;
 };
 
 
@@ -576,7 +579,6 @@ private:
     void drawTabletRename();           // the rename field, while one is open
     void drawTabletChrome();           // status bar + home indicator, over the app
     void drawTabletSplash();           // the desktop <-> tablet transition
-    void drawTabletGlyph(const Rect& box, const Color& c, float opacity);
     bool handleTabletPress(int x, int y, unsigned button, Time time);
     // A tap is acted on when the button comes back up, not when it goes down, so
     // that a press held still is still available to become a drag or a long press.
