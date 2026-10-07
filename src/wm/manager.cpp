@@ -332,6 +332,8 @@ int Manager::run(const Options& options) {
     apps = scanApps();
     pinned = loadPinned();
     recents = loadRecents();
+    recentFiles = loadRecentFiles();
+    launchpadOrder = loadLaunchpadOrder();
     // The desktop shows the session's real Desktop directory; layout is fixed, so
     // it is computed once here and reused by every frame and hit test. The cells
     // the user dragged icons into come back first, so the layout pass below puts
@@ -588,6 +590,10 @@ void Manager::tickAnimations(double now) {
     // reflowed the layout (added, removed, dragged or resized).
     animateDesktopIconReflow(dtMs);
 
+    // Launchpad tiles: the same spring reflow, while a reorder drag (or the
+    // settle after one) is on screen.
+    if (startOpen) animateLaunchTileReflow(dtMs);
+
     // App launch placeholders (desktop icon growing into the app's window).
     tickLaunches(now, dtMs);
 
@@ -761,9 +767,11 @@ void Manager::tickFluidMotion(double dtMs) {
     }
 
     // Context-menu items (the panel itself eases open/closed just below). The
-    // ring menu hovers its grid cells and power buttons in one index space.
+    // ring menu hovers its grid cells, recent-file rows and power buttons in one
+    // index space.
     const size_t hoverCount = contextRing
-                                  ? contextRecents.size() + ringPowerRects.size()
+                                  ? contextRecents.size() + size_t(ringFilesShown) +
+                                        ringPowerRects.size()
                                   : contextItems.size();
     fade(ctxHover, hoverCount, contextHover);
 
@@ -1249,6 +1257,13 @@ void Manager::closeOverlays() {
     launchSwipe = false;
     launchPressArmed = false;
     launchPressTile = -1;
+    // A tile reorder ends with the launchpad: the drag state belongs to the
+    // overlay, and the springs are re-synced from scratch the next time it opens.
+    launchDragMoving = false;
+    launchDragTile = -1;
+    launchDragFrom = -1;
+    launchTilePage = -1;
+    launchTileTotal = 0;
     // The menu's items are kept until its close animation finishes (tickFluid
     // Motion drops them); clearing the hover lets the highlight fade out with it.
     contextHover = -1;
@@ -1882,6 +1897,25 @@ void Manager::noteRecent(const std::string& name, const std::string& exec,
     saveRecents(recents);
 }
 
+// One file or folder the desktop opened, remembered the same way a launch is --
+// newest first, deduplicated by path, best-effort write.
+void Manager::noteRecentFile(const std::string& name, const std::string& path,
+                             const std::string& icon, bool isDir) {
+    if (path.empty()) return;
+    recentFiles.erase(std::remove_if(recentFiles.begin(), recentFiles.end(),
+                                     [&](const RecentFile& r) { return r.path == path; }),
+                      recentFiles.end());
+    RecentFile r;
+    r.name = name.empty() ? path : name;
+    r.path = path;
+    r.icon = icon;
+    r.isDir = isDir;
+    recentFiles.insert(recentFiles.begin(), std::move(r));
+    if (recentFiles.size() > size_t(metrics::kRingMaxRecents))
+        recentFiles.resize(metrics::kRingMaxRecents);
+    saveRecentFiles(recentFiles);
+}
+
 void Manager::activateTaskItem(int index) {
     if (index < 0 || index >= int(taskItems.size())) return;
     const TaskItem& it = taskItems[size_t(index)];
@@ -1943,6 +1977,7 @@ void Manager::openRingMenu() {
     contextApp = -1;
     contextRing = true;
     contextRecents = recents;
+    contextFiles = recentFiles;
     // The ring drives its own rows/cells, so the plain item list stays empty.
     contextItems.clear();
     layoutRingMenu();
@@ -1969,8 +2004,20 @@ void Manager::layoutRingMenu() {
     // so the panel does not collapse to a header-only strip.
     ringGridH = (rows == 0 ? 1 : rows) * cell;
     const int dividerH = 9;                              // hairline + breathing room
-    const int height =
-        metrics::kRingHeaderH + ringGridH + dividerH + metrics::kRingPowerH + pad;
+
+    // The recent files hide entirely when there are none, so a user whose shell
+    // has opened nothing yet sees the menu exactly as it always looked. Shown
+    // files cap out at a single screenful of rows underneath the app grid.
+    ringFilesShown = std::min(int(contextFiles.size()), int(metrics::kRingMaxFiles));
+    const bool hasFiles = ringFilesShown > 0;
+    // The files' caption plus its rows (one file per row) is a section of its
+    // own, kept apart from the app grid by the same hairline that splits the
+    // power row off.
+    const int ringFilesH =
+        hasFiles ? metrics::kRingFilesLabelH + ringFilesShown * metrics::kRingFileRowH : 0;
+
+    const int height = metrics::kRingHeaderH + ringGridH + dividerH + ringFilesH +
+                       dividerH + metrics::kRingPowerH + pad;
 
     // Anchored above the bar at the ring's left edge, so it grows out of the
     // button that opened it and never covers the taskbar.
@@ -1989,7 +2036,20 @@ void Manager::layoutRingMenu() {
         ringRecentRects.push_back(Rect{gx + c * cell, gy + r * cell, cell, cell});
     }
 
-    const int py = gy + ringGridH + dividerH;
+    // Recent files: a caption and one row per file. The label sits on the next
+    // hairline and reads as a group with the rows under it, exactly as the
+    // greeting does above the app grid.
+    ringFileRects.clear();
+    if (hasFiles) {
+        const int fy = gy + ringGridH + dividerH;
+        ringFilesLabelTop = fy;
+        const int ry = fy + metrics::kRingFilesLabelH;
+        for (int i = 0; i < ringFilesShown; ++i)
+            ringFileRects.push_back(Rect{gx, ry + i * metrics::kRingFileRowH, width - 2 * pad,
+                                         metrics::kRingFileRowH});
+    }
+
+    const int py = gy + ringGridH + dividerH + ringFilesH + dividerH;
     const int pcw = (width - 2 * pad) / metrics::kRingPowerCount;
     ringPowerRects.clear();
     for (int i = 0; i < metrics::kRingPowerCount; ++i) {
@@ -1998,16 +2058,22 @@ void Manager::layoutRingMenu() {
 }
 
 // The index of the cell under a point: 0..recents-1 for the app grid, then the
-// power buttons, or -1. An ordinary flyout keeps its single-column rows instead.
-// One definition, so the hover wipe and the press handler can never disagree.
+// recent-file rows, then the power buttons, or -1. An ordinary flyout keeps its
+// single-column rows instead. One definition, so the hover wipe and the press
+// handler can never disagree.
 int Manager::contextRowAt(int x, int y) const {
     if (!contextOpen || !contextRect.contains(x, y)) return -1;
     if (contextRing) {
         for (size_t i = 0; i < ringRecentRects.size(); ++i) {
             if (ringRecentRects[i].contains(x, y)) return int(i);
         }
+        const size_t base = ringRecentRects.size();
+        for (size_t i = 0; i < ringFileRects.size(); ++i) {
+            if (ringFileRects[i].contains(x, y)) return int(base + i);
+        }
         for (size_t i = 0; i < ringPowerRects.size(); ++i) {
-            if (ringPowerRects[i].contains(x, y)) return int(ringRecentRects.size() + i);
+            const size_t pb = base + ringFileRects.size();
+            if (ringPowerRects[i].contains(x, y)) return int(pb + i);
         }
         return -1;
     }
@@ -2293,6 +2359,13 @@ void Manager::openStartMenu() {
     launchSwipe = false;
     launchPressArmed = false;
     launchPressTile = -1;
+    // A fresh launchpad has no carried tile and its springs are rebuilt for the
+    // page it opens on.
+    launchDragMoving = false;
+    launchDragTile = -1;
+    launchDragFrom = -1;
+    launchTilePage = -1;
+    launchTileTotal = 0;
     layoutStartMenu();
     grabPointer();
     XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);

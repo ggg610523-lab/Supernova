@@ -65,6 +65,35 @@ PinnedList loadRecents();
 // Writes the recent-app list, newest first, replacing the file atomically.
 void saveRecents(const PinnedList& recents);
 
+// One recently opened file or folder, in the same config directory as the recent
+// apps. It is a snapshot of what the desktop opened (its path), not of an app.
+struct RecentFile {
+    std::string name;   // "Quarterly report.pdf" -- what gets painted
+    std::string path;   // absolute path, handed to xdg-open
+    std::string icon;   // icon *name* if the desktop entry had one, else empty
+    bool isDir = false;
+};
+using RecentFileList = std::vector<RecentFile>;
+
+// Where the recently opened files live, in the same config directory as the
+// recent apps. Empty when neither XDG_CONFIG_HOME nor HOME names an absolute path.
+std::string recentFilesPath();
+
+// Reads the recent-file list back, newest first. Missing or unreadable = empty,
+// never an error.
+RecentFileList loadRecentFiles();
+
+// Writes the recent-file list, newest first, replacing the file atomically.
+void saveRecentFiles(const RecentFileList& files);
+
+// The user's Launchpad order: the Exec strings of the apps, first app first.
+// Persisting the order rather than re-drawing it from the layout means the
+// arrangement survives a restart, and it degrades cleanly when apps are added
+// or removed: ones absent from the list keep their scan order at the end.
+std::string launchpadOrderPath();
+std::vector<std::string> loadLaunchpadOrder();
+void saveLaunchpadOrder(const std::vector<std::string>& order);
+
 // The thickness the user dragged the taskbar to, from the same config directory
 // as the pins. A missing, unreadable or nonsense value falls back to the Windows
 // 11 default rather than failing: a bad setting must never stop the WM starting.

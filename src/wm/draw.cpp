@@ -262,6 +262,77 @@ void Manager::animateDesktopIconReflow(double dtMs) {
     if (moving) dirty = true;
 }
 
+// The same spring system the desktop icons use, applied to the Launchpad's page.
+// Each tile eases from where it visibly is to the slot the grid wants it in
+// (configure: same 3.0 Hz, playful overshoot), so a reorder drag makes the rest
+// of the page part around the carried tile exactly as the desktop parts around a
+// dragged icon, and release settles it back with that same springy life. The
+// springs are per appRects slot of the current page: when the page or the
+// filtered list changes under them -- a page turn, a typed search -- they are
+// re-synced straight to their targets so nothing coasts in from an old page.
+void Manager::animateLaunchTileReflow(double dtMs) {
+    const size_t n = appRects.size();
+    if (launchTilePage != startPage || launchTileTotal != appFiltered.size()) {
+        launchTilePage = startPage;
+        launchTileTotal = appFiltered.size();
+        launchTilePos.resize(n);
+        launchTileDraw.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            const Rect& c = appRects[i];
+            launchTilePos[i].reset(motion::Vec2{double(c.x), double(c.y)});
+            launchTileDraw[i] = c;
+        }
+    } else if (launchTilePos.size() != n || launchTileDraw.size() != n) {
+        // A slot list change within the same page keeps the existing springs,
+        // matching either way, so an entry appearing does not fly in from the
+        // origin and one disappearing does not leave a stale spring to inherit.
+        const size_t keep = std::min(std::min(launchTilePos.size(), launchTileDraw.size()), n);
+        launchTilePos.resize(n);
+        launchTileDraw.resize(n);
+        for (size_t i = keep; i < n; ++i) {
+            const Rect& c = appRects[i];
+            launchTilePos[i].reset(motion::Vec2{double(c.x), double(c.y)});
+            launchTileDraw[i] = c;
+        }
+    }
+
+    const double dt = std::clamp(dtMs, 0.0, 100.0) / 1000.0;
+    for (size_t i = 0; i < n; ++i) {
+        motion::Spring2& sp = launchTilePos[i];
+        sp.configure(3.0, motion::kPlayful.zeta);
+        const Rect target = appRects[i];
+        const motion::Vec2 tgt{double(target.x), double(target.y)};
+        // The carried tile is pinned exactly under the pointer, like the desktop
+        // icon in hand: no lag, no spring, no velocity.
+        if (launchDragMoving && int(i) == launchDragTile) {
+            sp.setValue(motion::Vec2{double(launchDragPosX), double(launchDragPosY)});
+            sp.setVelocity(motion::Vec2{});
+        } else {
+            sp.step(tgt, dt);
+            if (sp.settled(tgt, 0.4)) {
+                sp.setValue(tgt);
+                sp.setVelocity(motion::Vec2{});
+            }
+        }
+        const motion::Vec2 v = sp.value();
+        const Rect next{int(std::lround(v.x)), int(std::lround(v.y)), target.w, target.h};
+        Rect& cur = launchTileDraw[i];
+        if (cur != next) {
+            cur = next;
+            dirty = true;
+        }
+    }
+
+    // The lift: the carried tile rises quickly and sinks back a touch slower, so
+    // grabbing and dropping both read on screen -- the desktop icon's lift.
+    launchTileLift.setFrequency(4.2);
+    launchTileLift.zeta = 0.72;
+    const double want = launchDragMoving ? 1.0 : 0.0;
+    const bool liftMoving = !launchTileLift.settled(want, 1e-3);
+    launchTileLift.step(want, dt);
+    if (liftMoving) dirty = true;
+}
+
 
 // a .desktop launcher. A click selects, a double click opens (input.cpp).
 // Everything sitting on the user's Desktop folder: a folder, a dropped file or
@@ -1166,6 +1237,23 @@ void Manager::layoutStartMenu() {
         if (!searchText.empty() && !containsFold(apps[i].searchKey, searchText)) continue;
         appFiltered.push_back(i);
     }
+    // The grid honours the user's arrangement: apps the Launchpad has reordered
+    // come out in that order, and everything that has never been dragged keeps
+    // its scan order behind them (a stable sort, so within each group the scan
+    // order -- usually alphabetical -- still holds). The persisted list only
+    // ever names what moved, so a fresh install is findable without having to
+    // win its way up the grid.
+    if (!launchpadOrder.empty()) {
+        std::stable_sort(appFiltered.begin(), appFiltered.end(), [&](int a, int b) {
+            const auto rank = [&](int ai) -> size_t {
+                const std::string& exec = apps[size_t(ai)].exec;
+                for (size_t j = 0; j < launchpadOrder.size(); ++j)
+                    if (launchpadOrder[j] == exec) return j;
+                return size_t(-1);
+            };
+            return rank(a) < rank(b);
+        });
+    }
 
     // The launcher owns everything above the taskbar; the taskbar stays put so
     // its Start button can still toggle it.
@@ -1302,15 +1390,24 @@ void Manager::drawStartMenu() {
         const size_t base = size_t(page) * startPageSize;
         const size_t total = appFiltered.size();
         const size_t onPage = total > base ? std::min(startPageSize, total - base) : 0;
+        // Mid-swipe (or mid-turn) the tiles are drawn straight from the strip;
+        // settled on the current page they come from the spring cells instead,
+        // so a reorder drag's parting and the settle after a drop are what the
+        // eyes follow. Only the current page has springs -- the pages that slide
+        // in a turn are the ones filling the strip.
+        const bool reflow = onPage == launchTileDraw.size() && startPage == page &&
+                            !launchSwipe && std::abs(off - double(page)) < 1e-6;
         for (size_t i = 0; i < onPage; ++i) {
             const int cx = int(i) % launchCols;
             const int cy = int(i) / launchCols;
             const Rect raw{launchGridX + cx * launchCellW, launchGridTop + cy * launchCellH,
                            launchCellW, launchCellH};
+            if (launchDragMoving && int(i) == launchDragTile) continue;  // drawn last
+            const Rect cell = reflow && i < launchTileDraw.size() ? launchTileDraw[i] : raw;
             const AppEntry& e = apps[appFiltered[base + i]];
-            const int icon = std::clamp(std::min(raw.w - 32, screenH / 8),
+            const int icon = std::clamp(std::min(cell.w - 32, screenH / 8),
                                         metrics::kLaunchIconMin, metrics::kLaunchIcon);
-            const Rect box = scaled(Rect{raw.x + (raw.w - icon) / 2, raw.y, icon, icon});
+            const Rect box = scaled(Rect{cell.x + (cell.w - icon) / 2, cell.y, icon, icon});
 
             const double hav = i < appHover.size() ? appHover[i] : 0.0;
             if (hav > 0.001) {
@@ -1323,10 +1420,10 @@ void Manager::drawStartMenu() {
                 drawAppTile(ibox, e.name, float(ibox.w) * 0.24f, tileTint(e.name), false);
             }
             const TextTex t =
-                text.get(ellipsize(text, e.name, 15, raw.w - 12), 15, Weight::Regular);
+                text.get(ellipsize(text, e.name, 15, cell.w - 12), 15, Weight::Regular);
             if (!t.tex) continue;
             const Rect label = scaled(
-                Rect{raw.x + (raw.w - t.w) / 2, raw.y + icon + 6, t.w, t.h});
+                Rect{cell.x + (cell.w - t.w) / 2, cell.y + icon + 6, t.w, t.h});
             // A one pixel shadow keeps the white label legible over a light patch.
             comp.drawText(t, Rect{label.x + dx + 1, label.y + 1, label.w, label.h},
                           theme::kLaunchLabelShadow, a);
@@ -1346,6 +1443,51 @@ void Manager::drawStartMenu() {
         drawPage(frac > 0.0 ? basePage + 1 : basePage - 1, whole + stride);
     } else {
         drawPage(basePage, 0);
+    }
+
+    // The carried tile is painted above the whole page, like the desktop icon in
+    // hand: it swells and casts a soft shadow so it reads as being held over the
+    // grid rather than painted into it. It is the tile that reappears from the
+    // reflow skips above, at the pointer rather than at any slot.
+    if (launchDragMoving && launchDragTile >= 0 &&
+        size_t(launchDragTile) < appRects.size()) {
+        const size_t gi = startPageBase + size_t(launchDragTile);
+        if (gi < appFiltered.size()) {
+            const AppEntry& e = apps[appFiltered[gi]];
+            const double lift = std::clamp(launchTileLift.value, 0.0, 1.4);
+            const Rect cell = appRects[size_t(launchDragTile)];
+            const int icon0 = std::clamp(std::min(cell.w - 32, screenH / 8),
+                                         metrics::kLaunchIconMin, metrics::kLaunchIcon);
+            const int grow = int(std::lround(double(icon0) * 0.10 * lift));
+            const int icon = std::clamp(icon0 + grow, metrics::kLaunchIconMin,
+                                        metrics::kLaunchIcon);
+            const Rect box = scaled(Rect{launchDragPosX + (cell.w - icon) / 2, launchDragPosY,
+                                         icon, icon});
+            if (lift > 0.001) {
+                constexpr int kLayers = 5;
+                for (int s = kLayers; s >= 1; --s) {
+                    const float tt = float(s) / float(kLayers);
+                    const float sh = float(0.30 * lift) * (1.0f - tt) * (1.0f - tt);
+                    const int spread = int(std::lround(2.0 + 8.0 * tt));
+                    comp.drawRect(Rect{box.x - spread, box.y - spread + int(std::lround(4.0 * lift)),
+                                       box.w + 2 * spread, box.h + 2 * spread},
+                                  10.f + float(spread), theme::kShadow, sh);
+                }
+            }
+            if (!drawAppIcon(box, e.icon, e.wmClass, float(box.w) * 0.24f, a)) {
+                drawAppTile(box, e.name, float(box.w) * 0.24f, tileTint(e.name), false);
+            }
+            const TextTex t = text.get(ellipsize(text, e.name, 15, cell.w - 12), 15,
+                                       Weight::Regular);
+            if (t.tex) {
+                const Rect label = scaled(Rect{launchDragPosX + (cell.w - t.w) / 2,
+                                               launchDragPosY + icon + 6, t.w, t.h});
+                comp.drawText(t, Rect{label.x + 1, label.y + 1, label.w, label.h},
+                              theme::kLaunchLabelShadow, a);
+                comp.drawText(t, Rect{label.x, label.y, label.w, label.h}, theme::kLaunchLabel,
+                              a);
+            }
+        }
     }
 
     if (appFiltered.empty()) {
@@ -1464,7 +1606,7 @@ void Manager::drawContextMenu() {
                              Rect{panel.x, top, panel.w, ringGridH});
         }
         for (size_t i = 0; i < contextRecents.size() && i < ringRecentRects.size(); ++i) {
-const Rect cell = grow(ringRecentRects[i]);
+            const Rect cell = grow(ringRecentRects[i]);
             const double hv = i < ctxHover.size() ? ctxHover[i] : 0.0;
             if (hv > 0.001)
                 comp.drawRect(cell.inflated(-10), 12.f, theme::kItemHover, float(hv) * a);
@@ -1476,8 +1618,40 @@ const Rect cell = grow(ringRecentRects[i]);
                 drawAppTile(ibox, app.name, float(icon) * 0.22f, tileTint(app.name), false);
         }
 
-        // A hairline separates the grid from the power row, so the two read as
-        // distinct groups the way the greeting does from the grid.
+        // Recent files sit between the app grid and the power row: a caption over
+        // one row per file, each a small icon with the name beside it. Unlike the
+        // apps, files cannot be scanned from a bare icon, so the name is the point
+        // of the row. layoutRingMenu hides the section entirely when there are
+        // none, so the menu reads exactly as it always read before any file was
+        // opened.
+        if (ringFilesShown > 0 && !ringFileRects.empty()) {
+            comp.drawRect(growHairline(Rect{contextRect.x + 10,
+                                            ringFilesLabelTop - 5,
+                                            contextRect.w - 20, 1}),
+                          0.f, theme::kShellBorder, a * 0.8f);
+            drawTextAt("Recent files", 11, Weight::Medium, theme::kTextMuted, panel.x + 16,
+                       panel.y + (ringFilesLabelTop - contextRect.y) + 4);
+        }
+        for (size_t i = 0; i < ringFileRects.size() && i < size_t(ringFilesShown); ++i) {
+            const Rect cell = grow(ringFileRects[i]);
+            const size_t idx = contextRecents.size() + i;
+            const double hv = idx < ctxHover.size() ? ctxHover[idx] : 0.0;
+            if (hv > 0.001) comp.drawRect(cell.inflated(-4), 6.f, theme::kItemHover, float(hv) * a);
+            const RecentFile& file = contextFiles[i];
+            const int icon = 22;
+            const Rect ibox{cell.x + 10, cell.y + (cell.h - icon) / 2, icon, icon};
+            if (!drawAppIcon(ibox, file.icon, std::string(), float(icon) * 0.22f, float(a))) {
+                const char* fb = file.isDir ? "folder" : "text-plain";
+                if (!drawAppIcon(ibox, fb, std::string(), float(icon) * 0.22f, float(a)))
+                    drawAppTile(ibox, file.name, float(icon) * 0.22f, tileTint(file.name), false);
+            }
+            const Color col = mixColor(theme::kTextMuted, theme::kText, float(hv));
+            drawTextAt(ellipsize(text, file.name, 13, cell.w - icon - 28), 13, Weight::Regular,
+                       col, cell.x + icon + 20, cell.y + (cell.h - 18) / 2);
+        }
+
+        // A hairline separates the last section from the power row, so the two
+        // read as distinct groups the way the greeting does from the grid.
         if (!ringPowerRects.empty()) {
             // contextRect, not the grown panel: grow() needs the unscaled span, and
             // for the ring the two differ by exactly that zoom.
@@ -1495,12 +1669,17 @@ const Rect cell = grow(ringRecentRects[i]);
             "Sleep", "Log out", "Restart", "Power"};
         for (size_t i = 0; i < ringPowerRects.size() && i < metrics::kRingPowerCount; ++i) {
 const Rect cell = grow(ringPowerRects[i]);
-            const size_t idx = contextRecents.size() + i;
+            const size_t idx = contextRecents.size() + size_t(ringFilesShown) + i;
             const double hv = idx < ctxHover.size() ? ctxHover[idx] : 0.0;
-            if (hv > 0.001)
-                comp.drawRect(cell.inflated(-4), 8.f, theme::kItemHover, float(hv) * a);
             const int glyph = std::max(16, metrics::kRingIcon - 22);
             const Rect ibox{cell.x + (cell.w - glyph) / 2, cell.y + 9, glyph, glyph};
+            // A greyish disc behind the glyph, sized to sit between the glyph and
+            // its label -- the label must never run into the circle. The disc
+            // deepens when the button is hovered.
+            const int d = glyph + 4;
+            const Rect disc{cell.x + (cell.w - d) / 2, ibox.y + (glyph - d) / 2, d, d};
+            comp.drawRect(disc, float(d) * 0.5f,
+                          mixColor(theme::kRingGlyph, theme::kRingGlyphHover, hv), a);
             if (!drawAppIcon(ibox, kPowerGlyph[i], kPowerGlyph[i], float(glyph) * 0.22f,
                              float(a), IconTheme::Shell))
                 drawAppTile(ibox, kPowerLabel[i], float(glyph) * 0.22f,

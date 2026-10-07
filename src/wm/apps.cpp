@@ -831,6 +831,95 @@ void saveRecents(const PinnedList& recents) {
     log("saved %zu recent app(s) to %s", recents.size(), path.c_str());
 }
 
+std::string recentFilesPath() { return configFile("recent-files"); }
+
+RecentFileList loadRecentFiles() {
+    RecentFileList files;
+    const std::string path = recentFilesPath();
+    if (path.empty()) return files;
+    std::ifstream in(path);
+    if (!in) return files;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::vector<std::string> f = splitTabs(line);
+        // A recent file cannot work without either a name or a path.
+        if (f.size() < 2 || (f[0].empty() && f[1].empty())) continue;
+        RecentFile r;
+        r.name = f[0];
+        r.path = f[1];
+        if (f.size() > 2) r.icon = f[2];
+        if (f.size() > 3) r.isDir = f[3] == "1";
+        // The same file twice: a hand-edited file, or a write from an older WM.
+        bool dup = false;
+        for (const RecentFile& o : files) {
+            if (o.path == r.path) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+        files.push_back(std::move(r));
+    }
+    return files;
+}
+
+void saveRecentFiles(const RecentFileList& files) {
+    const std::string path = recentFilesPath();
+    if (path.empty()) {
+        log("cannot save recent files: no XDG_CONFIG_HOME or HOME");
+        return;
+    }
+    std::ostringstream text;
+    for (const RecentFile& r : files) {
+        text << pinField(r.name) << '\t' << pinField(r.path) << '\t' << pinField(r.icon)
+             << '\t' << (r.isDir ? '1' : '0') << '\n';
+    }
+    if (!writeFileAtomicImpl(path, text.str())) {
+        log("cannot write recent files to %s", path.c_str());
+        return;
+    }
+    log("saved %zu recent file(s) to %s", files.size(), path.c_str());
+}
+
+std::string launchpadOrderPath() { return configFile("launchpad-order"); }
+
+std::vector<std::string> loadLaunchpadOrder() {
+    std::vector<std::string> order;
+    const std::string path = launchpadOrderPath();
+    if (path.empty()) return order;
+    std::ifstream in(path);
+    if (!in) return order;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        order.push_back(line);
+    }
+    return order;
+}
+
+void saveLaunchpadOrder(const std::vector<std::string>& order) {
+    const std::string path = launchpadOrderPath();
+    if (path.empty()) {
+        log("cannot save the Launchpad order: no XDG_CONFIG_HOME or HOME");
+        return;
+    }
+    std::ostringstream text;
+    for (const std::string& exec : order) {
+        for (char ch : exec) {
+            if (ch == '\t' || ch == '\n' || ch == '\r') continue;
+            text << ch;
+        }
+        text << '\n';
+    }
+    if (!writeFileAtomicImpl(path, text.str())) {
+        log("cannot write the Launchpad order to %s", path.c_str());
+        return;
+    }
+    log("saved %zu app(s) to the Launchpad order %s", order.size(), path.c_str());
+}
+
 // ---------------------------------------------------------------------------
 // Desktop arrangement: the widget cards, and the cells the icons were dragged to
 // ---------------------------------------------------------------------------

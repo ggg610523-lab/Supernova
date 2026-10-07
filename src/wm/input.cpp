@@ -441,6 +441,13 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
     // became a swipe was a click on the backdrop, which dismisses.
     if (startOpen && launchPressArmed) {
         launchPressArmed = false;
+        // A tile reorder ends here: the carried tile is released into the slot
+        // the grid moved it to, and the arrangement is saved. The launchpad stays
+        // open, so the freshly arranged page is what the user looks at.
+        if (launchDragMoving) {
+            endLaunchTileDrag(x, y);
+            return;
+        }
         if (launchSwipe) {
             launchSwipe = false;
             const int dx = x - launchSwipeStartX;
@@ -607,6 +614,13 @@ void Manager::onMotion(XMotionEvent& ev) {
                 // The gesture has claimed the press, so the tile it started on
                 // is no longer a click waiting to happen.
                 launchPressTile = -1;
+            } else if (!launchDragMoving && dx * dx + dy * dy >=
+                       double(metrics::kLaunchSwipeSlop) *
+                           double(metrics::kLaunchSwipeSlop)) {
+                // Past the slop without turning into a page turn: whatever tile
+                // the press came down on lifts out and starts a reorder, the way
+                // the desktop icons lift out of the grid.
+                if (launchPressTile >= 0) beginLaunchTileDrag(launchPressTile, x, y);
             }
         }
         if (launchSwipe) {
@@ -615,6 +629,10 @@ void Manager::onMotion(XMotionEvent& ev) {
             launchPageOffset = std::clamp(double(launchSwipeFrom) - dx / stride, -0.35,
                                           double(startPageCount - 1) + 0.35);
             dirty = true;
+            return;
+        }
+        if (launchDragMoving) {
+            updateLaunchTileDrag(x, y);
             return;
         }
     }
@@ -898,20 +916,36 @@ void Manager::onKeyPress(XKeyEvent& ev) {
 }
 
 void Manager::applyContextAction(int index) {
-    // The ring menu: each row is one of the recent apps, so a press launches it
-    // (and bumps it back to the top of the list). The empty-list placeholder has
-    // no app behind it and does nothing.
+    // The ring menu: the rows are the recent apps, then the recent files, then
+    // the power actions. A press on an app or file launches it (and bumps it back
+    // to the top of its list); the empty-list placeholder has nothing behind it
+    // and does nothing.
     if (contextRing) {
         const int n = int(contextRecents.size());
         if (index >= 0 && index < n) {
             const AppEntry app = contextRecents[size_t(index)];
             noteRecent(app.name, app.exec, app.icon, app.wmClass);
             launchApp(app.exec);
-        } else if (index >= n && index < n + int(ringPowerRects.size())) {
-            // The cells after the grid are the power actions; runRingPower counts
-            // from the start of that row.
-            runRingPower(index - n);
+            return;
         }
+        const int m = ringFilesShown;
+        if (index >= n && index < n + m) {
+            // A recent file opens the same way the desktop opens one: handed to
+            // xdg-open, which is the session's default handler. Reopening bumps
+            // it to the top of the list rather than leaving it where it was.
+            const RecentFile& file = contextFiles[size_t(index - n)];
+            noteRecentFile(file.name, file.path, file.icon, file.isDir);
+            std::string quoted = "'";
+            for (char ch : file.path) {
+                if (ch == '\'') quoted += "'\\''";
+                else quoted += ch;
+            }
+            quoted += "'";
+            launchApp("xdg-open " + quoted);
+            return;
+        }
+        const int p = n + m;
+        if (index >= p && index < p + int(ringPowerRects.size())) runRingPower(index - p);
         return;
     }
     // The pin menu, opened either on a pinned taskbar button or on a Launchpad
@@ -1548,6 +1582,128 @@ void Manager::endDesktopIconDrag(int x, int y, unsigned button) {
     dirty = true;
 }
 
+// --------------------------------------------------------------------------
+// Launchpad tile reorder: the tile the press came down on lifts out of the grid
+// and the page reflows around it, exactly as the desktop icons part around a
+// dragged icon. The two gestures on one press -- turn the page, or move the
+// tile -- are told apart by onMotion: a sideways drag across a multi-page field
+// is a page turn first, everything else that goes past the slop becomes a drag.
+
+// Arms the drag: remembers which tile, where the press grabbed it, and pins the
+// springs so the rest of the page can start parting around the hole it leaves.
+void Manager::beginLaunchTileDrag(int slot, int x, int y) {
+    if (slot < 0 || slot >= int(appRects.size())) return;
+    launchDragTile = slot;
+    launchDragFrom = slot;
+    launchDragMoving = true;
+    launchDragPressX = launchDragLastX = x;
+    launchDragPressY = launchDragLastY = y;
+    launchDragGrabX = x - appRects[size_t(slot)].x;
+    launchDragGrabY = y - appRects[size_t(slot)].y;
+    launchDragPosX = appRects[size_t(slot)].x;
+    launchDragPosY = appRects[size_t(slot)].y;
+    launchDragVelX = launchDragVelY = 0.0;
+    launchDragLastMs = nowMs();
+    grabPointer();
+    dirty = true;
+}
+
+// The carried tile tracks the pointer, the slot under its centre is where the
+// grid puts it, and the order of the page slides around it slot by slot -- each
+// move rewriting launchpadOrder so the final arrangement is what gets saved.
+void Manager::updateLaunchTileDrag(int x, int y) {
+    if (launchDragTile < 0 || launchDragTile >= int(appRects.size())) return;
+
+    // Pointer-speed estimate for the release's flick, the desktop icon's own.
+    const double now = nowMs();
+    const double dts = (now - launchDragLastMs) / 1000.0;
+    if (dts > 1e-3 && dts < 0.2) {
+        launchDragVelX = 0.65 * launchDragVelX + 0.35 * double(x - launchDragLastX) / dts;
+        launchDragVelY = 0.65 * launchDragVelY + 0.35 * double(y - launchDragLastY) / dts;
+    } else if (dts >= 0.2) {
+        launchDragVelX = launchDragVelY = 0.0;
+    }
+    launchDragLastMs = now;
+    launchDragLastX = x;
+    launchDragLastY = y;
+
+    // Keep the carried tile inside the grid block so its centre always has a
+    // slot to land in. The page can be slightly taller than the tiles it holds
+    // (a short last row), so the vertical bound is the used rows only.
+    const int rows = launchCols > 0
+                         ? std::max(1, (int(appRects.size()) + launchCols - 1) / launchCols)
+                         : 1;
+    const int maxX = launchGridX + launchCols * launchCellW - launchCellW;
+    const int maxY = launchGridTop + rows * launchCellH - launchCellH;
+    const int px = std::clamp(x - launchDragGrabX, launchGridX, maxX);
+    const int py = std::clamp(y - launchDragGrabY, launchGridTop, maxY);
+    launchDragPosX = px;
+    launchDragPosY = py;
+
+    // The slot the carried tile is over, in the appRects index space of this
+    // page (row-major, exactly as layoutStartMenu fills it).
+    const int col = std::clamp((px + launchCellW / 2 - launchGridX) / launchCellW, 0,
+                               launchCols - 1);
+    const int row = std::clamp((py + launchCellH / 2 - launchGridTop) / launchCellH, 0,
+                               rows - 1);
+    int target = row * launchCols + col;
+    if (target >= int(appRects.size())) target = int(appRects.size()) - 1;
+    if (target >= 0 && target != launchDragFrom) {
+        // Slide the carried app to the target slot, shifting the page between
+        // the two. launchpadOrder is rewritten from the whole filtered list, so
+        // the drag rearranges one settled sequence rather than a moving one.
+        const size_t f = size_t(launchDragFrom), t = size_t(target);
+        const int app = appFiltered[f];
+        appFiltered.erase(appFiltered.begin() + long(f));
+        appFiltered.insert(appFiltered.begin() + long(t), app);
+        launchpadOrder.clear();
+        launchpadOrder.reserve(appFiltered.size());
+        for (int ai : appFiltered) launchpadOrder.push_back(apps[size_t(ai)].exec);
+        layoutStartMenu();
+        launchDragFrom = target;
+        launchDragTile = target;
+    }
+    // Glue the carried tile to the pointer whether it changed slots or not --
+    // the springs pin it here until the release lets it settle into its slot.
+    if (size_t(launchDragTile) < launchTilePos.size()) {
+        launchTilePos[size_t(launchDragTile)].setValue(
+            motion::Vec2{double(px), double(py)});
+        launchTilePos[size_t(launchDragTile)].setVelocity(motion::Vec2{});
+    }
+    if (size_t(launchDragTile) < launchTileDraw.size()) {
+        const int w = launchTileDraw[size_t(launchDragTile)].w;
+        const int h = launchTileDraw[size_t(launchDragTile)].h;
+        launchTileDraw[size_t(launchDragTile)] = Rect{px, py, w, h};
+    }
+    hoverApp = -1;
+    dirty = true;
+}
+
+// Release ends the gesture: the carried tile is handed back to its slot carrying
+// the pointer's speed, so it coasts a little past where it was let go and the
+// spring reels it in with the same weighted overshoot the desktop icons settle
+// with. The arrangement is saved once, as it landed, so a crash right after the
+// gesture never loses it.
+void Manager::endLaunchTileDrag(int x, int y) {
+    (void)x;
+    (void)y;
+    const int slot = launchDragTile;
+    constexpr double kMaxThrow = 1200.0;  // px/s ceiling on the flick
+    if (slot >= 0 && size_t(slot) < launchTilePos.size()) {
+        const double vx = std::clamp(launchDragVelX, -kMaxThrow, kMaxThrow);
+        const double vy = std::clamp(launchDragVelY, -kMaxThrow, kMaxThrow);
+        launchTilePos[size_t(slot)].setVelocity(motion::Vec2{vx, vy});
+    }
+    // Best-effort write, like every other arrangement: a read-only config
+    // directory just leaves the arrangement session-only.
+    saveLaunchpadOrder(launchpadOrder);
+    launchDragMoving = false;
+    launchDragTile = -1;
+    launchDragFrom = -1;
+    ungrabPointer();
+    dirty = true;
+}
+
 // Opens one desktop item: a launcher runs its Exec, anything else is handed to
 // the session's default handler (xdg-open), so folders open in the file manager
 // and files in whatever the desktop is configured to use.
@@ -1561,6 +1717,9 @@ void Manager::openDesktopItem(const DesktopItem& item, const Rect& fromIcon) {
         return;
     }
     if (item.path.empty()) return;
+    // Anything outside the session's desktop folder (a launcher, a dropped file)
+    // counts as a recently opened thing, so the ring menu can show it again.
+    noteRecentFile(item.name, item.path, item.icon, item.isDir);
     // Single quote the path for the shell launchApp runs it through.
     std::string quoted = "'";
     for (char ch : item.path) {

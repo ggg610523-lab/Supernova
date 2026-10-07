@@ -370,6 +370,14 @@ inline constexpr Color kWidgetGreen = rgb(0x30D158);          // iOS systemGreen
 inline constexpr Color kWidgetYellow = rgb(0xFFD60A);         // iOS systemYellow
 inline constexpr Color kWidgetRed = rgb(0xFF453A);            // iOS systemRed
 
+// --- ring menu power discs -------------------------------------------------
+// The ring menu's power glyphs sit on dark grey discs, so a light panel (the
+// taskbar acrylic is the menu's own glass, light or dark) still shows the glyph
+// off clearly. The disc is the hover target too: it deepens in place rather than
+// the cell ringing around the glyph.
+inline constexpr Color kRingGlyph = rgb(0x2E2E31, 0.55f);
+inline constexpr Color kRingGlyphHover = rgb(0x222224, 0.70f);
+
 }  // namespace theme
 
 namespace metrics {
@@ -464,6 +472,12 @@ constexpr int kRingCell = 78;      // square cell of the recent-app grid
 constexpr int kRingIcon = 48;      // icon edge inside a recent cell
 constexpr int kRingPowerH = 74;    // power button: a glyph over a short label
 constexpr int kRingMaxRecents = 8;
+// A recent-file row is shorter than an app cell because its label is the point:
+// a small icon with the file's name beside it, one file per row. The menu shows
+// at most a screenful and hides the section entirely when there are no files.
+constexpr int kRingFileRowH = 34;    // one recent-file row
+constexpr int kRingFilesLabelH = 20; // the "Recent files" caption
+constexpr int kRingMaxFiles = 4;     // rows the menu can show
 // The power actions, in the order they are drawn and dispatched. Their labels
 // and Reversal glyph names live beside runRingPower() in manager.cpp.
 constexpr int kRingPowerCount = 4;

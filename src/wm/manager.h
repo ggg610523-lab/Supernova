@@ -382,6 +382,13 @@ private:
     // into its hover region for the same reason).
     Rect taskHitRect(size_t index) const;
     void layoutStartMenu();
+    // Rearranging the Launchpad's tiles: the tile under the pointer lifts out of
+    // the grid and the rest of the page parts around it with the same springy
+    // overshoot the desktop icons use (animateLaunchTileReflow, in draw.cpp).
+    void beginLaunchTileDrag(int slot, int x, int y);
+    void updateLaunchTileDrag(int x, int y);
+    void endLaunchTileDrag(int x, int y);
+    void animateLaunchTileReflow(double dtMs);
     void drawTextAt(const std::string& s, int px, Weight w, const Color& c, int x, int y);
     void drawTextCentered(const std::string& s, int px, Weight w, const Color& c, const Rect& r);
     void drawTextRight(const std::string& s, int px, Weight w, const Color& c, int right, int y);
@@ -698,9 +705,16 @@ private:
     // over a list of recent apps instead of action strings.
     bool contextRing = false;
     std::vector<AppEntry> contextRecents;  // the app each grid cell stands for
+    // A copy of recentFiles taken when the menu opens, so a launch from the menu
+    // never rewrites the grid under the pointer. The visible rows sit between
+    // the app grid and the power row in the same hover index space as them.
+    std::vector<RecentFile> contextFiles;
     std::vector<Rect> ringRecentRects;     // one square per recent app
-    std::vector<Rect> ringPowerRects;      // one per power action, in a row below
+    std::vector<Rect> ringFileRects;       // one row per visible recent file
     int ringGridH = 0;                     // height of the recent grid, for draw
+    int ringFilesShown = 0;                // visible file rows (<= kRingMaxFiles)
+    int ringFilesLabelTop = 0;             // y of the "Recent files" caption
+    std::vector<Rect> ringPowerRects;      // one per power action, in a row below
     // The row/cell under a point, or -1. Shared by the hover wipe and the press
     // handler so the two can never disagree about what is where.
     int contextRowAt(int x, int y) const;
@@ -733,11 +747,23 @@ private:
     // Loaded at startup and rewritten on every launch, so the ring menu's list
     // survives a restart.
     std::vector<AppEntry> recents;
+    // The files opened most recently, newest first, capped at kRingMaxRecents.
+    // Every non-launcher thing the desktop opens is recorded, so the ring menu
+    // can show what was last worked on. Loaded at startup, written on each open.
+    std::vector<RecentFile> recentFiles;
     // Records one launch: moves an existing entry to the front, or inserts it.
     // Never fatal -- a config directory that cannot be written simply means the
     // list is session-only.
     void noteRecent(const std::string& name, const std::string& exec,
                     const std::string& icon, const std::string& wmClass);
+    // Records one file or folder the desktop opened, newest first, deduplicated
+    // by path. Same best-effort persistence as noteRecent().
+    void noteRecentFile(const std::string& name, const std::string& path,
+                        const std::string& icon, bool isDir);
+    // The user's Launchpad arrangement: the Exec strings in grid order. Apps
+    // absent from the list keep their scan order at the end, so the list only
+    // ever has to mention what was dragged. Rewritten when a tile reorder ends.
+    std::vector<std::string> launchpadOrder;
     bool isPinned(const AppEntry& app) const;
     void pinApp(const AppEntry& app);       // no-op when already pinned
     void unpinApp(const std::string& exec);  // no-op when not pinned
@@ -907,6 +933,31 @@ private:
     int launchSwipeStartX = 0;
     int launchSwipeStartY = 0;
     double launchPageOffset = 0.0;   // absolute page position, in pages
+    // --- rearranging the Launchpad's tiles --------------------------------
+    // A press on a tile is armed (launchPressArmed). When the pointer moves past
+    // the slop *without* turning into a page swipe -- swipes still win for a
+    // sideways drag across a multi-page field -- the press becomes a drag: the
+    // tile lifts out of the grid, the slot it left is what the page reflows
+    // around, and the release drops it back in. launchTilePos springs each tile
+    // toward the appRects slot the grid wants it in, exactly as desktopIconPos
+    // glides the desktop icons; the carried tile is pinned under the pointer.
+    // The order that results is saved as launchpadOrder, so the arrangement
+    // survives a restart. Rows are measured in the appRects index space of the
+    // current page; launchDragTile is always that page's slot.
+    int launchDragTile = -1;           // appRects slot being carried, -1 idle
+    int launchDragFrom = -1;           // slot the carried tile started in
+    bool launchDragMoving = false;     // passed the slop, actually dragging
+    int launchDragPressX = 0, launchDragPressY = 0;
+    int launchDragGrabX = 0, launchDragGrabY = 0;  // pointer offset in the tile
+    int launchDragPosX = 0, launchDragPosY = 0;    // carried tile's top-left
+    double launchDragVelX = 0.0, launchDragVelY = 0.0;  // pointer speed at drop
+    double launchDragLastMs = 0.0;
+    int launchDragLastX = 0, launchDragLastY = 0;
+    std::vector<motion::Spring2> launchTilePos;  // per appRects slot, screen px
+    std::vector<Rect> launchTileDraw;            // eased cells this frame
+    motion::Spring launchTileLift;               // lift of the carried tile
+    int launchTilePage = -1;            // page the springs were built for
+    size_t launchTileTotal = 0;         // appFiltered size the springs were built for
     // Grid geometry from the last layout, kept so any page can be drawn while
     // the field is sliding rather than only the one startPage names.
     int launchCols = metrics::kLaunchCols;
