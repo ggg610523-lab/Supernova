@@ -458,8 +458,14 @@ void Manager::drawControlCenter() {
         comp.drawRect(g, float(std::min(g.w, g.h)) * 0.5f, fill, a);
     };
     const auto controlFill = [&](bool on, bool enabled, float hot) {
-        if (!enabled) return theme::kCcDisabled;
         if (on) return theme::kCcActive;
+        // Light mode: every round control takes the plate fill, so the launchers
+        // and the 1x1 toggles share one background with the wide plates (tablet
+        // mode, light mode, show desktop) instead of a white wash sitting beside
+        // a dark tile. Dark mode keeps its two-tone look exactly as it was.
+        if (theme::isLight())
+            return mixColor(theme::kCcTile, theme::kCcTileHover, hot);
+        if (!enabled) return theme::kCcDisabled;
         return mixColor(theme::kCcControlOff, theme::kCcControlHover, hot);
     };
     const auto glyph = [&](const Rect& r, const char* icon, bool on, bool enabled) {

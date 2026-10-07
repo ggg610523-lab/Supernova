@@ -271,13 +271,44 @@ void Manager::refreshBattery(bool force) {
 
 void Manager::initWidgets() {
     widgets.clear();
-    addWidget(WidgetKind::Clock);
-    addWidget(WidgetKind::Battery);
-    addWidget(WidgetKind::Calendar);
-    addWidget(WidgetKind::Weather);
-    addWidget(WidgetKind::DigitalClock);
+    // The arrangement the user left comes back wholesale when there is one to
+    // read; the default set below is built only for a first run -- or for a file
+    // with nothing usable in it, which reads the same way.
+    if (const auto saved = loadWidgets()) {
+        widgets = *saved;
+        // A card saved for a bigger screen (or a taller taskbar) is brought back
+        // on screen rather than left hanging off the edge, the same treatment
+        // layoutDesktopIcons() gives an icon placement from another session.
+        const int bottom = screenH - metrics::taskbarH;
+        const int maxW = std::max(metrics::kWidgetMin, screenW);
+        const int maxH = std::max(metrics::kWidgetMin, bottom);
+        for (Widget& w : widgets) {
+            w.rect.w = std::clamp(w.rect.w, metrics::kWidgetMin, maxW);
+            w.rect.h = std::clamp(w.rect.h, metrics::kWidgetMin, maxH);
+            w.rect.x = std::clamp(w.rect.x, 0, std::max(0, screenW - w.rect.w));
+            w.rect.y = std::clamp(w.rect.y, 0, std::max(0, bottom - w.rect.h));
+        }
+    } else {
+        addWidget(WidgetKind::Clock);
+        addWidget(WidgetKind::Battery);
+        addWidget(WidgetKind::Calendar);
+        addWidget(WidgetKind::Weather);
+        addWidget(WidgetKind::DigitalClock);
+    }
+    // The saved cards were placed without a layout pass (the default set above
+    // gets one per add), so the icon grid has to be recomputed around them here
+    // or the first frame would show icons sitting under a card.
+    layoutDesktopIcons();
     refreshBattery(true);
     refreshWeather(true);
+}
+
+// Both halves of the desktop's arrangement, written in one call. The cards are
+// held in the stash while tablet mode is up -- that is where their rects are --
+// so the stash is what gets saved from there rather than an empty desktop.
+void Manager::saveDesktopLayout() {
+    saveWidgets(widgetStash.empty() ? widgets : widgetStash);
+    saveDesktopIconPlacement(desktopIconPlacement);
 }
 
 // Reads ~/.config/win11wm/weather (or the built-in default) and folds the time
@@ -453,6 +484,10 @@ void Manager::endWidgetDrag() {
     tabletDragEdge = 0;
     ungrabPointer();
     layoutDesktopIcons();
+    // The card was moved, resized or sent to another page: that is the whole
+    // point of saving, so it is written now rather than at the end of the session.
+    // Tablet mode holds the cards in the stash, so save whichever is live.
+    saveWidgets(widgetStash.empty() ? widgets : widgetStash);
     dirty = true;
 }
 

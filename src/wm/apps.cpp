@@ -780,4 +780,143 @@ void saveRecents(const PinnedList& recents) {
     log("saved %zu recent app(s) to %s", recents.size(), path.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// Desktop arrangement: the widget cards, and the cells the icons were dragged to
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The saved word for a card kind. These words are the file format, so they are
+// written out in full rather than as the enum's numbers: a build that reordered
+// WidgetKind must not be able to move the user's cards.
+const char* widgetKindWord(WidgetKind k) {
+    switch (k) {
+        case WidgetKind::Clock: return "clock";
+        case WidgetKind::Battery: return "battery";
+        case WidgetKind::Calendar: return "calendar";
+        case WidgetKind::Weather: return "weather";
+        case WidgetKind::DigitalClock: return "digital";
+    }
+    return "clock";
+}
+
+bool widgetKindFromWord(const std::string& s, WidgetKind* out) {
+    if (s == "clock") *out = WidgetKind::Clock;
+    else if (s == "battery") *out = WidgetKind::Battery;
+    else if (s == "calendar") *out = WidgetKind::Calendar;
+    else if (s == "weather") *out = WidgetKind::Weather;
+    else if (s == "digital") *out = WidgetKind::DigitalClock;
+    else return false;
+    return true;
+}
+
+// A number read back from a file the user may have edited by hand. Anything that
+// is not a plain integer reads as absent rather than as zero, so one broken line
+// drops out instead of parking a card in the top-left corner.
+bool fileInt(const std::string& s, int* out) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    const long v = std::strtol(s.c_str(), &end, 10);
+    if (end == s.c_str() || *end != '\0') return false;
+    *out = int(v);
+    return true;
+}
+
+}  // namespace
+
+std::optional<std::vector<Widget>> loadWidgets() {
+    const std::string path = configFile("widgets");
+    if (path.empty()) return std::nullopt;
+    std::ifstream in(path);
+    if (!in) return std::nullopt;
+
+    std::vector<Widget> out;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        const std::vector<std::string> f = splitFields(line);
+        if (f.size() < 6) continue;
+        WidgetKind kind;
+        int x = 0, y = 0, w = 0, h = 0, page = 0;
+        if (!widgetKindFromWord(f[0], &kind)) continue;
+        if (!fileInt(f[1], &x) || !fileInt(f[2], &y) || !fileInt(f[3], &w) ||
+            !fileInt(f[4], &h))
+            continue;
+        if (w <= 0 || h <= 0) continue;
+        Widget widget;
+        widget.kind = kind;
+        widget.rect = Rect{x, y, w, h};
+        widget.page = (fileInt(f[5], &page) && page > 0) ? page : 0;
+        out.push_back(widget);
+    }
+    // A file that holds no recognisable card reads as no file at all: the default
+    // set is a better desktop than an empty one, and a missing file is how the
+    // very first session reads anyway.
+    if (out.empty()) return std::nullopt;
+    return out;
+}
+
+bool saveWidgets(const std::vector<Widget>& widgets) {
+    const std::string path = configFile("widgets");
+    if (path.empty()) {
+        log("cannot save the desktop widgets: no XDG_CONFIG_HOME or HOME");
+        return false;
+    }
+    std::ostringstream text;
+    text << "# win11wm desktop widgets: kind, x, y, w, h, page\n";
+    for (const Widget& w : widgets) {
+        text << widgetKindWord(w.kind) << '\t' << w.rect.x << '\t' << w.rect.y << '\t'
+             << w.rect.w << '\t' << w.rect.h << '\t' << w.page << '\n';
+    }
+    if (!writeFileAtomicImpl(path, text.str())) {
+        log("cannot write the desktop widgets to %s", path.c_str());
+        return false;
+    }
+    log("saved %zu desktop widget(s) to %s", widgets.size(), path.c_str());
+    return true;
+}
+
+std::map<std::string, Point> loadDesktopIconPlacement() {
+    std::map<std::string, Point> out;
+    const std::string path = configFile("desktop-icons");
+    if (path.empty()) return out;
+    std::ifstream in(path);
+    if (!in) return out;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        const std::vector<std::string> f = splitFields(line);
+        // The path is the record: without it there is no icon to match, and
+        // without both coordinates there is no cell to go to.
+        if (f.size() < 3 || f[0].empty()) continue;
+        int x = 0, y = 0;
+        if (!fileInt(f[1], &x) || !fileInt(f[2], &y)) continue;
+        out[f[0]] = Point{x, y};
+    }
+    return out;
+}
+
+bool saveDesktopIconPlacement(const std::map<std::string, Point>& placement) {
+    const std::string path = configFile("desktop-icons");
+    if (path.empty()) {
+        log("cannot save the desktop icon positions: no XDG_CONFIG_HOME or HOME");
+        return false;
+    }
+    std::ostringstream text;
+    text << "# win11wm desktop icons: path, x, y\n";
+    for (const auto& entry : placement) {
+        text << layoutField(entry.first) << '\t' << entry.second.x << '\t'
+             << entry.second.y << '\n';
+    }
+    if (!writeFileAtomicImpl(path, text.str())) {
+        log("cannot write the desktop icon positions to %s", path.c_str());
+        return false;
+    }
+    log("saved %zu desktop icon position(s) to %s", placement.size(), path.c_str());
+    return true;
+}
+
 }  // namespace wm

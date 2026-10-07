@@ -908,6 +908,7 @@ void Manager::applyContextAction(int index) {
         if (contextWidget >= 0) {
             if (index == row++) {
                 removeWidget(contextWidget);
+                saveDesktopLayout();
                 return;
             }
         }
@@ -938,6 +939,7 @@ void Manager::applyContextAction(int index) {
         else        if (index == row++) addWidget(WidgetKind::Calendar);
         else if (index == row++) addWidget(WidgetKind::Weather);
         else if (index == row) addWidget(WidgetKind::DigitalClock);
+        saveDesktopLayout();
         return;
     }
     Client* c = contextClient;
@@ -1503,6 +1505,9 @@ void Manager::endDesktopIconDrag(int x, int y, unsigned button) {
     dragDesktopIcon = -1;
     desktopIconDragging = false;
     ungrabPointer();
+    // A real drop is a new arrangement, so it is written as it lands rather than
+    // being left for the end of the session -- a crash must not lose the cells.
+    if (dragged) saveDesktopIconPlacement(desktopIconPlacement);
     if (index >= 0 && index < int(desktopItems.size()) && !dragged && button == Button1) {
         const Rect cell = desktopIconDraw.size() == desktopIconRects.size()
                               ? desktopIconDraw[size_t(index)]

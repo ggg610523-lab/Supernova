@@ -5,10 +5,14 @@
 // to start (almost) any X11 program on the machine.
 #pragma once
 
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "theme.h"
+#include "util.h"
+#include "widgets.h"
 
 namespace wm {
 
@@ -180,5 +184,28 @@ TabletLayout loadTabletLayoutFile();
 // Writes the arrangement, replacing the file atomically. False if it could not be
 // stored, which is never fatal: the session simply will not be remembered.
 bool saveTabletLayoutFile(const TabletLayout& layout);
+
+// --- desktop arrangement (the widget cards and the hand-placed icons) --------
+
+// The cards as the user left them -- kind, rect and page -- from the same config
+// directory as the pins. nullopt when there is no file to read, or none holding a
+// single recognisable card, which is the caller's cue to lay out the default set.
+// A kind this build does not know is skipped rather than trusted, so a file from
+// a newer build cannot park a mystery card on the wallpaper.
+std::optional<std::vector<Widget>> loadWidgets();
+
+// Writes the card list, replacing the file atomically. False if it could not be
+// stored, which is never fatal: the arrangement simply will not be remembered.
+bool saveWidgets(const std::vector<Widget>& widgets);
+
+// The cells the user dragged desktop icons into, keyed by the entry's absolute
+// path. A missing file is an empty map, never an error: the first session simply
+// lays the grid out itself, and an entry that has since been deleted or renamed
+// is a key nothing matches, so it is ignored rather than being an error.
+std::map<std::string, Point> loadDesktopIconPlacement();
+
+// Writes those cells, so the next session opens with the icons where they were
+// left. Same atomic write, same "false is never fatal" rule as everything here.
+bool saveDesktopIconPlacement(const std::map<std::string, Point>& placement);
 
 }  // namespace wm

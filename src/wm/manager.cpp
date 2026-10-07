@@ -332,8 +332,11 @@ int Manager::run(const Options& options) {
     pinned = loadPinned();
     recents = loadRecents();
     // The desktop shows the session's real Desktop directory; layout is fixed, so
-    // it is computed once here and reused by every frame and hit test.
+    // it is computed once here and reused by every frame and hit test. The cells
+    // the user dragged icons into come back first, so the layout pass below puts
+    // them straight where they were rather than in the default column.
     desktopItems = scanDesktop();
+    desktopIconPlacement = loadDesktopIconPlacement();
     layoutDesktopIcons();
     initWidgets();
     scanExistingWindows();
@@ -377,6 +380,10 @@ int Manager::run(const Options& options) {
     lastTick = nowMs();
     dirty = true;
     loop();
+    // The desktop as the user arranged it: cards and icon cells, written on the
+    // way out so the next session opens on the same wallpaper layout. Mutations
+    // save as they happen, so this is the copy that catches everything else.
+    saveDesktopLayout();
     shutdown();
     return 0;
 }

@@ -519,6 +519,10 @@ private:
     void endWidgetDrag();
     void addWidget(WidgetKind kind);
     void removeWidget(int index);
+    // Both halves of the desktop's arrangement -- the cards and the cells the
+    // icons were dragged into -- written out together. Called whenever either
+    // changes and again on the way out, so the desktop comes back as it was left.
+    void saveDesktopLayout();
     void suspendWidgets();                    // taken off the desktop for tablet mode
     void restoreWidgets();                    // put back when tablet mode is left
     void openDesktopMenu(int x, int y);       // right click on the desktop
