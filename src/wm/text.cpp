@@ -19,11 +19,11 @@
 namespace wm {
 namespace {
 
-// First family fontconfig can actually resolve wins. An installed MuternVF
+// First family fontconfig can actually resolve wins. An installed Roboto
 // (bundled or system wide) is preferred; otherwise these humanist sans faces
 // keep the Windows 11 proportions.
 const char* const kFamilies[] = {
-    "MuternVF", "Segoe UI Variable Display", "Segoe UI", "Noto Sans", "DejaVu Sans",
+    "Roboto", "Segoe UI Variable Display", "Segoe UI", "Noto Sans", "DejaVu Sans",
     "Adwaita Sans", "Liberation Sans", "FreeSans", "sans-serif",
 };
 
@@ -32,7 +32,7 @@ constexpr size_t kMaxEntries = 900;
 // Grid-fit glyphs and keep the *measure* and *render* passes on identical load
 // flags, so the hinted advances used by layout() are the ones rasterise() draws
 // and the texture is never a pixel narrow. Forcing the autohinter also means any
-// face fontconfig resolves -- including the fallbacks used when MuternVF is
+// face fontconfig resolves -- including the fallbacks used when Roboto is
 // absent -- lands stems on whole pixels instead of scaling freely.
 constexpr int kLoadFlags = FT_LOAD_DEFAULT | FT_LOAD_FORCE_AUTOHINT;
 constexpr int kRenderFlags = FT_LOAD_RENDER | FT_LOAD_FORCE_AUTOHINT | FT_LOAD_TARGET_NORMAL;
@@ -90,7 +90,7 @@ uint32_t nextCodepoint(const std::string& s, size_t* i) {
 }
 
 // ---------------------------------------------------------------------------
-// Bundled font: MuternVF, a variable font. One file gives us Regular / Medium /
+// Bundled font: Roboto, a variable font. One file gives us Regular / Medium /
 // Bold by moving the wght axis, which is exactly the three weights the Fluent
 // shell uses, and it keeps the assets to a single file.
 // ---------------------------------------------------------------------------
@@ -121,9 +121,10 @@ bool loadVariableFont(FT_Library lib, const std::string& path, void* faces[3],
                 ok = true;
             }
             if (ok && FT_Set_Var_Design_Coordinates(face, mm->num_axis, coords) != 0) ok = false;
-            // MuternVF also has an optical size axis, which is what makes it
-            // legible at caption sizes. Remember its range; faceFor() drives it
-            // from the requested pixel size.
+            // Some variable faces (such as the old MuternVF) also carry an optical size
+            // axis, which is what makes them legible at caption sizes. Remember
+            // its range here; faceFor() drives it from the requested pixel size.
+            // Roboto has none, so the flags simply stay false and nothing moves.
             for (FT_UInt a = 0; a < mm->num_axis; ++a) {
                 if (mm->axis[a].tag != FT_MAKE_TAG('o', 'p', 's', 'z')) continue;
                 opszMin[i] = double(mm->axis[a].minimum) / 65536.0;
@@ -141,11 +142,11 @@ bool loadVariableFont(FT_Library lib, const std::string& path, void* faces[3],
     return true;
 }
 
-// The bundled face opened as an ordinary static font. MuternVF ships as a
+// The bundled face opened as an ordinary static font. Roboto ships as a
 // variable font upstream, but a plain build of the same face carries no fvar
 // table, and then loadVariableFont() above cannot drive a wght axis at all. In
 // that case open the one file once per weight so the whole shell still renders in
-// MuternVF (Bold is synthesized from it -- see faceFor()).
+// Roboto (Bold is synthesized from it -- see faceFor()).
 bool loadBundledStatic(FT_Library lib, const std::string& path, void* faces[3]) {
     for (int i = 0; i < 3; ++i) {
         FT_Face face = nullptr;
@@ -158,8 +159,7 @@ bool loadBundledStatic(FT_Library lib, const std::string& path, void* faces[3]) 
 // Static per-weight instances shipped next to the variable font; used when the
 // FreeType we link against cannot set variation coordinates.
 bool loadStaticFont(FT_Library lib, const std::string& dir, void* faces[3]) {
-    static const char* files[3] = {"MuternVF-TextRegular.ttf", "MuternVF-TextMedium.ttf",
-                                   "MuternVF-TextBold.ttf"};
+    static const char* files[3] = {"Roboto-Regular.ttf", "Roboto-Medium.ttf", "Roboto-Bold.ttf"};
     for (int i = 0; i < 3; ++i) {
         FT_Face face = nullptr;
         if (FT_New_Face(lib, (dir + "/" + files[i]).c_str(), 0, &face) != 0 || !face) return false;
@@ -198,43 +198,44 @@ bool Text::init(const std::string& fontDir) {
     // faces_[0] = Regular, [1] = Medium, [2] = Bold. Medium and Bold are
     // optional: faceFor() falls back to Regular when a file is missing.
 
-    // 1. The bundled MuternVF variable font.
+    // 1. The bundled Roboto variable font.
     if (!fontDir.empty()) {
-        const std::string variable = fontDir + "/MuternVF.ttf";
+        const std::string variable = fontDir + "/Roboto.ttf";
         if (loadVariableFont(lib, variable, faces_, hasOpsz_, opszMin_, opszMax_)) {
-            family_ = "MuternVF";
+            family_ = "Roboto";
             bundled_ = true;
             for (int i = 0; i < 3; ++i) facePx_[i] = 0;
             ready_ = true;
-            log("font: MuternVF (variable, bundled)");
+            log("font: Roboto (variable, bundled)");
             return true;
         }
         // 1b. The same file as a plain static face (no variable axes). This is
-        // what actually ships today, so without it the whole shell silently fell
-        // through to fontconfig and rendered in whatever face that resolved to.
+        // what a plain build of the face carries, so without it the whole shell
+        // silently fell through to fontconfig and rendered in whatever face that
+        // resolved to.
         if (loadBundledStatic(lib, variable, faces_)) {
-            family_ = "MuternVF";
+            family_ = "Roboto";
             bundled_ = true;
             synthBold_ = true;
             for (int i = 0; i < 3; ++i) facePx_[i] = 0;
             ready_ = true;
-            log("font: MuternVF (static, bundled; bold synthesized)");
+            log("font: Roboto (static, bundled; bold synthesized)");
             return true;
         }
-        // 2. Static Text instances from the same family.
+        // 2. Static per-weight instances from the same family.
         if (loadStaticFont(lib, fontDir, faces_)) {
-            family_ = "MuternVF";
+            family_ = "Roboto";
             bundled_ = true;
             for (int i = 0; i < 3; ++i) facePx_[i] = 0;
             ready_ = true;
-            log("font: MuternVF (static Text instances, bundled)");
+            log("font: Roboto (static instances, bundled)");
             return true;
         }
         log("warning: bundled font not usable in %s; falling back to system faces",
             fontDir.c_str());
     }
 
-    // 3. fontconfig. An installed MuternVF is preferred; otherwise the first
+    // 3. fontconfig. An installed Roboto is preferred; otherwise the first
     // family that resolves wins. On Linux "Segoe UI" is normally absent, so we
     // degrade through humanist sans faces whose metrics are close enough to keep
     // the Windows 11 proportions.
@@ -289,6 +290,30 @@ bool Text::initFromFile(const std::string& path) {
             log("display font: cannot open %s", path.c_str());
             shutdown();
             return false;
+        }
+        // The display face is the same variable Roboto as the UI font: drive its
+        // wght axis to the heaviest the file carries so the clock keeps thick
+        // digits. A default-instance open of the variable file would render the
+        // Regular cut at this size and read as nothing at all.
+        FT_MM_Var* mm = nullptr;
+        if (FT_Get_MM_Var(face, &mm) == 0 && mm) {
+            if (mm->num_axis > 0 && mm->num_axis <= 16) {
+                FT_Fixed coords[16];
+                double heaviest = 0.0;
+                for (FT_UInt a = 0; a < mm->num_axis; ++a) {
+                    coords[a] = mm->axis[a].def;
+                    if (mm->axis[a].tag != FT_MAKE_TAG('w', 'g', 'h', 't')) continue;
+                    heaviest = std::max(heaviest, double(mm->axis[a].maximum) / 65536.0);
+                }
+                if (heaviest > 0.0) {
+                    for (FT_UInt a = 0; a < mm->num_axis; ++a) {
+                        if (mm->axis[a].tag != FT_MAKE_TAG('w', 'g', 'h', 't')) continue;
+                        coords[a] = FT_Fixed(heaviest * 65536.0);
+                    }
+                    FT_Set_Var_Design_Coordinates(face, mm->num_axis, coords);
+                }
+            }
+            FT_Done_MM_Var(lib, mm);
         }
         faces_[i] = face;
         facePx_[i] = 0;

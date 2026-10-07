@@ -12,7 +12,7 @@ enum class WidgetKind {
     Battery,   // battery / charging state, medium
     Calendar,     // month grid with today marked, iOS 18 Calendar style
     Weather,      // current conditions + hourly strip, iOS 18 Weather style
-    DigitalClock,  // huge HH:MM in the Poppins ExtraBold display face
+    DigitalClock,  // huge HH:MM in the Roboto display face at its heaviest cut
 };
 
 struct Widget {

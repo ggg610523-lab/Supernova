@@ -1335,10 +1335,15 @@ void Manager::drawStartMenu() {
         }
     };
     if (launchSwipe || std::abs(frac) > 0.001) {
+        // The field is one connected strip: the page under the finger follows
+        // it exactly, and the next page always sits one stride further on, so
+        // the two sets of icons keep a constant separation while they slide --
+        // a rigid turn, which is what makes the release glide into the next
+        // page without any re-passing. (An arriving offset of (1-frac)*stride,
+        // as here, walks the incoming set through the middle of the field and
+        // out the other side of a half-drag, so the two pages crossed.)
         drawPage(basePage, whole);
-        const int entering = frac > 0.0 ? basePage + 1 : basePage - 1;
-        const int shift = int(std::lround((frac > 0.0 ? 1.0 - frac : 1.0 + frac) * stride));
-        drawPage(entering, whole + shift);
+        drawPage(frac > 0.0 ? basePage + 1 : basePage - 1, whole + stride);
     } else {
         drawPage(basePage, 0);
     }

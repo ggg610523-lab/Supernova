@@ -296,7 +296,7 @@ int Manager::run(const Options& options) {
         return 1;
     }
     // Bundled assets: the wallpaper photo, Reversal icons (rasterised by
-    // scripts/fetch-assets.sh) and the MuternVF variable font. All three are
+    // scripts/fetch-assets.sh) and the Roboto variable font. All three are
     // resolved before the compositor starts because it bakes the wallpaper as
     // part of init; each degrades gracefully when absent.
     assetDir = defaultAssetDir();
@@ -312,9 +312,10 @@ int Manager::run(const Options& options) {
     // rasterised Hatter fallback for builds without librsvg.
     icons.init(assetDir + "/icons", assetDir + "/icons-hatter");
     text.init(assetDir + "/fonts");
-    // The digital clock's display face. A miss is not fatal: displayText()
-    // falls back to the UI font, so the clock still tells the time.
-    clockText.initFromFile(assetDir + "/fonts/Poppins-ExtraBold.ttf");
+    // The digital clock's display face, the same web-fetched Roboto as the UI font
+    // opened at its heaviest cut. A miss is not fatal: displayText() falls back
+    // to the UI font, so the clock still tells the time.
+    clockText.initFromFile(assetDir + "/fonts/Roboto.ttf");
 
     std::string keyError;
     grabKeys(&keyError);
@@ -790,6 +791,11 @@ void Manager::tickFluidMotion(double dtMs) {
          tabletMode ? tabletHome.size() + tabletDockRects.size() : 0,
          tabletMode ? tabletHover : -1);
 
+    // The dock's spring system -- magnification, the rubber-band parting while an
+    // icon is carried over the row, and the bounce of a drop or a launch. It is
+    // the home screen's own motion, so it only runs while the home screen is up.
+    if (tabletMode) updateTabletDockPhysics(dtMs);
+
     // The grid settling onto a page once a swipe has let go. The offset is in pages
     // rather than pixels so that a page caught halfway can be drawn halfway.
     if (tabletMode && !tabletPageSwipe && tabletHomePageCount > 0) {
@@ -812,7 +818,7 @@ void Manager::tickFluidMotion(double dtMs) {
         const double goal = double(startPage);
         if (std::abs(launchPageOffset - goal) > 0.001) {
             launchPageOffset +=
-                (goal - launchPageOffset) * std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+                (goal - launchPageOffset) * std::min(1.0, dtMs / double(metrics::kLaunchPageTurnMs));
             dirty = true;
         } else {
             launchPageOffset = goal;
@@ -1242,6 +1248,7 @@ void Manager::closeOverlays() {
     launchPageOffset = 0.0;
     launchSwipe = false;
     launchPressArmed = false;
+    launchPressTile = -1;
     // The menu's items are kept until its close animation finishes (tickFluid
     // Motion drops them); clearing the hover lets the highlight fade out with it.
     contextHover = -1;
@@ -2285,6 +2292,7 @@ void Manager::openStartMenu() {
     launchPageOffset = 0.0;
     launchSwipe = false;
     launchPressArmed = false;
+    launchPressTile = -1;
     layoutStartMenu();
     grabPointer();
     XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);

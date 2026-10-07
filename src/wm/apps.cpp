@@ -256,6 +256,57 @@ std::vector<DesktopItem> scanDesktop() {
     return items;
 }
 
+std::string tabletFolderDir() {
+    const std::string d = desktopDir();
+    return d.empty() ? std::string{} : d + "/tablet";
+}
+
+// The folder is a pure convenience: whether it exists or not, the tablet home
+// screen reads it. Making it on first use just means the user can see where a
+// launcher goes without having to guess.
+bool ensureTabletFolder() {
+    const std::string dir = tabletFolderDir();
+    if (dir.empty()) return false;
+    struct stat st {};
+    if (::stat(dir.c_str(), &st) == 0) return S_ISDIR(st.st_mode) != 0;
+    return ::mkdir(dir.c_str(), 0755) == 0;
+}
+
+std::vector<DesktopItem> scanTabletFolder() {
+    std::vector<DesktopItem> items;
+    const std::string dir = tabletFolderDir();
+    if (dir.empty()) return items;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return items;
+
+    std::vector<std::string> names;
+    while (dirent* ent = readdir(d)) {
+        if (ent->d_name[0] == '.') continue;
+        names.emplace_back(ent->d_name);
+    }
+    closedir(d);
+    std::sort(names.begin(), names.end());
+
+    for (const std::string& n : names) {
+        // Only .desktop launchers are recognised: the folder is the curated list
+        // the home screen shows, so a stray file or another folder belongs to
+        // the desktop, not to the grid.
+        const size_t len = n.size();
+        if (len <= 8 || n.compare(len - 8, 8, ".desktop") != 0) continue;
+        const std::string path = dir + "/" + n;
+        AppEntry app;
+        if (!parseDesktopFile(path, &app)) continue;
+        DesktopItem item;
+        item.path = path;
+        item.isDesktopEntry = true;
+        item.name = app.name.empty() ? n.substr(0, len - 8) : app.name;
+        item.icon = app.icon;
+        item.exec = app.exec;
+        items.push_back(std::move(item));
+    }
+    return items;
+}
+
 bool usableDesktopName(const std::string& name) {
     if (name.empty() || name == "." || name == "..") return false;
     if (name.find('/') != std::string::npos) return false;

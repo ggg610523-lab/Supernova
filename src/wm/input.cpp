@@ -458,6 +458,27 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
             dirty = true;
             return;
         }
+        // Never became a swipe, so this was a click -- and a click only counts
+        // if the press stayed put: a drag across a tile (while a search narrows
+        // the list, say, so no swipe is on offer) must not launch the app under
+        // a finger that is already somewhere else.
+        const int pressed = launchPressTile;
+        launchPressTile = -1;
+        if (pressed >= 0) {
+            const int dx = x - launchSwipeStartX, dy = y - launchSwipeStartY;
+            if (std::abs(dx) > metrics::kLaunchSwipeSlop ||
+                std::abs(dy) > metrics::kLaunchSwipeSlop)
+                return;
+            const size_t gi = startPageBase + size_t(pressed);
+            if (gi < appFiltered.size() && appFiltered[gi] < apps.size()) {
+                const size_t ai = appFiltered[gi];
+                noteRecent(apps[ai].name, apps[ai].exec, apps[ai].icon, apps[ai].wmClass);
+                launchApp(apps[ai].exec);
+            }
+            // The Launchpad gives way to what comes next, as it always did.
+            closeOverlays();
+            return;
+        }
         closeOverlays();
         return;
     }
@@ -569,10 +590,11 @@ void Manager::onMotion(XMotionEvent& ev) {
         updateHoverStates(x, y);
         return;
     }
-    // A Launchpad page turn: a sideways drag that began on the empty backdrop.
-    // Once it has passed the slop the grid follows the pointer, one page of
-    // travel per cell-column of drag. Swiping is off while a search narrows the
-    // list, so the list cannot be slid out from under the query.
+    // A Launchpad page turn: a sideways drag, wherever the press came down --
+    // an app tile included. Once it has passed the slop the grid follows the
+    // pointer, one page of travel per cell-column of drag. Swiping is off while
+    // a search narrows the list, so the list cannot be slid out from under the
+    // query.
     if (startOpen && launchPressArmed) {
         if (!launchSwipe) {
             const int dx = x - launchSwipeStartX;
@@ -582,6 +604,9 @@ void Manager::onMotion(XMotionEvent& ev) {
                 launchSwipe = true;
                 launchSwipeFrom = startPage;
                 launchPageOffset = double(startPage);
+                // The gesture has claimed the press, so the tile it started on
+                // is no longer a click waiting to happen.
+                launchPressTile = -1;
             }
         }
         if (launchSwipe) {
@@ -1293,23 +1318,23 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
         }
         if (button == Button1 || button == Button3) {
             // Tiles answer both buttons: left starts the app, right offers to
-            // pin it. Either way the Launchpad gives way to what comes next.
+            // pin it. A right press still acts straight away, but a left press
+            // is armed rather than fired so that dragging it sideways turns the
+            // page -- the swipe can begin on an icon, not only on the bare
+            // backdrop -- and only a release that never moved launches.
+            launchPressTile = -1;
             for (size_t i = 0; i < appRects.size(); ++i) {
                 if (!appRects[i].contains(x, y)) continue;
                 const size_t gi = startPageBase + i;
-                if (gi < appFiltered.size() && appFiltered[gi] < apps.size()) {
-                    const size_t ai = appFiltered[gi];
-                    if (button == Button3) openPinMenu(int(ai), -1, x, y);
-                    else {
-                        noteRecent(apps[ai].name, apps[ai].exec, apps[ai].icon,
-                                   apps[ai].wmClass);
-                        launchApp(apps[ai].exec);
-                        closeOverlays();
-                    }
-                } else {
-                    closeOverlays();
+                const bool usable = gi < appFiltered.size() && appFiltered[gi] < apps.size();
+                if (button == Button3) {
+                    if (usable) openPinMenu(int(appFiltered[gi]), -1, x, y);
+                    else closeOverlays();
+                    return;
                 }
-                return;
+                // An empty cell is a backdrop press as far as the gesture cares.
+                if (usable) launchPressTile = int(i);
+                break;
             }
             if (button != Button1) {
                 closeOverlays();
@@ -1324,10 +1349,10 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
                 return;
             }
             if (searchRect.contains(x, y)) return;  // focus stays in the field
-            // The bare backdrop: a press arms a page swipe, and whether this was
-            // a flick or a click is settled on motion and release. Without that
-            // a swipe across the wallpaper would dismiss the Launchpad the
-            // instant the finger came down.
+            // Everything else -- a tile and the bare backdrop alike -- arms a page
+            // swipe, and whether this ends as a flick, a page turn or a click is
+            // settled on motion and release. Without that, a swipe across an icon
+            // would launch it the instant the finger came down.
             launchPressArmed = true;
             launchSwipeStartX = x;
             launchSwipeStartY = y;

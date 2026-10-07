@@ -751,11 +751,11 @@ void Manager::drawWeatherWidget(const Widget& w) {
     }
 }
 
-// A bedside-style digital clock: no card, just the time set huge in the Poppins
-// ExtraBold display face with the date beneath it in the UI font. The point size
-// is chosen to fill the widget's footprint -- as large as the width and the clock
-// band both allow -- so resizing it scales the digits rather than leaving them at
-// a fixed size.
+// A bedside-style digital clock: no card, just the time set huge in the Roboto
+// display face at its heaviest cut with the date beneath it in the UI font. The
+// point size is chosen to fill the widget's footprint -- as large as the width
+// and the clock band both allow -- so resizing it scales the digits rather than
+// leaving them at the same size.
 void Manager::drawDigitalClock(const Widget& w) {
     const int pad = metrics::kWidgetPad;
     const int gx = w.rect.x + pad;

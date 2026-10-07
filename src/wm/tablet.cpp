@@ -186,28 +186,19 @@ void Manager::buildTabletEntries() {
         return;
     }
 
-    // The home screen is fed from the session's Desktop directory, which is the
-    // curated list of launchers the user actually has; the full .desktop scan is
-    // the fallback when the Desktop is empty.
+    // The home screen is fed solely from the desktop's "tablet" folder: a
+    // curated directory of .desktop launchers, and nothing else counts. The
+    // folder is created on first use so there is always somewhere a launcher
+    // can be dropped.
+    ensureTabletFolder();
     std::vector<TabletEntry> found;
-    for (const DesktopItem& d : desktopItems) {
+    for (const DesktopItem& d : scanTabletFolder()) {
         TabletEntry e;
         e.name = d.name;
         e.icon = d.icon;
         e.exec = d.exec;
         e.path = d.path;
         found.push_back(e);
-    }
-    if (found.empty()) {
-        for (const AppEntry& a : apps) {
-            if (found.size() >= 24) break;
-            TabletEntry e;
-            e.name = a.name;
-            e.icon = a.icon;
-            e.wmClass = a.wmClass;
-            e.exec = a.exec;
-            found.push_back(e);
-        }
     }
 
     // The dock holds its own copies of apps, and iOS is strict about this: what is
@@ -239,20 +230,20 @@ void Manager::layoutTabletHome() {
                              screenH - 14, metrics::kTabletHomeBarW, metrics::kTabletHomeBarH};
     // --- dock: a glass pill of squircle app icons, above the home bar -------
     // The dock is edited where it stands, the way HarmonyOS does it: while the
-    // home screen is in rearrange mode every icon grows a remove badge and the
-    // row grows a "+" tile that opens the app picker. Both are part of the row's
-    // content while rearranging, so they widen the pill instead of hanging off it.
+    // home screen is in rearrange mode every icon grows a remove badge. New apps
+    // get in through the long press menu's "Add to Dock" instead of a tile that
+    // would grow the pill. The row here is the physics' raw material: the base
+    // slot each icon rests in, which the per-frame spring step deflects, magnifies
+    // and bounces into the live tabletDockRects that everything reads.
     const int di = std::clamp(std::min(screenW, screenH) / 11, 48, metrics::kTabletDockIcon);
     tabletDockIconSize = di;
-    tabletDockAddRect = Rect{};
     tabletDockRemoveRects.clear();
-    const int extras = tabletEdit ? 1 : 0;
-    const int slots = int(tabletDock.size()) + extras;
+    const size_t slots = tabletDock.size();
     if (slots > 0) {
         const int gap = std::max(14, di / 2);
         const int padX = std::max(16, di / 3);
         const int padY = std::max(12, di / 4);
-        const int contentW = slots * di + (slots - 1) * gap;
+        const int contentW = int(slots) * di + (int(slots) - 1) * gap;
         const int dockW = std::min(screenW - 32, contentW + 2 * padX);
         const int dockH = di + 2 * padY;
         const int dockX = (screenW - dockW) / 2;
@@ -260,8 +251,16 @@ void Manager::layoutTabletHome() {
         tabletDockRect = Rect{dockX, dockY, dockW, dockH};
         const int badge = std::max(20, di / 3);
         int x = dockX + (dockW - contentW) / 2;
-        for (int i = 0; i < int(tabletDock.size()); ++i) {
+        tabletDockBaseRects.clear();
+        tabletDockScale.assign(slots, 1.0);
+        tabletDockDrift.assign(slots, 0.0);
+        tabletDockDriftV.assign(slots, 0.0);
+        tabletDockWobble.assign(slots, 1.0);
+        tabletDockWobbleAge.assign(slots, -1.0);
+        tabletDockRects.clear();
+        for (size_t i = 0; i < slots; ++i) {
             const Rect box{x, dockY + padY, di, di};
+            tabletDockBaseRects.push_back(box);
             tabletDockRects.push_back(box);
             // The badge rides the icon's top-right corner and hangs half outside
             // it, which is what makes it big enough to hit with a fingertip.
@@ -270,7 +269,6 @@ void Manager::layoutTabletHome() {
                     Rect{box.right() - badge / 2, box.y - badge / 2, badge, badge});
             x += di + gap;
         }
-        if (tabletEdit) tabletDockAddRect = Rect{x, dockY + padY, di, di};
     } else {
         tabletDockRect = Rect{};
     }
@@ -1078,11 +1076,21 @@ void Manager::drawTabletHome() {
         const int dockIcon = tabletDockIconSize;
         const float dockRadius = float(dockIcon) * metrics::kTabletIconRadius;
         for (size_t i = 0; i < tabletDockRects.size() && i < tabletDock.size(); ++i) {
-            Rect box = tabletDockRects[i];
             const bool dragging = int(i) == tabletDragDockIndex && tabletDragFromDock;
+            Rect box = tabletDockRects[i];
             if (dragging) {
                 box = tabletDragRect;
                 box.w = box.h = dockIcon;
+            } else {
+                // The live, magnified box. The wobble rides the same factor so a
+                // bounce reads as the icon itself springing rather than sliding.
+                const double sc =
+                    i < tabletDockScale.size() ? tabletDockScale[i] * tabletDockWobble[i] : 1.0;
+                if (sc > 1.001) {
+                    const int nw = int(std::lround(double(box.w) * sc));
+                    const int nh = int(std::lround(double(box.h) * sc));
+                    box = Rect{box.x + box.w / 2 - nw / 2, box.y + box.h / 2 - nh / 2, nw, nh};
+                }
             }
             const size_t hoverIndex = tabletHome.size() + i;
             const double hv =
@@ -1101,9 +1109,6 @@ void Manager::drawTabletHome() {
             if (tabletEdit && i < tabletDockRemoveRects.size())
                 drawTabletDockBadge(tabletDockRemoveRects[i], "x", a, false);
         }
-        // The row's "+" tile: how an app that is not on the grid gets into the dock.
-        if (tabletEdit && !tabletDockAddRect.empty())
-            drawTabletDockBadge(tabletDockAddRect, "+", a, true);
     }
 
     // An open folder, then the rename field over it: both belong to the home
@@ -1483,18 +1488,13 @@ bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
         }
     }
 
-    // While rearranging, the dock carries two small targets of its own: a badge on
-    // every icon takes it out of the dock, and the row's "+" opens the picker.
-    // They are tested before the icons so that holding a badge picks up nothing.
+    // While rearranging, the dock carries a small target of its own: a badge on
+    // each icon, and holding a badge takes that app out of the dock. They are
+    // tested before the icons so that holding a badge picks up nothing.
     if (tabletEdit) {
         for (size_t i = 0; i < tabletDockRemoveRects.size(); ++i) {
             if (!tabletDockRemoveRects[i].contains(x, y)) continue;
             tabletDockPressRemove = int(i);
-            dirty = true;
-            return true;
-        }
-        if (!tabletDockAddRect.empty() && tabletDockAddRect.contains(x, y)) {
-            tabletDockPressAdd = true;
             dirty = true;
             return true;
         }
@@ -1681,12 +1681,6 @@ void Manager::handleTabletRelease(int x, int y, unsigned button, Time time) {
             removeTabletDockApp(index);
         return;
     }
-    if (tabletDockPressAdd) {
-        tabletDockPressAdd = false;
-        if (button == Button1 && !dwelled && !dragging && tabletDockAddRect.contains(x, y))
-            openTabletDockPicker();
-        return;
-    }
 
     // A lift or a dwell has already done the work; letting go must not also launch.
     if (button != Button1 || dwelled || dragging) return;
@@ -1699,7 +1693,10 @@ void Manager::handleTabletRelease(int x, int y, unsigned button, Time time) {
         return;
     }
     if (dock >= 0) {
-        if (dock < int(tabletDock.size())) openTabletEntry(tabletDock[size_t(dock)]);
+        if (dock < int(tabletDock.size())) {
+            openTabletEntry(tabletDock[size_t(dock)]);
+            bounceTabletDockIcon(dock);  // a launch pops the icon out a little
+        }
         return;
     }
     if (item >= 0) {
@@ -2142,14 +2139,29 @@ void Manager::updateTabletIconDrag(int x, int y) {
         return;  // a cell inside the folder wins: nowhere else to go
     }
 
-    // The dock, which is a drop target from anywhere on the home screen.
-    for (size_t i = 0; i < tabletDockRects.size(); ++i) {
-        if (!tabletDockRects[i].inflated(8).contains(x, y)) continue;
+    // The dock, which is a drop target from anywhere on the home screen. The row
+    // parts to make room for a carried icon, so a pointer can be sitting in the
+    // open gap between two icons -- that is still a place to drop, just the slot
+    // the gap makes. The icons are tested first with a finger-sized target; in
+    // the gap (or past the last icon) the slot is where the pointer sits among
+    // the icons, which is exactly the place the rubber band opens a gap for.
+    if (!tabletDockRect.empty() && tabletDockRect.inflated(12).contains(x, y)) {
+        int slot = -1;
+        for (size_t i = 0; i < tabletDockRects.size(); ++i) {
+            if (!tabletDockRects[i].inflated(8).contains(x, y)) continue;
+            slot = int(i);
+            break;
+        }
+        if (slot < 0) {
+            for (size_t i = 0; i < tabletDockRects.size(); ++i) {
+                if (x >= tabletDockRects[i].right()) continue;
+                slot = int(i);
+                break;
+            }
+            if (slot < 0) slot = int(tabletDockRects.size());
+        }
         tabletDragOverDock = true;
-        tabletDragDockSlot = int(i);
-        break;
-    }
-    if (tabletDragOverDock) {
+        tabletDragDockSlot = slot;
         dirty = true;
         return;
     }
@@ -2312,6 +2324,7 @@ void Manager::endTabletIconDrag() {
     // A dissolved folder takes its cell with it, so every cell after it moves up by
     // one; that is what `unpacked` below corrects the drop position for.
     int unpacked = 0;
+    int dockDrop = -1;  // the dock slot a drop landed on, for its bounce
     if (fromFolder && openFolder >= 0 && openFolder < int(tabletHome.size())) {
         const size_t before = tabletHome.size();
         removeTabletAppFromHome(tabletHome, carried);
@@ -2369,6 +2382,7 @@ void Manager::endTabletIconDrag() {
         // drop is held to rather than a fixed number.
         if (int(tabletDock.size()) > tabletDockCapacity())
             tabletDock.erase(tabletDock.end() - tabletDockCapacity());
+        dockDrop = at;
     } else if (inside >= 0 && openFolder >= 0 && openFolder < int(tabletHome.size())) {
         // Back into the folder it came from, which is a reorder inside it.
         TabletItem& slot = tabletHome[size_t(openFolder)];
@@ -2393,6 +2407,9 @@ void Manager::endTabletIconDrag() {
 
     tabletDragEdge = 0;
     layoutTabletHome();
+    // A dock drop bounced the icon it landed on; the layout just re-based the row,
+    // so the pop is applied to the fresh slot.
+    if (dockDrop >= 0 && dockDrop < int(tabletDock.size())) bounceTabletDockIcon(dockDrop);
     // Opening the folder is what makes it a place to put apps in rather than just
     // an icon that appeared, and it is where iOS leaves you as well.
     if (popFolder >= 0) openTabletFolder(popFolder);
@@ -2401,6 +2418,179 @@ void Manager::endTabletIconDrag() {
     // a dock move -- goes through this one place.
     if (!carried.name.empty()) saveTabletLayout();
     dirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// Dock physics: the magnification, the rubber band, the bounce
+// ---------------------------------------------------------------------------
+// The dock is a small spring system rather than a static row. Magnification is
+// the shell's usual approach() so a sweep of the finger reads as icons swelling,
+// but the horizontal parting runs on a damped spring -- icons give way with a
+// tug and settle with a small overshoot, which is what makes a dock feel sprung
+// instead of a tray of faithfully-spaced slots. A drop or a launch adds one pop:
+// a decaying sinusoid riding the magnification of that single icon.
+
+namespace {
+
+// One semi-implicit Euler step of a damped spring. freq is the natural frequency
+// in hertz, zeta the damping ratio: 1.0 is critically damped, a touch under is
+// the "springy" settle a dock should have.
+inline void dockSpring(double& v, double& vel, double target, double dtMs, double freq,
+                       double zeta = 0.6) {
+    const double dt = std::min(dtMs, 50.0) / 1000.0;
+    const double w = 2.0 * 3.14159265358979323846 * std::max(freq, 0.5);
+    const double acc = w * w * (target - v) - 2.0 * zeta * w * vel;
+    vel += acc * dt;
+    v += vel * dt;
+}
+
+}  // namespace
+
+void Manager::bounceTabletDockIcon(int index) {
+    if (index < 0 || index >= int(tabletDockWobbleAge.size())) return;
+    tabletDockWobbleAge[size_t(index)] = 0.0;
+    tabletDockWobble[size_t(index)] = 1.0 + 0.20;  // pop out, then wobble home
+    dirty = true;
+}
+
+void Manager::updateTabletDockPhysics(double dtMs) {
+    const size_t n = tabletDock.size();
+    if (n == 0 || tabletDockRect.empty() || tabletDockBaseRects.size() != n ||
+        tabletDockRects.size() != n || tabletDockScale.size() != n ||
+        tabletDockDrift.size() != n || tabletDockDriftV.size() != n ||
+        tabletDockWobble.size() != n || tabletDockWobbleAge.size() != n)
+        return;
+    bool moved = false;
+
+    // --- magnification: swell under the pointer, sag back when it leaves -----
+    // The hit area is the pill plus a finger's width of grace, so resting a finger
+    // on the row swells it, and lifting it lets the icons deflate in place.
+    const bool overDock =
+        tabletDockRect.inflated(std::max(24, tabletDockIconSize)).contains(pointerX, pointerY);
+    const double focus = double(pointerX);
+    const double sigma = double(std::max(40, tabletDockIconSize)) * 1.05;
+    for (size_t i = 0; i < n; ++i) {
+        double want = 1.0;
+        if (overDock) {
+            const double dist = focus - double(tabletDockBaseRects[i].x + tabletDockBaseRects[i].w / 2);
+            want += 0.45 * std::exp(-dist * dist / (2.0 * sigma * sigma));
+        }
+        if (approach(tabletDockScale[i], want, dtMs, 90.0)) moved = true;
+    }
+
+    // --- the bounce: a decaying sinusoid over the natural scale -------------
+    // An icon that was dropped on or launched from the dock gets one pop. The age
+    // runs its own clock so the wobble stays glued to the drop; the moment it is
+    // back down to plain magnification the icon goes idle and stops asking to
+    // repaint.
+    for (size_t i = 0; i < n; ++i) {
+        if (tabletDockWobbleAge[i] < 0.0) continue;
+        tabletDockWobbleAge[i] += dtMs;
+        const double age = tabletDockWobbleAge[i];
+        const double wobble = 1.0 + 0.20 * std::exp(-age / 130.0) * std::cos(age * 0.021);
+        if (age > 420.0 || std::abs(wobble - 1.0) < 0.004) {
+            if (tabletDockWobble[i] != 1.0) moved = true;
+            tabletDockWobble[i] = 1.0;
+            tabletDockWobbleAge[i] = -1.0;
+            continue;
+        }
+        if (std::abs(wobble - tabletDockWobble[i]) > 0.0005) moved = true;
+        tabletDockWobble[i] = wobble;
+    }
+
+    // The rubber band: this frame's target picture is the row laid out against
+    // itself at its magnified widths -- with a phantom slot dropped in where the
+    // carried icon is headed -- and then recentred on the pill so the row never
+    // walks off an edge. Each icon prowls from its base slot toward that picture
+    // on the dock's own spring; the drop slot's icon count is stable while the
+    // row parts, because the phantom claims that place in the row.
+    const double gap = double(std::max(14, tabletDockIconSize / 2));
+    const int phIndex =
+        tabletDragOverDock ? (tabletDragDockSlot >= 0 ? tabletDragDockSlot : int(n)) : -1;
+    const int items = int(n) + (phIndex >= 0 ? 1 : 0);
+
+    std::vector<double> w(size_t(items), double(tabletDockBaseRects[0].w));
+    std::vector<double> c(size_t(items), 0.0);
+    for (size_t i = 0; i < n; ++i) w[i] = double(tabletDockBaseRects[i].w) * tabletDockScale[i];
+
+    // The anchor: the phantom rides the finger, clamped so the whole row stays on
+    // the pill; otherwise the icon under the finger keeps its own base slot and
+    // the swell happens in place.
+    int A = phIndex;
+    double aGo = 0.0;
+    if (phIndex >= 0) {
+        aGo = double(pointerX);
+        const double half = w[size_t(phIndex)] / 2;
+        aGo = std::clamp(aGo, double(tabletDockRect.x) + half + 2.0,
+                         double(tabletDockRect.right()) - half - 2.0);
+    } else {
+        long best = 0;
+        long bestD = (long)1 << 62;
+        for (size_t i = 0; i < n; ++i) {
+            const long dx = long(tabletDockBaseRects[i].x + tabletDockBaseRects[i].w / 2) - long(pointerX);
+            if (dx * dx < bestD) {
+                bestD = dx * dx;
+                best = long(i);
+            }
+        }
+        A = int(best);
+        aGo = double(tabletDockBaseRects[size_t(A)].x + tabletDockBaseRects[size_t(A)].w / 2);
+    }
+    c[size_t(A)] = aGo;
+    for (int i = A - 1; i >= 0; --i)
+        c[size_t(i)] = c[size_t(i + 1)] - (w[size_t(i)] / 2.0 + gap + w[size_t(i + 1)] / 2.0);
+    for (int i = A + 1; i < items; ++i)
+        c[size_t(i)] = c[size_t(i - 1)] + (w[size_t(i)] / 2.0 + gap + w[size_t(i - 1)] / 2.0);
+
+    // Recentre the real icons on the pill's own centre so magnification never drags
+    // the row off it. With the phantom the finger is the anchor, so the row centres
+    // itself gently while the parting still does its job.
+    double mean = 0.0;
+    for (size_t i = 0; i < n; ++i) mean += c[i];
+    mean /= double(n);
+    double base = 0.0;
+    for (size_t i = 0; i < n; ++i) base += double(tabletDockBaseRects[i].x + tabletDockBaseRects[i].w / 2);
+    base /= double(n);
+    if (phIndex < 0) {
+        const double shift = base - mean;
+        if (std::abs(shift) > 0.01) {
+            for (size_t i = 0; i < n; ++i) c[i] += shift;
+            moved = true;
+        }
+    } else if (std::abs(mean - base) > 4.0) {
+        const double shift = (base - mean) * std::min(1.0, dtMs / 60.0);
+        for (size_t i = 0; i < n; ++i) c[i] += shift;
+        moved = true;
+    }
+
+    // Spring each icon toward its target deflection from its base slot. When the
+    // row is parked and still, drift and velocity run to zero and painting stops.
+    for (size_t i = 0; i < n; ++i) {
+        const double target = c[i] - double(tabletDockBaseRects[i].x + tabletDockBaseRects[i].w / 2);
+        dockSpring(tabletDockDrift[i], tabletDockDriftV[i], target, dtMs, 4.0);
+        if (std::abs(tabletDockDrift[i] - target) > 0.03 ||
+            std::abs(tabletDockDriftV[i]) > 0.05)
+            moved = true;
+    }
+
+    // Rebuild the live rects, and the edit-mode remove badges that ride them, from
+    // the drifted positions so hit testing and drawing agree with the visuals.
+    for (size_t i = 0; i < n; ++i) {
+        const Rect& b = tabletDockBaseRects[i];
+        const double cx = double(b.x + b.w / 2) + tabletDockDrift[i];
+        tabletDockRects[i] = Rect{int(std::lround(cx)) - b.w / 2, b.y, b.w, b.h};
+    }
+    if (tabletEdit) {
+        const int badge = std::max(20, tabletDockIconSize / 3);
+        tabletDockRemoveRects.clear();
+        for (size_t i = 0; i < n; ++i) {
+            const Rect& b = tabletDockRects[i];
+            tabletDockRemoveRects.push_back(
+                Rect{b.right() - badge / 2, b.y - badge / 2, badge, badge});
+        }
+    }
+
+    if (moved) dirty = true;
 }
 
 }  // namespace wm

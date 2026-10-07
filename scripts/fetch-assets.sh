@@ -3,8 +3,8 @@
 # assets/ so win11wm has no runtime dependency on git, rsvg or a font
 # installation:
 #
-#   assets/fonts/MuternVF.ttf            the UI font (variable, wght axis)
-#   assets/fonts/Poppins-ExtraBold.ttf   the digital clock's display face (OFL)
+#   assets/fonts/Roboto.ttf            the UI font and the digital clock's display
+#                                        face, one variable font (wght axis)
 #   assets/icons-hatter/<name>.png       Hatter app icons (the shell default),
 #                                        rasterised from the Hatter checkout
 #   assets/icons/<name>.png              Reversal icon theme, rasterised flat
@@ -32,9 +32,10 @@ REVERSAL_REPO="https://github.com/yeyushengfan258/Reversal-icon-theme.git"
 REVERSAL_REF="master"
 HATTER_REPO="https://github.com/Mibea/Hatter.git"
 HATTER_THEME="Hatter"
-MUTERNVF_REPO="https://github.com/vivescene/MuternVF.git"
-# Poppins ExtraBold, SIL Open Font License 1.1 -- the huge digital-clock face.
-POPPINS_URL="https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-ExtraBold.ttf"
+# Roboto, Apache 2.0, in its variable form (wdth + wght axes): one web download
+# buys the whole font stack -- weights 400/500/700 for the UI face and, driven to
+# its heaviest cut, the digital clock's display face.
+ROBOTO_URL="https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto%5Bwdth%2Cwght%5D.ttf"
 
 # Shell glyphs the WM asks for by name (see draw.cpp). Window buttons are not
 # listed: the shell draws those itself, so they only need to resolve when the
@@ -427,62 +428,24 @@ render_local_svgs() {
 fetch_fonts() {
   mkdir -p "$FONTS"
 
-  # --- MuternVF: the UI font the whole shell is set in.
-  local target="$FONTS/MuternVF.ttf"
+  # --- Roboto: the UI font the whole shell is set in, fetched from the web. One
+  # file covers every weight the Fluent shell asks for through the wght axis, so
+  # the same download is what the digital clock opens through initFromFile() at
+  # its heaviest cut.
+  local target="$FONTS/Roboto.ttf"
   if [[ $FORCE -eq 0 && -s "$target" ]]; then
-    say "font: MuternVF already present"
-  else
-    # Preferred: the raw file over HTTP, which avoids a full clone. Fall back to a
-    # shallow clone when git is unavailable or the CDN path changes.
-    local ok=0
-    if have curl && curl -fsSL --retry 2 -o "$target.tmp" \
-          "https://raw.githubusercontent.com/vivescene/MuternVF/master/MuternVF.ttf" 2>/dev/null &&
+    say "font: Roboto already present"
+  elif have curl && curl -fsSL --retry 2 -o "$target.tmp" "$ROBOTO_URL" 2>/dev/null &&
        [[ -s "$target.tmp" ]]; then
-      ok=1
-    elif have wget && wget -q -O "$target.tmp" \
-          "https://raw.githubusercontent.com/vivescene/MuternVF/master/MuternVF.ttf" 2>/dev/null &&
+    mv -f "$target.tmp" "$target"
+    say "font: Roboto.ttf <- web ($ROBOTO_URL)"
+  elif have wget && wget -q -O "$target.tmp" "$ROBOTO_URL" 2>/dev/null &&
          [[ -s "$target.tmp" ]]; then
-      ok=1
-    fi
-    if [[ $ok -eq 0 ]]; then
-      say "fetching MuternVF via git"
-      if have git && git clone --depth 1 "$MUTERNVF_REPO" "$WORK/muternvf" 2>/dev/null &&
-         [[ -s "$WORK/muternvf/MuternVF.ttf" ]]; then
-        cp -f "$WORK/muternvf/MuternVF.ttf" "$target.tmp"
-        ok=1
-      fi
-    fi
-
-    if [[ $ok -eq 1 && -s "$target.tmp" ]]; then
-      mv -f "$target.tmp" "$target"
-      # Static Text instances are the fallback path in text.cpp for builds of
-      # FreeType that cannot set variation coordinates. They are cheap to copy, so
-      # they ride along when the clone is what we used.
-      if [[ -d "$WORK/muternvf/ttf/Text" ]]; then
-        for w in Regular Medium Bold; do
-          local src="$WORK/muternvf/ttf/Text/MuternVF-Text$w.ttf"
-          [[ -s "$src" ]] && cp -f "$src" "$FONTS/MuternVF-Text$w.ttf"
-        done
-      fi
-      say "font: MuternVF.ttf -> $target"
-    else
-      rm -f "$target.tmp"
-      say "warning: could not fetch MuternVF; the shell falls back to a system font"
-    fi
-  fi
-
-  # --- Poppins ExtraBold: the digital clock's display face. One weight, one
-  # face; text.cpp opens it through Text::initFromFile().
-  local display="$FONTS/Poppins-ExtraBold.ttf"
-  if [[ $FORCE -eq 0 && -s "$display" ]]; then
-    say "font: Poppins ExtraBold already present"
-  elif have curl && curl -fsSL --retry 2 -o "$display.tmp" "$POPPINS_URL" 2>/dev/null &&
-       [[ -s "$display.tmp" ]]; then
-    mv -f "$display.tmp" "$display"
-    say "font: Poppins-ExtraBold.ttf -> $display"
+    mv -f "$target.tmp" "$target"
+    say "font: Roboto.ttf <- web ($ROBOTO_URL)"
   else
-    rm -f "$display.tmp"
-    say "warning: could not fetch Poppins ExtraBold; the digital clock uses the UI font"
+    rm -f "$target.tmp"
+    say "warning: could not fetch Roboto from the web; the shell falls back to a system font"
   fi
 }
 
@@ -546,10 +509,10 @@ if [[ $WANT_WALLPAPER -eq 1 ]]; then fetch_wallpaper || true; fi
 
 # A stamp lets run.sh skip this entirely on every later start. `wallpaper=` is
 # tracked explicitly so run.sh can notice a checkout made before it existed.
-if [[ -s "$FONTS/MuternVF.ttf" || -d "$ICONS" || -d "$WALLPAPER" ]]; then
+if [[ -s "$FONTS/Roboto.ttf" || -d "$ICONS" || -d "$WALLPAPER" ]]; then
   printf 'fonts=%s\ndisplay=%s\nicons=%s\nhatter=%s\nwallpaper=%s\n' \
-    "$([[ -s "$FONTS/MuternVF.ttf" ]] && echo ok || echo missing)" \
-    "$([[ -s "$FONTS/Poppins-ExtraBold.ttf" ]] && echo ok || echo missing)" \
+    "$([[ -s "$FONTS/Roboto.ttf" ]] && echo ok || echo missing)" \
+    "$([[ -s "$FONTS/Roboto.ttf" ]] && echo ok || echo missing)" \
     "$(find "$ICONS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ')" \
     "$(find "$HATTER_ICONS" -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' ')" \
     "$([[ -s "$WALLPAPER/wallpaper.png" ]] && echo ok || echo missing)" \

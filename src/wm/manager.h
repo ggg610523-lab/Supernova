@@ -392,7 +392,7 @@ private:
                             const Rect& r);
     int measureIn(Text& t, const std::string& s, int px, Weight w, int* outH = nullptr);
     // The display face when it loaded, the UI font otherwise, so a missing
-    // Poppins-ExtraBold.ttf degrades to an in-family clock rather than no clock.
+    // Roboto.ttf degrades to an in-family clock rather than no clock.
     Text& displayText();
     void drawStartGlyph(const Rect& box, const Color& c);
     void drawSearchGlyph(const Rect& box, const Color& c);
@@ -622,6 +622,10 @@ private:
     void beginTabletFolderDrag(int cell, int x, int y);
     void updateTabletIconDrag(int x, int y);
     void endTabletIconDrag();
+    // One spring step for the whole dock row, called every frame the home screen
+    // is up, and the pop of a single icon that a drop or a launch has to bounce.
+    void updateTabletDockPhysics(double dtMs);
+    void bounceTabletDockIcon(int index);
     // A drop helper, a private member rather than a file static because it names
     // the nested entry type. It reports true when the folder is left empty, so the
     // caller can delete it the way iOS does.
@@ -648,9 +652,9 @@ private:
 
     Compositor comp;
     Text text;
-    // The digital clock's display face (Poppins ExtraBold), loaded from the same
-    // fonts directory. A separate instance keeps its glyph cache and its heavy
-    // weight out of the UI font's.
+    // The digital clock's display face (Roboto at its heaviest cut), loaded from the
+    // same fonts directory. A separate instance keeps its glyph cache and its
+    // heavy weight out of the UI font's.
     Text clockText;
     IconStore icons;
 
@@ -885,14 +889,20 @@ private:
     size_t startPageBase = 0;        // filtered index of appRects[0]
     size_t startPageSize = 0;        // cells per page
     // --- turning a Launchpad page ------------------------------------------
-    // The grid follows a sideways drag across the empty backdrop and settles on
-    // the page it was let go nearest, the same gesture the tablet home screen
-    // uses: a press arms the turn, motion past the slop starts it, and the
-    // release commits it. launchPageOffset is an absolute page position in pages
-    // (not pixels) so a page caught halfway can be drawn halfway while it eases
-    // back onto startPage after the finger lifts.
+    // The grid follows a sideways drag and settles on the page it was let go
+    // nearest, the same gesture the tablet home screen uses: a press arms the
+    // turn -- from the bare backdrop *or* from an app tile -- motion past the
+    // slop starts it, and the release commits it. A press on a tile is armed
+    // rather than fired so it can become that swipe; a release that never moved
+    // is the click that launches the app. launchPageOffset is an absolute page
+    // position in pages (not pixels) so a page caught halfway can be drawn
+    // halfway while it eases back onto startPage after the finger lifts.
     bool launchSwipe = false;        // a page is being dragged right now
-    bool launchPressArmed = false;   // pressed the bare backdrop, may become a swipe
+    bool launchPressArmed = false;   // pressed the Launchpad, may become a swipe
+    // The app tile the armed press came down on, or -1 for the bare backdrop.
+    // The press is armed rather than fired, so it can still turn into a swipe
+    // from a tile; the release is what decides between launching and dismissing.
+    int launchPressTile = -1;
     int launchSwipeFrom = 0;
     int launchSwipeStartX = 0;
     int launchSwipeStartY = 0;
@@ -963,15 +973,28 @@ private:
     Time tabletDragEdgeAt = 0;
     std::vector<Rect> tabletDockRects;
 
+    // --- dock physics -------------------------------------------------------
+    // The dock row is a closed-loop spring system, not a static row: icons grow
+    // near the finger, push their neighbours aside, return with a slight
+    // overshoot, and bounce once when an icon is dropped on them or launched
+    // from them. The base slots are the layout's own; everything that is drawn
+    // and hit-tested reads the live rects, which this subsystem rewrites every
+    // frame the row is moving.
+    std::vector<Rect> tabletDockBaseRects;   // the natural slot each icon rests in
+    std::vector<double> tabletDockScale;     // magnification, 1.0 = natural size
+    std::vector<double> tabletDockDrift;     // horizontal deflection off its base
+    std::vector<double> tabletDockDriftV;    // the spring's velocity
+    std::vector<double> tabletDockWobble;    // 1 + the bounce sinusoid, else 1.0
+    std::vector<double> tabletDockWobbleAge; // ms the bounce has run; <0 when idle
+
     // --- editing the dock ---------------------------------------------------
     // HarmonyOS edits the dock where it stands rather than on a screen of its
     // own: a long press puts the home screen into rearrange mode, and while it is
-    // there every dock icon carries a remove badge in its top-right corner and the
-    // row grows a "+" tile that opens the app picker. No button, no second screen.
-    Rect tabletDockAddRect;                   // the "+" tile, rearrange mode only
+    // there every dock icon carries a remove badge in its top-right corner. New
+    // apps get in through the long press menu's "Add to Dock" instead of a tile
+    // that grows the row, so the pill keeps its fixed shape.
     std::vector<Rect> tabletDockRemoveRects;  // one badge per icon, same mode
     int tabletDockPressRemove = -1;           // the badge a press landed on
-    bool tabletDockPressAdd = false;          // the "+" a press landed on
 
     // The picker behind that "+": every launcher on the machine that is not in the
     // dock yet, twelve to a page, ticked to choose and committed with Done.

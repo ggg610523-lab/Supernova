@@ -103,6 +103,17 @@ std::string desktopDir();
 // Exec are what the desktop shows and runs.
 std::vector<DesktopItem> scanDesktop();
 
+// The tablet folder: a dedicated directory (the desktop's own "tablet" folder)
+// whose .desktop files are the ONLY apps the tablet home screen recognises.
+// Created on first use, so there is always somewhere to drop a launcher.
+std::string tabletFolderDir();
+bool ensureTabletFolder();
+
+// The tablet folder's contents: only .desktop launchers, in name order. Anything
+// that is not a launcher is ignored -- the tablet home screen is curated, not
+// scraped.
+std::vector<DesktopItem> scanTabletFolder();
+
 // Whether a name may be used for a desktop entry. Empty is not a name, neither are
 // "." and "..", and a name holding a path separator would put the entry somewhere
 // else entirely. A leading dot is refused because scanDesktop() skips hidden files,

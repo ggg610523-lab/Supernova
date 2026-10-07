@@ -32,8 +32,8 @@ public:
 
     // fontconfig + FreeType only: no GL context needed yet. `fontDir` is the
     // directory the bundled UI font lives in (see scripts/fetch-assets.sh);
-    // when it holds MuternVF.ttf that variable font is used directly, with the
-    // static Text instances and fontconfig as fallbacks.
+    // when it holds Roboto.ttf that variable font is used directly, with the
+    // static instances and fontconfig as fallbacks.
     bool init(const std::string& fontDir = std::string());
     // Loads one specific file for every weight slot. The digital clock's display
     // face is a single heavy weight, not a family with Regular/Medium/Bold, so all
@@ -80,7 +80,7 @@ private:
     void* lib_ = nullptr;
     void* faces_[3] = {nullptr, nullptr, nullptr};  // Regular, Medium, Bold
     int facePx_[3] = {0, 0, 0};
-    // Optical size axis of a variable font (MuternVF); absent for static faces.
+    // Optical size axis of a variable font; absent for static faces.
     bool hasOpsz_[3] = {false, false, false};
     double opszMin_[3] = {0.0, 0.0, 0.0};
     double opszMax_[3] = {0.0, 0.0, 0.0};

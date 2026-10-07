@@ -3,14 +3,14 @@
 # Build (if needed) and run win11wm.
 #
 #   ./run.sh                 configure, build, run
-#   ./run.sh --force-assets  re-download Hatter + Reversal icons, MuternVF, wallpaper
+#   ./run.sh --force-assets  re-download Hatter + Reversal icons, Roboto, wallpaper
 #   ./run.sh --no-assets     never touch assets/
 #   ./run.sh --debug         unoptimised build
 #   ./run.sh --clean         wipe the build directory first
 #   ./run.sh -- <args>       everything after -- goes to win11wm
 #
 # Assets are fetched once into ./assets (Hatter app icons, Reversal shell glyphs,
-# MuternVF, and the wallpaper photo transcoded to PNG); win11wm finds them next to
+# Roboto, and the wallpaper photo transcoded to PNG); win11wm finds them next to
 # its own binary
 # and degrades to letter tiles, a system font and a procedural backdrop when
 # they are missing.
@@ -58,14 +58,14 @@ if [[ "$FETCH" != no ]]; then
   need_fetch=0
   if [[ "$FETCH" == force || ! -f "$STAMP" ||
         ! -s "$ROOT/assets/wallpaper/wallpaper.png" ||
-        ! -s "$ROOT/assets/fonts/Poppins-ExtraBold.ttf" ]]; then
+        ! -s "$ROOT/assets/fonts/Roboto.ttf" ]]; then
     need_fetch=1
   fi
   if ! grep -q '^hatter=' "$STAMP" 2>/dev/null; then
     need_fetch=1
   fi
   if [[ $need_fetch -eq 1 ]]; then
-    say "fetching bundled assets (Hatter + Reversal icons, MuternVF, wallpaper)"
+    say "fetching bundled assets (Hatter + Reversal icons, Roboto, wallpaper)"
     [[ "$FETCH" == force ]] && "$ROOT/scripts/fetch-assets.sh" --force \
                              || "$ROOT/scripts/fetch-assets.sh"
   else

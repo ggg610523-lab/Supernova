@@ -359,7 +359,7 @@ inline constexpr Color kWidgetWeatherSun = rgb(0xFFD60A);   // iOS systemYellow
 // --- digital clock widget -------------------------------------------------
 // The clock carries no card: it is bare type floating on the wallpaper, the way
 // a bedside clock is, so these are only its ink and the dimmer date beneath it.
-// The time is set in the bundled Poppins ExtraBold display face.
+// The time is set in the bundled Roboto display face at its heaviest cut.
 inline constexpr Color kWidgetDigitalInk = rgb(0xFFFFFF);
 inline constexpr Color kWidgetDigitalDim = rgb(0xFFFFFF, 0.55f);
 
@@ -451,6 +451,9 @@ constexpr int kLaunchDotsH = 34;     // page-dot strip at the bottom
 // the same slop any other press does before it counts, so brushing the grid
 // does not flick it; a third of a page of travel commits the turn.
 constexpr int kLaunchSwipeSlop = 22;
+// A Launchpad page snaps into place noticeably faster than the tablet home
+// screen settles: it is a quick flick of the field, not a gliding gesture.
+constexpr int kLaunchPageTurnMs = 120;
 
 // --- ring menu (the circle button's flyout) -------------------------------
 // A greeting header over a grid of recent apps (icons only) and a row of power
