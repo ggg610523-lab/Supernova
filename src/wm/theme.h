@@ -63,6 +63,10 @@ inline Color kText = rgb(0xFFFFFF);
 inline Color kTextIdle = rgb(0xFFFFFF, 0.62f);
 inline Color kTextMuted = rgb(0xFFFFFF, 0.55f);
 inline Color kTextDim = rgb(0xFFFFFF, 0.38f);
+// The desktop's icon labels sit straight on the wallpaper rather than on a
+// panel, so they keep the dark-mode white (and their dark drop shadow) in both
+// modes: near-black type over a photo is the one thing light mode cannot fix.
+inline constexpr Color kDesktopLabel = rgb(0xFFFFFF);
 
 // --- shadows ---------------------------------------------------------------
 inline Color kShadow = rgb(0x000000, 0.50f);

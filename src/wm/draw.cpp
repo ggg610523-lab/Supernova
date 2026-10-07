@@ -323,7 +323,7 @@ void Manager::drawDesktopIcons() {
         // Desktop labels sit on a photo, so a one pixel dark drop shadow keeps
         // them legible over a light patch of wallpaper.
         comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.65f}, 1.0f);
-        comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kText, 1.0f);
+        comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kDesktopLabel, 1.0f);
     };
 
     // Draw everything but the carried icon first, then the carried icon on top of
