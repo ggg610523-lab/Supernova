@@ -112,6 +112,12 @@ theme::Mode loadThemeMode();
 // time. Called once, when the Control Centre toggle is pressed.
 void saveThemeMode(theme::Mode m);
 
+// The wallpaper the WM bakes: "wallpaper" in the same config directory holds the
+// absolute path to the current image. Empty or missing means the bundled asset
+// (assets/wallpaper/wallpaper.png) is used. The settings app writes this file;
+// the WM re-reads it as it runs, so a change repaints without a restart.
+std::string loadWallpaperPath();
+
 // One thing the user's desktop should show: a folder, a plain file, or a
 // .desktop launcher dropped there by an installer.
 struct DesktopItem {

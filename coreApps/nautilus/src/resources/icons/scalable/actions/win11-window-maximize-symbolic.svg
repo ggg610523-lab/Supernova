@@ -1,0 +1,8 @@
+<!-- Windows 11 caption glyph (maximize): 1px outlined square.
+     Drawn as a filled ring because symbolic icons are recoloured by
+     forcing "fill", which would turn a stroked rect into a solid square. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="10" height="10" viewBox="0 0 10 10">
+  <path fill-rule="evenodd"
+        d="M0.5 0.5h9v9h-9Z M1.5 1.5v7h7v-7Z"/>
+</svg>

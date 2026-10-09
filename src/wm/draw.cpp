@@ -815,6 +815,7 @@ void Manager::drawClientSprite(Client* c) {
     s.frame = f;
     s.captionH = c->captionH;
     s.maximized = c->maximizedH && c->maximizedV;
+    s.glass = c->blurBehind;
     s.radius = radiusOverride >= 0.f ? radiusOverride
                : ((c->fullscreen || s.maximized) ? 0.f : float(metrics::kRadius));
     s.focused = (c == focused) && !c->closing;

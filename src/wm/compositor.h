@@ -48,6 +48,9 @@ struct WindowSprite {
     float radius = float(metrics::kRadius);
     bool focused = false;
     bool maximized = false;
+    // Client requested a blurred backdrop (_KDE_NET_WM_BLUR_BEHIND_REGION): draw
+    // its body as Mica (blurred wallpaper) so translucent content reads as glass.
+    bool glass = false;
     float opacity = 1.0f;
     float attention = 0.0f;  // 0..1 flash for _NET_WM_STATE_DEMANDS_ATTENTION
     // Caption button state, in layout order from the right edge. The hovers are
@@ -75,6 +78,12 @@ public:
     bool init(Display* dpy, int screen, int width, int height, bool wantVsync,
               const std::string& wallpaperPath, std::string* error);
     void shutdown();
+
+    // Re-bakes the wallpaper in place with a new source image (or empty to
+    // restore the procedural backdrop). Safe any time after init: the bake is
+    // re-run exactly as at start-up, after freeing the previous texture chain,
+    // so the session wallpaper can be swapped without restarting the shell.
+    bool setWallpaper(const std::string& path, std::string* error);
 
     bool ready() const { return ready_; }
     Window overlay() const { return overlay_; }
@@ -209,8 +218,8 @@ private:
     GLint uShadow_ = -1, uClose_ = -1, uFrame_ = -1, uContent_ = -1, uRadius_ = -1;
     GLint uOpacity_ = -1, uCaptionH_ = -1, uBtnW_ = -1, uHover_ = -1, uPress_ = -1;
     GLint uMaximized_ = -1, uScreen_ = -1, uShadowPad_ = -1, uTexMix_ = -1;
-    GLint uKeepAlpha_ = -1, uTintAmount_ = -1, uSaturate_ = -1, uClipTop_ = -1, uTex_ = -1,
-          uBlur_ = -1;
+    GLint uKeepAlpha_ = -1, uGlass_ = -1, uTintAmount_ = -1, uSaturate_ = -1, uClipTop_ = -1,
+          uTex_ = -1, uBlur_ = -1;
     GLint uArc_ = -1, uThick_ = -1;
     GLint uBlurDir_ = -1, uWallRes_ = -1;
     GLint uPivot_ = -1, uRot_ = -1;

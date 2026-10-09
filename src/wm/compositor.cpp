@@ -68,6 +68,7 @@ uniform vec2  uScreen;
 uniform float uShadowPad;
 uniform float uTexMix;    // 1 = take rgb from the texture
 uniform float uKeepAlpha; // 1 = take alpha from the texture
+uniform float uGlass;     // 1 = client wants a Mica (blurred wallpaper) body
 uniform float uTintAmount;
 uniform float uSaturate;  // backdrop-filter saturate() amount (mode 1)
 uniform float uClipTop;   // mode 0: discard fragments above this screen y
@@ -197,7 +198,19 @@ void main() {
                 }
             } else {
                 vec2 uv = (p - uContent.xy) / max(uContent.zw, vec2(1.0));
-                if (uTexMix > 0.5 && uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= 1.0 && uv.y <= 1.0) {
+                bool inTex = uTexMix > 0.5 && uv.x >= 0.0 && uv.y >= 0.0 &&
+                             uv.x <= 1.0 && uv.y <= 1.0;
+                if (uGlass > 0.5) {
+                    // Windows 11 Mica: the body is a tinted sample of the blurred
+                    // wallpaper behind the window, and the client's translucent
+                    // pixels are composited over it so the blur shows through.
+                    body = micaTint(p, uColor.rgb, uTintAmount);
+                    alphaMul = 1.0;
+                    if (inTex) {
+                        vec4 t = texture(uTex, uv);
+                        body = mix(body, t.rgb, mix(1.0, t.a, uKeepAlpha));
+                    }
+                } else if (inTex) {
                     vec4 t = texture(uTex, uv);
                     body = t.rgb;
                     alphaMul = mix(1.0, t.a, uKeepAlpha);
@@ -742,6 +755,7 @@ bool Compositor::buildShaders(std::string* error) {
     uShadowPad_ = loc("uShadowPad");
     uTexMix_ = loc("uTexMix");
     uKeepAlpha_ = loc("uKeepAlpha");
+    uGlass_ = loc("uGlass");
     uTintAmount_ = loc("uTintAmount");
     uSaturate_ = loc("uSaturate");
     uClipTop_ = loc("uClipTop");
@@ -1302,6 +1316,7 @@ void Compositor::drawWindow(const WindowSprite& s) {
     const bool hasTex = s.tex.valid();
     glUniform1f(uTexMix_, hasTex ? 1.f : 0.f);
     glUniform1f(uKeepAlpha_, (hasTex && s.tex.alpha) ? 1.f : 0.f);
+    glUniform1f(uGlass_, (s.glass && hasTex && s.tex.alpha) ? 1.f : 0.f);
     const bool tfi = hasTex && tfiBind(s.tex.tex);
     glUniform1i(uMode_, 2);
     glActiveTexture(GL_TEXTURE0);

@@ -61,6 +61,7 @@ Client* Manager::add(Window w, bool existing) {
     readStruts(c);
     readTitle(c);
     readIcon(c);
+    readBlurBehind(c);
     if (!c->managed) {
         c->captionH = 0;
         c->frame = Rect{attr.x, attr.y, attr.width, attr.height};
@@ -350,6 +351,24 @@ void Manager::readOpacity(Client* c) {
     if (cardProperty(dpy, c->id, A.netWmOpacity, &value) && value < 0xFFFFFFFFul) {
         c->hasAlpha = true;
     }
+}
+
+void Manager::readBlurBehind(Client* c) {
+    // _KDE_NET_WM_BLUR_BEHIND_REGION is the cross-compositor way for a client to
+    // ask for a blurred backdrop (KWin reads it too). The value is a rect list,
+    // but our Mica body fills the whole window, so only its presence matters.
+    Atom type = None;
+    int format = 0;
+    unsigned long items = 0, after = 0;
+    unsigned char* data = nullptr;
+    const bool present =
+        XGetWindowProperty(dpy, c->id, A.kdeBlurBehind, 0, 0, False, AnyPropertyType, &type,
+                           &format, &items, &after, &data) == Success &&
+        type != None;
+    if (data) XFree(data);
+    if (present == c->blurBehind) return;
+    c->blurBehind = present;
+    dirty = true;
 }
 
 void Manager::updateStateAtoms(Client* c) {

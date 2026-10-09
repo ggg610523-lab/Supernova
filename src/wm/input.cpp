@@ -170,6 +170,8 @@ void Manager::onPropertyNotify(XPropertyEvent& ev) {
         readNormalHints(c);
     } else if (a == A.netWmOpacity) {
         readOpacity(c);
+    } else if (a == A.kdeBlurBehind) {
+        readBlurBehind(c);
     }
     // _NET_WM_STATE is deliberately ignored here: clients are supposed to *ask*
     // for state changes with a ClientMessage, and reacting to our own writes

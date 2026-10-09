@@ -70,6 +70,7 @@ struct Atoms {
     X(netWmUserTime, "_NET_WM_USER_TIME")        X(netRestackWindow, "_NET_RESTACK_WINDOW") \
     X(netRequestFrameExtents, "_NET_REQUEST_FRAME_EXTENTS") X(netShowingDesktop, "_NET_SHOWING_DESKTOP") \
     X(netWmOpacity, "_NET_WM_OPACITY")           X(netWmBypassCompositor, "_NET_WM_BYPASS_COMPOSITOR") \
+    X(kdeBlurBehind, "_KDE_NET_WM_BLUR_BEHIND_REGION") \
     X(motifHints, "_MOTIF_WM_HINTS") \
     X(netWmOpaqueRegion, "_NET_WM_OPAQUE_REGION") X(netWmPing, "_NET_WM_PING") \
     X(netStartupId, "_NET_STARTUP_ID")           X(utf8String, "UTF8_STRING") \
@@ -126,6 +127,10 @@ struct Client {
     bool isDock = false, isDesktop = false, isDialog = false, isModal = false;
     bool isSplash = false, isToolbar = false, isMenu = false;
     bool hasAlpha = false;
+    // Client asked for a blurred backdrop behind its (translucent) content via
+    // _KDE_NET_WM_BLUR_BEHIND_REGION. We render the Windows 11 Mica backdrop
+    // under such a window instead of the flat dark body.
+    bool blurBehind = false;
     bool inputHint = true;       // WM_HINTS input: false means "focus by protocol"
     bool takeFocus = false;      // WM_TAKE_FOCUS is in WM_PROTOCOLS
     bool userPosition = false;   // the client asked for a specific position
@@ -270,6 +275,7 @@ private:
     void readStruts(Client* c);
     void readAlpha(Client* c);
     void readOpacity(Client* c);
+    void readBlurBehind(Client* c);
     void updateStateAtoms(Client* c);
     void updateClientList();
     void updateWorkArea();

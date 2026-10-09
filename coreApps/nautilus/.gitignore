@@ -1,0 +1,20 @@
+build/
+.*/
+!.gitlab/
+
+# Ignore meson's subprojects folder
+/subprojects
+
+# Ignore auto generated files
+/.buildconfig
+
+# Ignore temporary files
+*.orig
+*~
+
+# Ignore captures
+/*.syscap
+/heaptrack.nautilus.*
+
+# prebuilt directory (not committed)
+_build/

@@ -1,0 +1,42 @@
+using Gtk 4.0;
+using Adw 1;
+
+PopoverMenu back_menu {}
+
+PopoverMenu forward_menu {}
+
+template $NautilusHistoryControls: Adw.Bin {
+  child: Box {
+    spacing: 6;
+
+    Button back_button {
+      tooltip-text: _("Back");
+      valign: center;
+      action-name: "slot.back";
+      icon-name: "go-previous-symbolic";
+    }
+
+    Button forward_button {
+      tooltip-text: _("Forward");
+      valign: center;
+      action-name: "slot.forward";
+      icon-name: "go-next-symbolic";
+    }
+
+    /* Windows 11's address row also offers Go up and Refresh, so the four
+     * navigation buttons form the same back / forward / up / refresh cluster. */
+    Button up_button {
+      tooltip-text: _("Up");
+      valign: center;
+      action-name: "slot.up";
+      icon-name: "go-up-symbolic";
+    }
+
+    Button reload_button {
+      tooltip-text: _("Refresh");
+      valign: center;
+      action-name: "slot.reload";
+      icon-name: "view-refresh-symbolic";
+    }
+  };
+}

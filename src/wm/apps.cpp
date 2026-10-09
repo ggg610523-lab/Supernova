@@ -732,6 +732,19 @@ void saveThemeMode(theme::Mode m) {
     log("saved theme mode %s to %s", word.c_str(), path.c_str());
 }
 
+// The wallpaper path the WM should bake: the first token of configFile
+// ("wallpaper"), or empty when there is no file. A hand-written absolute path
+// is exactly the contract; nothing here validates it beyond being non-empty,
+// because an unreadable image already falls back to the procedural backdrop.
+std::string loadWallpaperPath() {
+    const std::string path = configFile("wallpaper");
+    if (path.empty()) return {};
+    std::ifstream in(path);
+    std::string word;
+    if (!(in >> word)) return {};
+    return word;
+}
+
 std::vector<AppEntry> loadPinned() {
     PinnedList pins;
     const std::string path = pinnedPath();
