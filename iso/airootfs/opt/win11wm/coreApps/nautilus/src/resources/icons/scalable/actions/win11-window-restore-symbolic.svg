@@ -1,0 +1,9 @@
+<!-- Windows 11 caption glyph (restore): two overlapping 1px outlined squares.
+     Filled paths (not strokes) because symbolic icons are recoloured by
+     forcing "fill". The rear square is trimmed to the L-shaped part that
+     stays visible behind the front square. -->
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="10" height="10" viewBox="0 0 10 10">
+  <path fill-rule="evenodd"
+        d="M2.5 0.5h7v7h-1v-6h-6Z M0.5 2.5h7v7h-7Z M1.5 3.5v5h5v-5Z"/>
+</svg>

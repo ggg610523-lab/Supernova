@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Launch the modified Nautilus (coreApps) inside win11wm if available, else system nautilus
+if [ -x /opt/win11wm/coreApps/nautilus.sh ]; then
+    exec /opt/win11wm/coreApps/nautilus.sh "$@"
+fi
+exec /usr/bin/nautilus "$@"

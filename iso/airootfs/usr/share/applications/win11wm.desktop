@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=win11wm
+Comment=Windows 11 style WM
+Exec=win11-session
+Type=Application
+Categories=System;Utility;

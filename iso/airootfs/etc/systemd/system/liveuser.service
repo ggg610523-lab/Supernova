@@ -1,0 +1,15 @@
+[Unit]
+Description=Create the live user
+DefaultDependencies=no
+After=systemd-sysusers.service
+Before=systemd-user-sessions.service getty@tty1.service
+ConditionPathExists=!/home/liveuser
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/useradd --create-home --groups wheel,audio,video,input,render --shell /bin/bash liveuser
+ExecStart=/usr/bin/passwd --delete liveuser
+
+[Install]
+WantedBy=multi-user.target

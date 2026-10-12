@@ -1,0 +1,1083 @@
+/* Toolbar */
+
+@keyframes needs_attention_keyframes {
+  0% { }
+  10% { background-color: var(--accent-bg-color); }
+  100% { }
+}
+
+.nautilus-progress-indicator.needs-attention > menubutton > button {
+  animation: needs_attention_keyframes 2s ease-in-out;
+}
+
+.nautilus-progress-indicator menubutton > button listview {
+  background: none;
+  border-spacing: 9px;
+  font-weight: normal;
+}
+
+/* Give the button same colors as the rows */
+.nautilus-progress-indicator menubutton > button:hover {
+  background-color: color-mix(in srgb, var(--sidebar-fg-color) 7%, transparent);
+}
+.nautilus-progress-indicator menubutton > button:checked {
+  background-color: color-mix(in srgb, var(--sidebar-fg-color) 10%, transparent);
+}
+.nautilus-progress-indicator menubutton > button:checked:hover {
+  background-color: color-mix(in srgb, var(--sidebar-fg-color) 13%, transparent);
+}
+
+/* Remove white background and highlight on hover which GTK adds by default
+ * to GtkListBox. TODO: Switch to GtkListView and drop this CSS hack. */
+.operations-list,
+.operations-list > :hover {
+  background: none;
+}
+
+/* Path bar */
+
+.nautilus-pathbar {
+  background-color: color-mix(in srgb, currentColor 10%, transparent);
+  border-radius: 9px;
+}
+@media (prefers-contrast: more) {
+  .nautilus-pathbar {
+    box-shadow: inset 0 0 0 1px var(--border-color);
+  }
+}
+
+.nautilus-pathbar > menubutton {
+  margin: 0px;
+}
+
+.nautilus-pathbar > scrolledwindow undershoot.left {
+  background: linear-gradient(to right, var(--headerbar-shade-color) 6px, transparent 24px);
+  border-left: solid 1px var(--border-color);
+}
+.nautilus-pathbar > scrolledwindow undershoot.right {
+  background: linear-gradient(to left, var(--headerbar-shade-color) 6px, transparent 24px);
+  border-right: solid 1px var(--border-color);
+}
+
+/* Match sidebar's rounded corners on the "start" side. */
+.nautilus-pathbar > scrolledwindow:dir(ltr) undershoot.left {
+  border-radius: 9px 0px 0px 9px;
+}
+.nautilus-pathbar > scrolledwindow:dir(rtl) undershoot.right {
+  border-radius: 0px 9px 9px 0px;
+}
+
+.nautilus-path-button {
+  margin: 3px;
+  min-width: 8px;
+  border-radius: 7px;
+  padding-top: 0px;
+  padding-bottom: 0px;
+}
+
+.nautilus-path-button:not(:hover),
+.nautilus-path-button.current-dir
+{
+  background: none;
+}
+@media (prefers-contrast: more) {
+  .nautilus-path-button:not(:hover):not(:drop(active)),
+  .nautilus-path-button.current-dir:not(:drop(active)) {
+    box-shadow: none;
+  }
+}
+
+.nautilus-path-button:not(.current-dir):not(:backdrop):hover label,
+.nautilus-path-button:not(.current-dir):not(:backdrop):hover image {
+  opacity: 1;
+}
+
+/* Search bar */
+
+.nautilus-query-editor > menubutton > button {
+  margin-top: 5px;
+  margin-bottom: 5px;
+  margin-left: 0px;
+  margin-right: 0px;
+  min-width: 24px;
+  min-height: 24px;
+}
+
+/* Mimic the style of GtkEntry icons, but keep button background if pressed. */
+.nautilus-query-editor > menubutton > button:not(:checked) {
+  background: none;
+}
+.nautilus-query-editor > menubutton > button:not(:hover):not(:checked) {
+  opacity: 0.7;
+}
+
+/* Floating status bar */
+.floating-bar {
+  padding: 3px;
+  background-color: var(--view-bg-color);
+  box-shadow: inset 0 100px 0 0 color-mix(in srgb, currentColor 10%, transparent);
+  border-radius: 12px;
+}
+
+.floating-bar:backdrop {
+  background-color: @view_bg_color;
+}
+
+.floating-bar button {
+  padding: 0px;
+}
+
+.disk-space-free {
+  color: color-mix(in srgb, currentColor 15%, transparent);
+}
+.disk-space-used {
+  color: var(--accent-bg-color);
+}
+@media (prefers-contrast: more) {
+  .disk-space-free {
+    color: color-mix(in srgb, currentColor 30%, transparent);
+  }
+}
+
+.batch-rename-preview {
+  border-top: solid var(--border-color) 1px;
+}
+
+.batch-rename-preview listview > row {
+  padding: 0;
+}
+
+.batch-rename-preview listview > row > * {
+  padding: 6px;
+}
+
+.conflict-row {
+    background: var(--warning-bg-color);
+    color: var(--warning-fg-color);
+}
+
+/* Grid view */
+.nautilus-grid-view gridview {
+  padding: 18px;
+  border-spacing: 6px;
+}
+
+.nautilus-grid-view gridview > child {
+  padding: 0px;
+  border-radius: 12px;
+}
+.nautilus-grid-view .nautilus-view-cell {
+  padding: 6px;
+  border-radius: 12px;
+}
+
+/* Column view */
+
+/* Setup padding on the list. Horizontal padding must be set on the columnview
+ * for it to calculate column widths correctly. */
+.nautilus-network-view listview,
+.nautilus-list-view columnview {
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.nautilus-network-view listview,
+.nautilus-list-view columnview > listview {
+  padding-top: 16px;
+  padding-bottom: 24px;
+  border-spacing: 8px;
+}
+
+.nautilus-list-view.compact columnview > listview {
+  border-spacing: 4px;
+}
+
+/* Use negative margins to extend rubberbanding area into the columnview's
+ * padding, then apply positive margin on rows to reestablish positioning. */
+.nautilus-list-view columnview > listview {
+  margin-left: -24px;
+  margin-right: -24px;
+}
+.nautilus-list-view columnview > listview > row {
+  margin-left: 24px;
+  margin-right: 24px;
+}
+
+.nautilus-network-view listview > row,
+.nautilus-list-view columnview > listview > row {
+  border-radius: 9px;
+}
+
+@media (prefers-contrast: more) {
+  .nautilus-list-view columnview > listview > row.activatable:hover,
+  .nautilus-grid-view gridview > child.activatable:hover {
+    box-shadow: inset 0 0 0 1px var(--border-color);
+  }
+
+  .nautilus-list-view columnview > listview > row:selected,
+  .nautilus-grid-view gridview > child:selected {
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-color) 60%, transparent);
+  }
+}
+
+/* GTK unconditionally sets padding on GtkColumnViewCell, even with .data-table.
+ * We don't want this to hpappen because we have event controllers on the child,
+ * which should thus cover the whole area of the row. */
+.nautilus-list-view columnview > listview > row > cell {
+  padding: 0px;
+}
+
+
+.nautilus-network-view .nautilus-view-cell,
+.nautilus-list-view .nautilus-view-cell {
+  padding: 6px;
+}
+
+/* We want drop feedback on the whole row. Disable per-cell feedback */
+.nautilus-list-view .nautilus-view-cell:drop(active) {
+  box-shadow: none;
+}
+
+.nautilus-list-view.compact .nautilus-view-cell {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+/* Star button needs to extend beyond its cell, into the padding of the row. */
+.nautilus-list-view button.star {
+  margin-top: -3px;
+  margin-bottom: -3px;
+}
+
+.nautilus-list-view.compact button.star {
+  min-height: 24px;
+  min-width: 24px;
+}
+.nautilus-list-view menubutton.fts-snippet > button {
+  border-radius: 100px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.nautilus-list-view menubutton.fts-snippet > popover > * {
+  padding: 18px;
+}
+
+/* Both views */
+.nautilus-network-view:drop(active),
+.nautilus-list-view:drop(active),
+.nautilus-grid-view:drop(active) {
+  box-shadow: none;
+}
+
+/* Remove the default background of the various view widgets
+ * since we already apply a background to the entire content
+ * pane with the .view class. Doing this will avoid overdraw. */
+.nautilus-network-view listview,
+.nautilus-grid-view gridview,
+.nautilus-list-view columnview,
+placesview list {
+  background: none;
+}
+
+.image-frame {
+  margin: 8px;
+  border-radius: 4px;
+}
+
+.cutout {
+  border-radius: 9999px;
+  padding: 2px;
+}
+
+.view .nautilus-image {
+  filter: drop-shadow(0px 1px 1px rgba(0,0,0,0.3));
+}
+
+.view .thumbnail,
+.nautilus-properties .thumbnail {
+  background: url('/org/gnome/nautilus/image/checkerboard.png') repeat;
+  border-radius: 2px;
+  /* Draw a shin and outline to meld better with full-color icons */
+  box-shadow: 0px 1px 1px 1px rgba(0,0,0,0.18),
+              0px 0px 0px 1px var(--shade-color),
+              0px 2px 0px 0px var(--shade-color);
+  /* Disable drop-shadows for thumbnails, box-shadow already covers it */
+  filter: none;
+}
+
+.nautilus-network-view {
+  -gtk-icon-style: symbolic;
+}
+.nautilus-network-view image.network-icon {
+  padding: 8px;
+  border-radius: 999999px;
+  background-color: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.view .hidden-file {
+  opacity: 0.55;
+}
+
+/* Starring */
+button.star:hover {
+  opacity: 1;
+}
+
+@keyframes rotate_star {
+  from { -gtk-icon-transform: rotate(-72deg); }
+  to {}
+}
+@keyframes rotate_unstar {
+  from { -gtk-icon-transform: rotate(72deg); }
+  to {}
+}
+
+button.star.interacted.starred image {
+  animation: rotate_star 0.4s ease;
+}
+button.star.interacted:not(.starred) image {
+  animation: rotate_unstar 0.4s ease;
+}
+
+.nautilus-app-chooser treeview {
+  min-height: 36px;
+  -gtk-icon-size: 32px;
+}
+
+rubberband {
+  border-radius: 6px;
+}
+
+.nautilus-list-view listview,
+.nautilus-grid-view gridview,
+.nautilus-network-view listview {
+  --accent-bg-color: #959595;
+  --accent-color: oklab(from var(--accent-bg-color) var(--standalone-color-oklab));
+}
+
+.nautilus-file-chooser dropdown.flat-dropdown > button {
+  background: none;
+}
+
+.nautilus-file-chooser dropdown.flat-dropdown > button:not(:checked):not(:hover):not(:active):not(.keyboard-activating) {
+  box-shadow: none;
+}
+
+.nautilus-file-chooser dropdown.flat-dropdown > button:hover {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+}
+
+.nautilus-file-chooser dropdown.flat-dropdown > button:active,
+.nautilus-file-chooser dropdown.flat-dropdown > button.keyboard-activating {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.nautilus-file-chooser dropdown.flat-dropdown > button:checked {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.nautilus-file-chooser dropdown.flat-dropdown > button:checked:hover {
+  background: color-mix(in srgb, currentColor 13%, transparent);
+}
+
+.nautilus-file-chooser dropdown.flat-dropdown > button:checked:active,
+.nautilus-file-chooser dropdown.flat-dropdown > button:checked.keyboard-activating {
+  background: color-mix(in srgb, currentColor 19%, transparent);
+}
+
+.toolbar.no-bottom-padding {
+  padding-bottom: 0px;
+}
+
+/* ============================================================================
+ * Windows 11 File Explorer styling
+ *
+ * Palette follows the Win11 GTK theme by yeyushengfan258:
+ *   https://github.com/yeyushengfan258/Win11-gtk-theme
+ *
+ * Like the theme (and like Windows 11's Mica material), the whole window is a
+ * single translucent surface - rgba(..., 0.7) - and the content/sidebar panes
+ * are kept transparent so that one surface shows through everywhere. A
+ * compositor with background blur (KWin) then blurs the desktop behind it,
+ * producing Mica; without blur the window simply fades over the desktop.
+ * Dark mode is selected with prefers-color-scheme.
+ * ========================================================================== */
+
+/* UI font. The requested face is Roboto (installed per-user in
+ * ~/.local/share/fonts). Applied to every window of the app - including the
+ * separate preferences/properties dialogs - and to the flyouts so menus and
+ * tooltips match the shell. */
+window,
+popover,
+tooltip,
+.nautilus-window {
+  font-family: "Roboto", sans-serif;
+}
+
+/* Win11 / Fluent (WinUI) light palette.
+ *
+ * Unlike the earlier Windows 10-era acrylic look, current File Explorer keeps
+ * the window chrome (tab strip, command bar, address row, navigation pane) on
+ * a grey Mica backdrop - Fluent's SolidBackgroundFillColorBase #F3F3F3 - while
+ * the file view itself is the white content layer. The chrome keeps a little
+ * transparency so a compositor with background blur (KWin) still shows the
+ * wallpaper through it as Mica does. */
+.nautilus-window {
+  --win11-window-bg: rgba(243, 243, 243, 0.7);    /* Mica base: #F3F3F3 + blur */
+  --win11-content-bg: transparent;                /* file view shows the Mica base */
+  --win11-sidebar-bg: rgba(243, 243, 243, 0.5);   /* navigation pane */
+  --win11-tab-active: rgba(255, 255, 255, 0.6);
+
+  /* Text (Fluent TextFillColorPrimary / Secondary / Disabled) */
+  --win11-text: rgba(0, 0, 0, 0.89);
+  --win11-text-secondary: rgba(0, 0, 0, 0.61);
+  --win11-text-disabled: rgba(0, 0, 0, 0.36);
+
+  /* Strokes and dividers (ControlStrokeColorDefault / DividerStrokeColorDefault) */
+  --win11-divider: rgba(0, 0, 0, 0.1);
+  --win11-control-fill: rgba(251, 251, 251, 0.9); /* address bar / search box */
+  --win11-control-fill-hover: rgba(0, 0, 0, 0.05);
+  --win11-control-fill-pressed: rgba(0, 0, 0, 0.08);
+  --win11-control-stroke: rgba(0, 0, 0, 0.08);
+
+  /* Interaction fills (Fluent SubtleFillColorSecondary / Tertiary) */
+  --win11-subtle-hover: rgba(0, 0, 0, 0.037);
+  --win11-subtle-pressed: rgba(0, 0, 0, 0.06);
+  --win11-hover: rgba(0, 0, 0, 0.037);
+
+  /* Accent (Win11 default blue) */
+  --win11-accent: #0067c0;
+  --win11-selection: rgba(0, 103, 192, 0.14);
+
+  /* Menus / popovers */
+  --win11-popover-bg: rgba(252, 252, 252, 0.95);
+  --win11-popover-border: rgba(0, 0, 0, 0.12);
+
+  /* Scrollbars */
+  --win11-scroll-thumb: rgba(0, 0, 0, 0.26);
+  --win11-scroll-thumb-hover: rgba(0, 0, 0, 0.4);
+
+  /* Close caption button (Win11 SystemFillColorCritical #C42B1C) */
+  --win11-close-hover: #c42b1c;
+  --win11-close-pressed: #b1251a;
+}
+
+/* Win11 / Fluent dark palette (SolidBackgroundFillColorBase #202020). */
+@media (prefers-color-scheme: dark) {
+  .nautilus-window {
+    --win11-window-bg: rgba(32, 32, 32, 0.7);     /* Mica base: #202020 + blur */
+    --win11-content-bg: transparent;              /* file view shows the Mica base */
+    --win11-sidebar-bg: rgba(43, 43, 43, 0.5);    /* navigation pane */
+    --win11-tab-active: rgba(255, 255, 255, 0.06);
+
+    /* Text (Fluent TextFillColorPrimary / Secondary / Disabled) */
+    --win11-text: #ffffff;
+    --win11-text-secondary: rgba(255, 255, 255, 0.77);
+    --win11-text-disabled: rgba(255, 255, 255, 0.53);
+
+    /* Strokes and dividers */
+    --win11-divider: rgba(255, 255, 255, 0.1);
+    --win11-control-fill: rgba(45, 45, 45, 0.9);
+    --win11-control-fill-hover: rgba(255, 255, 255, 0.08);
+    --win11-control-fill-pressed: rgba(255, 255, 255, 0.12);
+    --win11-control-stroke: rgba(255, 255, 255, 0.1);
+
+    /* Interaction fills */
+    --win11-subtle-hover: rgba(255, 255, 255, 0.06);
+    --win11-subtle-pressed: rgba(255, 255, 255, 0.09);
+    --win11-hover: rgba(255, 255, 255, 0.06);
+
+    /* Accent (Win11 dark blue) */
+    --win11-accent: #4cc2ff;
+    --win11-selection: rgba(76, 194, 255, 0.16);
+
+    /* Menus / popovers */
+    --win11-popover-bg: rgba(44, 44, 44, 0.95);
+    --win11-popover-border: rgba(255, 255, 255, 0.12);
+
+    /* Scrollbars */
+    --win11-scroll-thumb: rgba(255, 255, 255, 0.3);
+    --win11-scroll-thumb-hover: rgba(255, 255, 255, 0.45);
+
+    --win11-close-hover: #c42b1c;
+    --win11-close-pressed: #b1251a;
+  }
+}
+
+/* The window paints the single Mica surface; everything that defines a Fluent
+ * "layer" on top of it (chrome, panes, views) is drawn transparent so the one
+ * blurred backdrop is visible throughout. */
+.nautilus-window,
+.nautilus-window.background {
+  background-color: var(--win11-window-bg);
+  background-image: none;
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+.nautilus-window .view,
+.nautilus-window tabview,
+.nautilus-window tabbox {
+  background-color: var(--win11-content-bg);
+  background-image: none;
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+/* Title bar (navigation row). Use explicit longhands so libadwaita's
+ * headerbar background-color cannot survive the override. */
+.nautilus-window headerbar,
+.nautilus-window .toolbar,
+.nautilus-window .win11-title-bar {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+.nautilus-window headerbar {
+  border-bottom: 1px solid var(--win11-divider);
+  min-height: 44px;
+  padding: 0 4px;
+}
+
+/* Windows 11 caption buttons (minimize / maximize / close) */
+.nautilus-window windowcontrols {
+  margin: 0;
+  border-spacing: 0;
+}
+
+.nautilus-window windowcontrols button {
+  min-width: 46px;
+  min-height: 32px;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--view-fg-color, var(--win11-text));
+  outline: none;
+}
+
+/* Replace the theme's symbolic glyphs with the Windows 11 ones. The SVGs are
+ * bundled in the gresource and are reachable as icon names because nautilus
+ * registers /org/gnome/nautilus/icons as an icon theme resource path (see
+ * nautilus-application.c). Going through the icon theme also means GTK
+ * recolours the glyph through the platform colour.
+ * Note: a -gtk-recolor(url(...)) background does NOT work here, because a
+ * stylesheet loaded from a gresource cannot resolve such URLs. */
+.nautilus-window windowcontrols button image {
+  /* libadwaita draws a round "chip" behind every caption glyph
+   *   windowcontrols > button > image { background-color: color-mix(currentColor 10%, transparent);
+   *                                    border-radius: 100%; padding: 4px; }
+   * Windows 11 shows the bare glyph, so strip the chip and size the glyph to
+   * the 10x10 px Explorer uses at 100% scaling. */
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+  -gtk-icon-size: 20px;  /* renders the 10x10 px glyphs Explorer uses */
+  /* Some themes (e.g. Breeze) hide the caption glyph with
+   * "windowcontrols button image { color: transparent }" and paint their own
+   * image on the button background. Pin the colour so our glyph always shows. */
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+.nautilus-window windowcontrols button.minimize image {
+  -gtk-icon-source: -gtk-icontheme("win11-window-minimize-symbolic");
+}
+
+.nautilus-window windowcontrols button.maximize image {
+  -gtk-icon-source: -gtk-icontheme("win11-window-maximize-symbolic");
+}
+
+.nautilus-window windowcontrols button.close image {
+  -gtk-icon-source: -gtk-icontheme("win11-window-close-symbolic");
+}
+
+/* Restore glyph while the window is maximized */
+.nautilus-window.maximized windowcontrols button.maximize image,
+.nautilus-window.fullscreen windowcontrols button.maximize image {
+  -gtk-icon-source: -gtk-icontheme("win11-window-restore-symbolic");
+}
+
+.nautilus-window windowcontrols button:hover {
+  background-color: var(--win11-subtle-hover);
+}
+
+.nautilus-window windowcontrols button:active {
+  background-color: var(--win11-subtle-pressed);
+}
+
+/* Close button turns red with a white glyph, like Explorer */
+.nautilus-window windowcontrols button.close:hover {
+  background-color: var(--win11-close-hover);
+  color: #ffffff;
+}
+
+.nautilus-window windowcontrols button.close:active {
+  background-color: var(--win11-close-pressed);
+  color: #ffffff;
+}
+
+.nautilus-window windowcontrols button.close:hover image,
+.nautilus-window windowcontrols button.close:active image {
+  color: #ffffff;
+}
+
+/* Command bar */
+.nautilus-command-bar {
+  background-color: transparent;
+  background-image: none;
+  border-bottom: 1px solid var(--win11-divider);
+  padding: 4px 8px;
+  min-height: 44px;
+}
+
+.nautilus-command-bar button {
+  background: none;
+  box-shadow: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  min-height: 30px;
+  color: var(--view-fg-color, var(--win11-text));
+  font-weight: 400;
+}
+
+.nautilus-command-bar button:hover {
+  background: var(--win11-control-fill-hover);
+}
+
+.nautilus-command-bar button:active {
+  background: var(--win11-control-fill-pressed);
+}
+
+.nautilus-command-bar button:disabled {
+  /* TextFillColorDisabled greys out both the label and the symbolic icon */
+  color: var(--win11-text-disabled);
+}
+
+.nautilus-command-bar button image {
+  -gtk-icon-size: 16px;
+}
+
+/* Address / breadcrumb bar: an elevated "control" surface in Fluent. */
+.nautilus-window .nautilus-pathbar {
+  background: var(--win11-control-fill);
+  border: 1px solid var(--win11-control-stroke);
+  border-radius: 5px;
+}
+
+.nautilus-window .nautilus-path-button {
+  border-radius: 4px;
+}
+
+.nautilus-window .nautilus-path-button:hover {
+  background: var(--win11-control-fill-hover);
+}
+
+.nautilus-window .nautilus-path-button:active {
+  background: var(--win11-control-fill-pressed);
+}
+
+.nautilus-window .nautilus-path-button.current-dir {
+  font-weight: 600;
+  background: none;
+}
+
+/* Navigation pane / sidebar */
+.nautilus-window .navigation-sidebar {
+  background: var(--win11-sidebar-bg);
+  padding: 4px 4px 8px 4px;
+}
+
+.nautilus-window .navigation-sidebar > row {
+  border-radius: 5px;
+  margin: 0 2px;
+  min-height: 38px;
+}
+
+.nautilus-window .navigation-sidebar > row:hover {
+  background: var(--win11-subtle-hover);
+}
+
+.nautilus-window .navigation-sidebar > row:selected {
+  background: var(--win11-subtle-hover);
+  box-shadow: inset 3px 0 0 0 var(--win11-accent);
+}
+
+/* Group separators between the Places / Bookmarks / Devices sections. */
+.nautilus-window .navigation-sidebar > row separator {
+  background: var(--win11-divider);
+  margin: 4px 8px;
+}
+
+/* Hover / selection in views */
+.nautilus-window .nautilus-list-view columnview > listview > row:hover,
+.nautilus-window .nautilus-grid-view gridview > child:hover {
+  background: var(--win11-hover);
+}
+
+.nautilus-window .nautilus-list-view columnview > listview > row:selected,
+.nautilus-window .nautilus-grid-view gridview > child:selected {
+  background: var(--win11-selection);
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+/* Explorer draws a 3px accent bar on the leading edge of a selected row. */
+.nautilus-window .nautilus-list-view columnview > listview > row:selected {
+  box-shadow: inset 3px 0 0 0 var(--win11-accent);
+}
+
+/* First row: the tab strip and the Windows 11 caption buttons share it, so the
+ * row paints the chrome background and the divider under the whole strip. */
+.nautilus-window .win11-title-bar {
+  background-color: transparent;
+  background-image: none;
+  border-bottom: 1px solid var(--win11-divider);
+  min-height: 36px;
+  padding: 0;
+}
+
+.nautilus-window .win11-title-bar tabbar,
+.nautilus-window tabbar,
+.nautilus-window tabbar > contents {
+  background-color: transparent;
+  background-image: none;
+  border-bottom: none;
+  min-height: 36px;
+}
+
+.nautilus-window tabbar tab {
+  min-width: 140px;
+  border-radius: 6px 6px 0px 0px;
+}
+
+.nautilus-window tabbar tab:selected {
+  background: var(--win11-tab-active);
+}
+
+.nautilus-window tabbar tab:hover:not(:selected) {
+  background: var(--win11-subtle-hover);
+}
+
+/* Explorer dims the titles of inactive tabs */
+.nautilus-window tabbar tab:not(:selected) {
+  color: var(--win11-text-secondary);
+}
+
+/* "+" New Tab button in the tab strip */
+.nautilus-window tabbar button {
+  background: none;
+  box-shadow: none;
+  border-radius: 4px;
+  min-width: 28px;
+  min-height: 28px;
+  margin: 2px;
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+.nautilus-window tabbar button:hover {
+  background: var(--win11-subtle-hover);
+}
+
+.nautilus-window tabbar button:active {
+  background: var(--win11-subtle-pressed);
+}
+
+/* Rounded window, Fluent-like */
+.nautilus-window {
+  border-radius: 8px;
+}
+
+/* Sidebar rows: icon + label like the Windows navigation pane. The row content
+ * is nested inside the template's revealer, not a direct child of the row. */
+.nautilus-window .navigation-sidebar > row > revealer > box {
+  padding: 6px 8px;
+  border-radius: 5px;
+}
+
+.nautilus-window .navigation-sidebar > row image {
+  -gtk-icon-size: 24px;
+  opacity: 0.9;
+}
+
+.nautilus-window .navigation-sidebar > row label {
+  font-size: 15px;
+}
+
+/* Flyouts (context menus, app menu, view options): Fluent menus are slightly
+ * rounded, translucent, with a hairline border and a soft ambient shadow. */
+popover > contents,
+popover > arrow {
+  background-color: var(--win11-popover-bg);
+  color: var(--view-fg-color, var(--win11-text));
+  border: 1px solid var(--win11-popover-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.16), 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+popover > contents {
+  padding: 4px;
+}
+
+/* Menu items */
+popover.menu modelbutton,
+popover.menu button.model {
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 5px;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+popover.menu modelbutton:hover,
+popover.menu modelbutton:selected,
+popover.menu button.model:hover,
+popover.menu button.model:selected {
+  background-color: var(--win11-subtle-hover);
+}
+
+popover.menu modelbutton:active,
+popover.menu button.model:active {
+  background-color: var(--win11-subtle-pressed);
+}
+
+popover.menu separator {
+  background-color: var(--win11-divider);
+  min-height: 1px;
+  margin: 4px 2px;
+}
+
+/* Fluent scrollbars: a thin rounded thumb on a transparent track. */
+scrollbar > range > trough > slider {
+  background-color: var(--win11-scroll-thumb);
+}
+
+scrollbar > range > trough > slider:hover {
+  background-color: var(--win11-scroll-thumb-hover);
+}
+
+scrollbar > range > trough > slider:active {
+  background-color: var(--win11-accent);
+}
+
+
+
+/* ==========================================================================
+ * Windows 11-style Home dashboard (home:///)
+ * ========================================================================== */
+
+.nautilus-home-view .home-content {
+  padding: 28px 32px 44px;
+}
+
+.nautilus-home-view .home-greeting {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+.nautilus-home-view .home-date {
+  font-size: 13px;
+  color: var(--win11-text-secondary);
+}
+
+.nautilus-home-view .home-clock {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--win11-text-secondary);
+  font-feature-settings: "tnum";
+}
+
+.nautilus-home-view .home-section-badge {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: 6px;
+  background-image: linear-gradient(135deg, var(--win11-accent), #7ab8ff);
+  color: #ffffff;
+}
+
+.nautilus-home-view .home-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--win11-text-secondary);
+}
+
+.nautilus-home-view .home-section-count {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--win11-text-secondary);
+  background-color: var(--win11-subtle-hover);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+/* Quick Access cards */
+.nautilus-home-view .home-card {
+  background-color: var(--win11-control-fill);
+  border: 1px solid var(--win11-control-stroke);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-height: 44px;
+}
+
+.nautilus-home-view .home-card:hover {
+  background-color: var(--win11-control-fill-hover);
+}
+
+.nautilus-home-view .home-card:active {
+  background-color: var(--win11-control-fill-pressed);
+}
+
+/* Quick Access folder tiles: a 42px rounded square holding a 22px glyph. */
+.nautilus-home-view .home-card-icon {
+  min-width: 42px;
+  min-height: 42px;
+  border-radius: 11px;
+  background-color: var(--win11-subtle-hover);
+  border: 1px solid var(--win11-control-stroke);
+}
+
+/* Storage rows: a smaller 32px tile holding an 18px glyph, so drives sit on a
+ * lighter visual weight than the Quick Access folders. */
+.nautilus-home-view .home-storage-icon {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 8px;
+  background-color: var(--win11-subtle-hover);
+  border: 1px solid var(--win11-control-stroke);
+}
+
+/* Recent rows: a transparent 32px slot so file icons align with the text and
+ * match the Storage glyph scale without adding another coloured block. */
+.nautilus-home-view .home-recent-icon {
+  min-width: 32px;
+  min-height: 32px;
+}
+
+.nautilus-home-view .home-card-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+/* Storage */
+.nautilus-home-view .home-storage-item {
+  background-color: var(--win11-control-fill);
+  border: 1px solid var(--win11-control-stroke);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.nautilus-home-view .home-storage-item:hover {
+  background-color: var(--win11-control-fill-hover);
+}
+
+.nautilus-home-view .home-storage-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+.nautilus-home-view .home-storage-detail {
+  font-size: 11px;
+  color: var(--win11-text-secondary);
+}
+
+.nautilus-home-view .home-storage-percent {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--win11-text-secondary);
+  font-feature-settings: "tnum";
+}
+
+.levelbar.home-storage-bar {
+  min-height: 5px;
+}
+
+.levelbar.home-storage-bar trough {
+  min-height: 5px;
+  border-radius: 3px;
+  background-color: var(--win11-subtle-pressed);
+}
+
+.levelbar.home-storage-bar block.filled {
+  min-height: 5px;
+  border-radius: 3px;
+  background-color: var(--win11-accent);
+}
+
+.levelbar.home-storage-bar.warning block.filled {
+  background-color: #f59e0b;
+}
+
+.levelbar.home-storage-bar.critical block.filled {
+  background-color: #ef4444;
+}
+
+/* Recent Files */
+.nautilus-home-view .home-recent-item {
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+.nautilus-home-view .home-recent-item:hover {
+  background-color: var(--win11-subtle-hover);
+}
+
+.nautilus-home-view .home-recent-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--view-fg-color, var(--win11-text));
+}
+
+.nautilus-home-view .home-recent-detail {
+  font-size: 11px;
+  color: var(--win11-text-secondary);
+}
+
+.nautilus-home-view .home-recent-size {
+  font-size: 11px;
+  color: var(--win11-text-secondary);
+  font-feature-settings: "tnum";
+}
+
+/* Quick Access card internals: a flat main button plus an unpin control that
+ * only shows up while hovering the card. */
+.nautilus-home-view .home-card-main {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  min-height: 0;
+}
+
+.nautilus-home-view .home-card-main:hover,
+.nautilus-home-view .home-card-main:active {
+  background: none;
+}
+
+.nautilus-home-view .home-card-unpin {
+  background: none;
+  border: none;
+  box-shadow: none;
+  min-height: 24px;
+  min-width: 24px;
+  padding: 2px;
+  border-radius: 5px;
+  color: var(--win11-text-secondary);
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.nautilus-home-view .home-card:hover .home-card-unpin {
+  opacity: 1;
+}
+
+.nautilus-home-view .home-card-unpin:hover {
+  background-color: var(--win11-subtle-hover);
+  color: var(--view-fg-color, var(--win11-text));
+}

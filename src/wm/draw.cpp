@@ -1043,19 +1043,6 @@ void Manager::drawTaskbar() {
                          theme::kTaskbarSaturate);
     }
 
-    // A soft accent bloom behind a button. Concentric rounded rects of the same
-    // hue at falling alpha stack into a halo that reads as a blur without needing
-    // a blur pass: the inner layers overlap and accumulate, the outer ones thin
-    // out to nothing.
-    const auto bloom = [&](const Rect& r, double amount, float radius) {
-        if (amount <= 0.01) return;
-        constexpr int kLayers = 4;
-        for (int k = 0; k < kLayers; ++k) {
-            const float a = 0.08f * float(amount) * (1.0f - float(k) / float(kLayers));
-            comp.drawRect(r.inflated(2 + k), radius + float(k), theme::kTaskGlow, a);
-        }
-    };
-
     // Windows 11 lifts and slightly enlarges the icon under the cursor rather than
     // only washing the button, and that motion is most of what makes the bar feel
     // alive. A focused app keeps a little of the lift so it stays findable.
@@ -1125,14 +1112,9 @@ void Manager::drawTaskbar() {
                             it.rect.y + (it.rect.h - side) / 2 - int(std::lround(pinDragLift * 2)),
                             side, side};
             }
-            // Only the focused app gets a backplate; hovering leaves the bar bare
-            // and lets the enlarged icon do the talking.
-            bloom(it.rect.moved(shift, 0), (active ? 0.45 : 0.0) * appear, 4.f);
-            if (active) {
-                comp.drawRect(Rect{it.rect.x + 2 + shift, it.rect.y + 2, it.rect.w - 4,
-                                   it.rect.h - 4},
-                              4.f, theme::kTaskActivePlate, float(appear));
-            }
+            // No backplate or glow behind the icon: the pill and dot under the
+            // button are the whole focus cue, the way Windows 11 keeps the button
+            // itself flat.
             if (!drawAppIcon(area, app.icon, app.wmClass, 5.f, float(appear))) {
                 drawAppTile(area, app.name, 5.f, tileTint(app.name), false);
             }
@@ -1150,14 +1132,8 @@ void Manager::drawTaskbar() {
             const Rect iconArea{it.rect.x + (it.rect.w - side) / 2 + shift,
                                 it.rect.y + (it.rect.h - side) / 2 - int(std::lround(g)) - up,
                                 side, side};
-            // The same accent bloom as a pinned button, then the active plate. No
-            // hover wash: the icon's own growth is the whole hover response.
-            bloom(it.rect.moved(shift, 0), (active ? 0.45 : 0.0) * appear, 4.f);
-            if (active) {
-                comp.drawRect(Rect{it.rect.x + 2 + shift, it.rect.y + 2, it.rect.w - 4,
-                                   it.rect.h - 4},
-                              4.f, theme::kTaskActivePlate, float(appear));
-            }
+            // No backplate or glow on the focused button: the pill and dot carry the
+            // state, and the icon's own lift is the whole hover response.
             if (w->iconTex && w->iconW > 0) {
                 comp.drawTex(w->iconTex, iconArea, 4.f, Color{1.f, 1.f, 1.f, 1.f},
                              float(appear), true, true);
@@ -1166,23 +1142,28 @@ void Manager::drawTaskbar() {
             }
         }
 
-        // The running/active pill on the bottom edge of the button. Its width is
-        // animated (see tickFluidMotion), so it breathes between the short "running
-        // but not focused" bar and the long focused one. A pinned launcher that is
-        // not running shows no pill at all, the way Windows 11 does.
+        // The running indicator on the bottom edge of the button. The focused app
+        // gets a wide, accent pill; every other running window -- including a
+        // minimized one -- gets a small dot. A pinned launcher that is not running
+        // shows nothing at all, the way Windows 11 does.
         const double pw = i < taskPill.size() ? taskPill[i] : 0.0;
         if (pw > 0.01 && appear > 0.01) {
-            const int wide = 18, narrow = 7;
-            const int iw = std::max(2, int(std::lround(narrow + (wide - narrow) * pw)));
-            const int ph = active ? 4 : 3;
-            const Color ic = active ? theme::kAccent
-                                    : mixColor(theme::kTextDim, theme::kTextMuted, float(g));
-            const Rect pill{it.rect.x + (it.rect.w - iw) / 2 + shift,
-                            bar.bottom() - 6 - int(std::lround(press * 1.5)), iw, ph};
-            // A short, faint copy underneath is enough to read as a glow, which is
-            // what makes the focused app's indicator look lit rather than painted.
-            if (active) comp.drawRect(pill.inflated(2), float(ph) * 0.5f + 2.f, ic, 0.22f);
-            comp.drawRect(pill, float(ph) * 0.5f, ic, float(appear));
+            const int cxx = it.rect.x + it.rect.w / 2 + shift;
+            const int by = bar.bottom() - 6 - int(std::lround(press * 1.5));
+            if (active) {
+                const int iw = 16, ph = 4;
+                const Rect pill{cxx - iw / 2, by, iw, ph};
+                const Color ic = theme::kAccent;
+                // A short, faint copy underneath is enough to read as a glow, which is
+                // what makes the focused app's indicator look lit rather than painted.
+                comp.drawRect(pill.inflated(2), float(ph) * 0.5f + 2.f, ic, 0.22f);
+                comp.drawRect(pill, float(ph) * 0.5f, ic, float(appear));
+            } else {
+                const int ds = 6;
+                const Rect dot{cxx - ds / 2, by + 1, ds, ds};
+                const Color ic = mixColor(theme::kTextDim, theme::kTextMuted, float(g));
+                comp.drawRect(dot, float(ds) * 0.5f, ic, float(appear));
+            }
         }
         (void)running;
     }

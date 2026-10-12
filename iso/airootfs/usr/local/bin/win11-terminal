@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Launch terminal - prefer kitty, fallback to xterm
+if [ -x /usr/bin/kitty ]; then
+    exec /usr/bin/kitty "$@"
+fi
+if [ -x /usr/bin/gnome-terminal ]; then
+    exec /usr/bin/gnome-terminal "$@"
+fi
+exec /usr/bin/xterm "$@"

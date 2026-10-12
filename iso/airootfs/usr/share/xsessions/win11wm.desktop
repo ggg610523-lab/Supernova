@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=win11wm
+Comment=win11wm Windows 11 style compositor
+Exec=/usr/local/bin/win11-session
+TryExec=/usr/local/bin/win11-session
+Type=Application
+DesktopNames=win11wm

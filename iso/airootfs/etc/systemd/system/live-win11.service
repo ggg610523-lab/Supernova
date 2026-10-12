@@ -1,0 +1,16 @@
+[Unit]
+Description=win11wm live session autostart
+After=systemd-user-sessions.service
+
+[Service]
+User=liveuser
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/liveuser/.Xauthority
+WorkingDirectory=/home/liveuser
+ExecStartPre=/bin/mkdir -p /home/liveuser
+ExecStart=/bin/bash -c "startx /usr/local/bin/win11-session -- :0 vt1"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
