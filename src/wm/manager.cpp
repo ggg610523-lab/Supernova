@@ -1864,7 +1864,9 @@ void Manager::unpinApp(const std::string& exec) {
 
 // A pin launches its app only when there is nothing to focus, so a second click
 // on a running app keeps the ordinary minimise/restore behaviour of a window
-// button rather than starting a second copy.
+// button rather than starting a second copy. A cold launch grows the launch
+// placeholder out of the pin's own button, exactly as a desktop icon does, so
+// the app's window seems to open the moment the button is clicked.
 void Manager::activatePinned(int index) {
     if (index < 0 || index >= int(pinned.size())) return;
     const AppEntry app = pinned[size_t(index)];
@@ -1873,6 +1875,23 @@ void Manager::activatePinned(int index) {
         return;
     }
     noteRecent(app.name, app.exec, app.icon, app.wmClass);
+    Rect from{};
+    for (size_t i = 0; i < taskItems.size(); ++i) {
+        if (taskItems[i].pin == index) {
+            from = taskHitRect(i);
+            break;
+        }
+    }
+    if (from.w < 8 || from.h < 8) {
+        const int side = metrics::taskIconSize();
+        from = Rect{screenW / 2 - side / 2, screenH - metrics::taskbarH, side, side};
+    }
+    DesktopItem item;
+    item.name = app.name.empty() ? app.exec : app.name;
+    item.icon = app.icon;
+    item.exec = app.exec;
+    item.path = app.exec;
+    beginLaunchAnim(item, from);
     launchApp(app.exec);
 }
 

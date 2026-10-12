@@ -558,8 +558,10 @@ void Manager::tickLaunches(double now, double dtMs) {
     }
 }
 
-// The placeholder tile: a Fluent glass frame with the app's icon in it, painted
-// above the windows so it reads as "the app is opening".
+// The placeholder reads as a freshly opened blank window: a real frame with a
+// Mica caption and the three Windows 11 controls, so the launch feels answered
+// before the app has mapped its first pixel. The app's own icon and name sit
+// centred in the body, exactly where a brand new window lands on the desktop.
 void Manager::drawLaunches() {
     if (launches.empty()) return;
     const double now = nowMs();
@@ -569,19 +571,30 @@ void Manager::drawLaunches() {
         if (opacity <= 0.01) continue;
         const Rect r = a.rect;
         if (r.w < 8 || r.h < 8) continue;
-        const float rad = std::min(float(metrics::kRadius) + 6.f, std::min(r.w, r.h) * 0.22f);
-        comp.drawAcrylic(r, rad, theme::kShellTint, 0.86f, theme::kShellBorder, float(opacity));
-        // The app's own icon, sized to the tile: it starts exactly where the
-        // desktop icon was and ends as a large app glyph, exactly like iOS.
-        const int side = std::max(24, int(std::min(r.w, r.h) * 0.42));
-        const Rect box{r.x + (r.w - side) / 2, r.y + (r.h - side) / 2 - side / 8, side, side};
+
+        const int capH =
+            std::max(0, int(std::min(double(metrics::kCaptionH), r.h * 0.20)));
+        WindowSprite s;
+        s.frame = r;
+        s.captionH = capH;
+        s.radius = float(std::min(metrics::kRadius, std::min(r.w, r.h) / 5));
+        s.focused = true;
+        s.opacity = float(opacity);
+        comp.drawWindow(s);
+
+        const Rect body{r.x, r.y + capH, r.w, r.h - capH};
+        if (body.w < 16 || body.h < 16) continue;
+        const float rad = float(std::min(metrics::kRadius, std::min(body.w, body.h) / 5));
+        const int side = std::max(24, int(std::min(body.w, body.h) * 0.42));
+        const Rect box{body.x + (body.w - side) / 2,
+                       body.y + std::max(0, (body.h - side) / 2 - side / 8), side, side};
         if (!drawAppIcon(box, a.icon, std::string(), rad * 0.6f, float(opacity)) &&
             !drawAppIcon(box, a.name, std::string(), rad * 0.6f, float(opacity))) {
             drawAppTile(box, a.name, rad * 0.6f, tileTint(a.name), false);
         }
-        const std::string label = ellipsize(text, a.name, 15, std::max(40, r.w - 48));
+        const std::string label = ellipsize(text, a.name, 15, std::max(40, body.w - 48));
         drawTextCentered(label, 15, Weight::Medium, theme::kText,
-                         Rect{r.x, box.bottom() + 14, r.w, 24});
+                         Rect{body.x, box.bottom() + 14, body.w, 24});
     }
 }
 

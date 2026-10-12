@@ -96,6 +96,10 @@ struct _NautilusApplication
     NautilusDBusLauncher *dbus_launcher;
 
     guint dbus_location_update_timeout_id;
+
+    /* Watches win11wm's theme-mode file so the window follows the shell's
+     * light/dark toggle instead of the desktop colour-scheme portal. */
+    GFileMonitor *win11wm_theme_monitor;
 };
 
 G_DEFINE_FINAL_TYPE (NautilusApplication, nautilus_application, ADW_TYPE_APPLICATION)
@@ -409,6 +413,8 @@ nautilus_application_finalize (GObject *object)
     g_clear_object (&self->mount_monitor);
 
     g_clear_object (&self->dbus_launcher);
+
+    g_clear_object (&self->win11wm_theme_monitor);
 
     nautilus_trash_monitor_clear ();
 
@@ -953,6 +959,79 @@ nautilus_application_identify_to_portal (GApplication *app)
                             NULL, NULL, NULL);
 }
 
+/* win11wm records its light/dark choice as the first token of
+ * $XDG_CONFIG_HOME/win11wm/theme-mode (else ~/.config/win11wm/theme-mode).
+ * GTK would normally take light/dark from the desktop colour-scheme portal, but
+ * win11wm runs as its own shell and the Windows 11 caption/command chrome must
+ * match it, so force the style manager to the shell's choice. */
+static void
+nautilus_application_apply_win11wm_theme (void)
+{
+    g_autofree gchar *path = g_build_filename (g_get_user_config_dir (),
+                                               "win11wm", "theme-mode", NULL);
+    g_autofree gchar *contents = NULL;
+    AdwStyleManager *style_manager = adw_style_manager_get_default ();
+
+    if (g_file_get_contents (path, &contents, NULL, NULL))
+    {
+        g_strstrip (contents);
+        if (g_strcmp0 (contents, "light") == 0)
+        {
+            adw_style_manager_set_color_scheme (style_manager,
+                                                ADW_COLOR_SCHEME_FORCE_LIGHT);
+            return;
+        }
+        if (g_strcmp0 (contents, "dark") == 0)
+        {
+            adw_style_manager_set_color_scheme (style_manager,
+                                                ADW_COLOR_SCHEME_FORCE_DARK);
+            return;
+        }
+    }
+
+    /* No win11wm preference available: fall back to the desktop scheme. */
+    adw_style_manager_set_color_scheme (style_manager, ADW_COLOR_SCHEME_DEFAULT);
+}
+
+static void
+on_win11wm_theme_changed (GFileMonitor      *monitor,
+                          GFile             *file,
+                          GFile             *other_file,
+                          GFileMonitorEvent  event,
+                          gpointer           user_data)
+{
+    g_autofree gchar *name = g_file_get_basename (file);
+
+    /* win11wm writes atomically (temp file + rename), so accept every event
+     * whose name is ours rather than just CHANGED/CHANGES_DONE. */
+    if (g_strcmp0 (name, "theme-mode") == 0)
+    {
+        nautilus_application_apply_win11wm_theme ();
+    }
+}
+
+/* Apply win11wm's choice now and follow it for the rest of the session. The
+ * directory is monitored (not the file) because the atomic rename replaces the
+ * file's inode, which would stop a file monitor from ever firing again. */
+static void
+nautilus_application_setup_win11wm_theme (NautilusApplication *self)
+{
+    nautilus_application_apply_win11wm_theme ();
+
+    g_autofree gchar *dir_path = g_build_filename (g_get_user_config_dir (),
+                                                   "win11wm", NULL);
+    g_autoptr (GFile) dir = g_file_new_for_path (dir_path);
+
+    self->win11wm_theme_monitor = g_file_monitor_directory (dir,
+                                                           G_FILE_MONITOR_NONE,
+                                                           NULL, NULL);
+    if (self->win11wm_theme_monitor != NULL)
+    {
+        g_signal_connect (self->win11wm_theme_monitor, "changed",
+                          G_CALLBACK (on_win11wm_theme_changed), self);
+    }
+}
+
 static void
 nautilus_application_startup (GApplication *app)
 {
@@ -1046,6 +1125,8 @@ nautilus_application_startup (GApplication *app)
                                  G_CALLBACK (icon_theme_changed_callback),
                                  NULL, 0);
     }
+
+    nautilus_application_setup_win11wm_theme (self);
 }
 
 static gboolean
