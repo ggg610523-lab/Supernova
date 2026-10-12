@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKDIR=/tmp/archiso-build
+WORKDIR=/var/tmp/archiso-build
 OUTDIR="$ROOT/out"
 PROFILE="$ROOT/iso"
 

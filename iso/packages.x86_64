@@ -1,6 +1,6 @@
 # ---- base system ----
 base
-linux
+linux71
 linux-firmware
 amd-ucode
 intel-ucode
@@ -86,4 +86,3 @@ pciutils
 zsh
 bash-completion
 calamares
-calamares-extensions
