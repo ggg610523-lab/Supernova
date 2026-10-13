@@ -19,5 +19,7 @@ if [ -x /usr/bin/dbus-launch ]; then
     eval "$(dbus-launch --exit-with-session --sh-syntax)"
 fi
 
-# use the bundled session (our own WM) - fullscreen by default for ISO
-exec /opt/win11wm/win11wm -f "$@"
+# use the bundled session (our own WM). win11wm fills the X root by itself and
+# takes no fullscreen flag; only pass through caller args. Scrub any inherited
+# Wayland vars so spawned X11 clients talk to this server, not a host compositor.
+exec env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE /opt/win11wm/win11wm "$@"

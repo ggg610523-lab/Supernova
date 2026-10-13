@@ -20,6 +20,7 @@ file_permissions=(
   ["/root/.automated_script.sh"]="0:0:755"
   ["/root/.gnupg"]="0:0:700"
   ["/etc/sudoers.d/liveuser"]="0:0:440"
+  ["/opt/win11wm/win11wm"]="0:0:755"
   ["/usr/local/bin/win11-session"]="0:0:755"
   ["/usr/local/bin/win11-files"]="0:0:755"
   ["/usr/local/bin/win11-terminal"]="0:0:755"
