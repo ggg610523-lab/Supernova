@@ -2,6 +2,10 @@
 build/
 cmake-build-*/
 
+# ISO build output
+out/
+*.iso
+
 # generated asset bookkeeping
 assets/.stamp
 # Hatter PNG renders written by scripts/fetch-assets.sh (the app icon theme)
