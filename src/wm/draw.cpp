@@ -803,7 +803,12 @@ void Manager::drawClientSprite(Client* c) {
             const int icon = metrics::taskIconSize();
             genieIcon = Rect{screenW / 2 - icon / 2, screenH - metrics::taskbarH, icon, icon};
             for (const TaskItem& it : taskItems) {
-                if (it.client != c) continue;
+                // The button may be a window's own, or a pinned launcher that
+                // stands for it.
+                Client* owner = it.client;
+                if (!owner && it.pin >= 0 && it.pin < int(pinned.size()))
+                    owner = clientForPinned(pinned[size_t(it.pin)]);
+                if (owner != c) continue;
                 genieIcon = Rect{it.rect.x + (it.rect.w - icon) / 2,
                                  it.rect.y + (it.rect.h - icon) / 2, icon, icon};
                 break;
@@ -891,6 +896,22 @@ void Manager::layoutTaskbar() {
         if (c->closing) continue;
         visible.push_back(c);
     }
+    // A pinned launcher already stands for the running window of its app: it shows
+    // the running indicator and a click focuses that window (activatePinned). That
+    // window must therefore not get a button of its own, or a pinned, running app
+    // shows up twice in the bar. Only the topmost window of each pinned app is
+    // claimed -- extra windows of the same app keep their own buttons so they stay
+    // reachable from the bar.
+    std::vector<Client*> claimed;
+    for (const AppEntry& app : pinned) {
+        if (Client* c = clientForPinned(app)) claimed.push_back(c);
+    }
+    visible.erase(std::remove_if(visible.begin(), visible.end(),
+                                 [&](Client* c) {
+                                     return std::find(claimed.begin(), claimed.end(), c) !=
+                                            claimed.end();
+                                 }),
+                  visible.end());
     const int count = int(visible.size());
     const int buttons = count + int(pinned.size());
     const int total = buttons * w + (buttons > 1 ? (buttons - 1) * gap : 0);

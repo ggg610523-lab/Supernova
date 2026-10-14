@@ -2254,7 +2254,15 @@ void Manager::reflowWorkAreaWindows() {
 void Manager::cycleTaskbar(bool backward) {
     std::vector<Client*> buttons;
     for (const TaskItem& it : taskItems) {
-        if (it.client) buttons.push_back(it.client);
+        if (it.client) {
+            buttons.push_back(it.client);
+            continue;
+        }
+        // A pinned launcher stands in for its running window, which no longer has
+        // a button of its own, so it takes part in the wheel walk here.
+        if (it.pin >= 0 && it.pin < int(pinned.size())) {
+            if (Client* c = clientForPinned(pinned[size_t(it.pin)])) buttons.push_back(c);
+        }
     }
     const int n = int(buttons.size());
     if (n == 0) return;

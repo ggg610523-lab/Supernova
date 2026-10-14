@@ -605,24 +605,24 @@ void Manager::onMotion(XMotionEvent& ev) {
     // a search narrows the list, so the list cannot be slid out from under the
     // query.
     if (startOpen && launchPressArmed) {
-        if (!launchSwipe) {
+        if (!launchSwipe && !launchDragMoving) {
             const int dx = x - launchSwipeStartX;
             const int dy = y - launchSwipeStartY;
-            if (std::abs(dx) > metrics::kLaunchSwipeSlop && std::abs(dx) > std::abs(dy) &&
-                searchText.empty() && startPageCount > 1) {
+            const bool pastSlop =
+                dx * dx + dy * dy >= double(metrics::kLaunchSwipeSlop) *
+                                        double(metrics::kLaunchSwipeSlop);
+            if (launchPressTile >= 0) {
+                // The press came down on a tile, so a drag is a reorder -- in any
+                // direction. Pages are turned with the wheel, the page dots or a
+                // swipe on the bare backdrop, so a horizontal drag over an icon
+                // rearranges it instead of sliding the page out from under it.
+                if (pastSlop) beginLaunchTileDrag(launchPressTile, x, y);
+            } else if (std::abs(dx) > metrics::kLaunchSwipeSlop && std::abs(dx) > std::abs(dy) &&
+                       searchText.empty() && startPageCount > 1) {
+                // A press on the backdrop turns the page.
                 launchSwipe = true;
                 launchSwipeFrom = startPage;
                 launchPageOffset = double(startPage);
-                // The gesture has claimed the press, so the tile it started on
-                // is no longer a click waiting to happen.
-                launchPressTile = -1;
-            } else if (!launchDragMoving && dx * dx + dy * dy >=
-                       double(metrics::kLaunchSwipeSlop) *
-                           double(metrics::kLaunchSwipeSlop)) {
-                // Past the slop without turning into a page turn: whatever tile
-                // the press came down on lifts out and starts a reorder, the way
-                // the desktop icons lift out of the grid.
-                if (launchPressTile >= 0) beginLaunchTileDrag(launchPressTile, x, y);
             }
         }
         if (launchSwipe) {
@@ -1654,7 +1654,8 @@ void Manager::updateLaunchTileDrag(int x, int y) {
         // Slide the carried app to the target slot, shifting the page between
         // the two. launchpadOrder is rewritten from the whole filtered list, so
         // the drag rearranges one settled sequence rather than a moving one.
-        const size_t f = size_t(launchDragFrom), t = size_t(target);
+        // The slots are page-local, so lift them into appFiltered's global space.
+        const size_t f = startPageBase + size_t(launchDragFrom), t = startPageBase + size_t(target);
         const int app = appFiltered[f];
         appFiltered.erase(appFiltered.begin() + long(f));
         appFiltered.insert(appFiltered.begin() + long(t), app);
@@ -1702,7 +1703,9 @@ void Manager::endLaunchTileDrag(int x, int y) {
     launchDragMoving = false;
     launchDragTile = -1;
     launchDragFrom = -1;
-    ungrabPointer();
+    // The Launchpad keeps the pointer grab openStartMenu took for as long as it
+    // is up, so the drop must not hand it back: releasing it here would let the
+    // next click leak through to a window sitting under the blurred field.
     dirty = true;
 }
 
