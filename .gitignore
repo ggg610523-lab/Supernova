@@ -13,6 +13,9 @@ assets/icons-hatter/
 # wallpaper transcoded from assets/wallpaper/*.jpg by scripts/fetch-assets.sh
 assets/wallpaper/wallpaper.png
 
+# third-party reference captures (not owned by this project)
+trygalaxy.com/
+
 # editor / OS noise
 *.swp
 *~
