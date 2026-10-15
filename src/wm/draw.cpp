@@ -138,6 +138,24 @@ void Manager::layoutDesktopIcons() {
     const int maxY = std::max(0, screenH - metrics::taskbarH - cellH);
     std::vector<Rect> placed;
     std::vector<bool> isPlaced(desktopItems.size(), false);
+    // A cell is in the way when a widget sits on it or another hand-placed icon
+    // already claimed it. The same test the automatic grid below makes, split out
+    // so a hand-placed icon that lands on top of one can look for a free cell.
+    const auto cellBlocked = [&](const Rect& cell) {
+        for (const Widget& w : widgets)
+            if (cell.inflated(8).intersects(w.rect)) return true;
+        for (const Rect& p : placed)
+            if (cell.inflated(4).intersects(p)) return true;
+        return false;
+    };
+    // The grid slot nearest a point, so a nudged icon starts its search where the
+    // user dropped it rather than back in the top-left corner.
+    const int maxCol = std::max(0, (std::max(0, screenW - marginX) - cellW + gapX) / (cellW + gapX));
+    const auto cellIndexNear = [&](int px, int py) {
+        const int col = std::clamp((px - marginX + (cellW + gapX) / 2) / (cellW + gapX), 0, maxCol);
+        const int row = std::clamp((py - marginY + (cellH + gapY) / 2) / (cellH + gapY), 0, rows - 1);
+        return col * rows + row;
+    };
     for (size_t i = 0; i < desktopItems.size(); ++i) {
         const auto it = desktopIconPlacement.find(desktopItems[i].path);
         if (it == desktopIconPlacement.end()) continue;
@@ -145,8 +163,30 @@ void Manager::layoutDesktopIcons() {
         // lands on screen rather than off in the margin.
         const int px = std::clamp(it->second.x, 0, maxX);
         const int py = std::clamp(it->second.y, 0, maxY);
-        desktopIconRects[i] = Rect{px, py, cellW, cellH};
-        placed.push_back(desktopIconRects[i]);
+        Rect cell{px, py, cellW, cellH};
+        // With no-overlap on, a hand-placed icon that a widget (or another
+        // hand-placed icon) has since moved over is nudged to the nearest free
+        // slot instead of sitting under it. The saved spot is untouched, so
+        // clearing the obstruction later brings the icon straight back.
+        if (desktopNoOverlap && cellBlocked(cell)) {
+            const int base = cellIndexNear(px, py);
+            int chosen = -1;
+            for (int d = 0; d < 4096 && chosen < 0; ++d) {
+                for (const int sign : {1, -1}) {
+                    const int n = base + sign * d;
+                    if (n < 0) continue;
+                    const Rect cand = cellAt(n);
+                    if (cand.x > maxX || cand.y > maxY) continue;
+                    if (!cellBlocked(cand)) {
+                        chosen = n;
+                        break;
+                    }
+                }
+            }
+            if (chosen >= 0) cell = cellAt(chosen);
+        }
+        desktopIconRects[i] = cell;
+        placed.push_back(cell);
         isPlaced[i] = true;
     }
     // Walk the same top-to-bottom, left-to-right order, but step over any cell a
@@ -762,13 +802,14 @@ void Manager::drawClientSprite(Client* c) {
     // Corner radius override for the tablet zoom, or <0 to use the usual one.
     float radiusOverride = -1.f;
 
-    // iOS 26 zoom transition -- tablet mode only. A tablet window is a rect that
-    // morphs between the home-screen icon it was launched from and the full app
-    // frame, its corners easing from the icon squircle (24% of its edge) to the
-    // window radius as it grows. Opening decelerates out of the icon; closing
-    // and the swipe-up home gesture accelerate back into it and fade, so the
-    // icon underneath is revealed exactly where it left. This deliberately
-    // bypasses the Fluent pop and the magic-lamp warp used on the desktop.
+    // One UI app-open -- tablet mode only. The app morphs out of the home-screen
+    // icon it was launched from: the frame slides and grows from the icon rect to
+    // the full app frame (the launcher's container translate + content grow), and
+    // the corners stay near the icon's squircle until the shape has grown, then
+    // square off. Decelerates out of the icon with power3.out -- the same ease the
+    // Samsung launcher uses -- and the home screen is dimmed behind the whole
+    // thing (see drawTabletHome()). Closing and the swipe-up home gesture run the
+    // same path back into the icon. Desktop mode never takes this path.
     const bool tabletZoom = c->tabletApp && c->tabletFromValid &&
                             (c->appear < 1.0 || c->vanish > 0.0 || c->minFade > 0.0);
     if (tabletZoom) {
@@ -777,12 +818,18 @@ void Manager::drawClientSprite(Client* c) {
         if (opening) p = clamp01(c->appear);
         else if (c->closing && c->vanish > 0.0) p = clamp01(c->vanish);
         else p = clamp01(c->minFade);
-        // 0 = collapsed into the icon, 1 = settled into the app frame.
+        // 0 = collapsed into the icon, 1 = settled into the app frame. Opening
+        // decelerates hard out of the icon (power3.out) and settles softly at the
+        // frame; closing and minimise run back in as p cubed, accelerating into
+        // the icon.
         const double t = opening ? easeOutCubic(p) : 1.0 - p * p * p;
         f = lerpRect(c->tabletFrom, f, t);
         const float iconR = float(c->tabletFrom.w) * metrics::kTabletIconRadius;
-        radiusOverride = iconR + (float(metrics::kRadius) - iconR) * float(t);
-        opacity = opening ? 1.0 : t;
+        // Smoothstep rather than a straight line: under half way this sits *below*
+        // t, so the corners are still closer to the icon than to the window, and
+        // it squares off over the back half only.
+        const double rt = t * t * (3.0 - 2.0 * t);
+        radiusOverride = iconR + (float(metrics::kRadius) - iconR) * float(clamp01(rt));
     } else {
         if (c->appear < 1.0) {
             // Open: grow the last few percent while fading in (Fluent motion). A

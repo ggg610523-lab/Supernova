@@ -77,6 +77,58 @@ Color tabletTint(const std::string& name) {
 
 Color alpha(const Color& c, float a) { return Color{c.r, c.g, c.b, c.a * a}; }
 
+constexpr float kTabletPi = 3.14159265358979323846f;
+
+// The weather pill's sky glyph, drawn from primitives so it needs no icon theme
+// and stays crisp at any pill size: a sun for clear, a sun-behind-cloud for
+// partly cloudy, and a cloud with rain streaks when it is wet.
+void tabletWeatherGlyph(Compositor& comp, int cx, int cy, float s, const std::string& condition,
+                        const Color& ink) {
+    auto circle = [&](float x, float y, float r) {
+        comp.drawRect(Rect{int(std::lround(x - r)), int(std::lround(y - r)),
+                           int(std::lround(2 * r)), int(std::lround(2 * r))},
+                      r, ink);
+    };
+    auto cloud = [&](float x, float y, float cs) {
+        circle(x - cs * 0.22f, y - cs * 0.06f, cs * 0.30f);
+        circle(x + cs * 0.20f, y - cs * 0.02f, cs * 0.24f);
+        comp.drawRect(Rect{int(std::lround(x - cs * 0.55f)), int(std::lround(y + cs * 0.06f)),
+                           int(std::lround(cs * 1.10f)), int(std::lround(cs * 0.34f))},
+                      cs * 0.17f, ink);
+    };
+
+    std::string low = condition;
+    for (char& c : low) c = char(std::tolower((unsigned char)c));
+    const auto has = [&](const char* w) { return low.find(w) != std::string::npos; };
+    const bool wet = has("rain") || has("drizzle") || has("shower") || has("thunder") ||
+                     has("storm") || has("snow") || has("sleet") || has("hail");
+    const bool partly = has("part") || has("few") || has("scattered") || has("breaks");
+    const bool clear = has("clear") || has("sun") || has("fair");
+
+    if (clear) {
+        circle(cx, cy, s * 0.28f);
+        for (int i = 0; i < 8; ++i) {
+            const float a = i * kTabletPi / 4.f;
+            const int px = int(std::lround(cx + std::sin(a) * s * 0.44f));
+            const int py = int(std::lround(cy - std::cos(a) * s * 0.44f));
+            comp.drawRectRotated(px, py, int(std::max(2.f, s * 0.06f)),
+                                 int(std::max(3.f, s * 0.16f)), a, s * 0.03f, ink, 1.f);
+        }
+    } else if (partly) {
+        circle(cx + s * 0.16f, cy - s * 0.20f, s * 0.18f);
+        cloud(cx - s * 0.04f, cy + s * 0.10f, s * 0.86f);
+    } else {
+        cloud(cx, cy - s * 0.04f, s * 0.98f);
+        if (wet) {
+            for (int i = -1; i <= 1; ++i)
+                comp.drawRectRotated(int(std::lround(cx + i * s * 0.24f)),
+                                     int(std::lround(cy + s * 0.34f)),
+                                     int(std::max(2.f, s * 0.05f)), int(std::lround(s * 0.20f)),
+                                     0.35f, s * 0.025f, ink, 1.f);
+        }
+    }
+}
+
 
 }  // namespace
 
@@ -126,6 +178,12 @@ void Manager::applyTabletMode() {
         layoutTabletHome();
     } else {
         tabletEdit = false;
+        // The app drawer belongs to the tablet shell, so it goes with it.
+        tabletDrawer = false;
+        tabletDrawerAnim = 0.0;
+        tabletDrawerSwipe = false;
+        tabletDrawerArmed = false;
+        tabletDrawerPressIndex = -1;
         restoreWidgets();
         // Leaving the mode abandons any half-turned page and keeps the page the user
         // was on, so the home screen comes back the way they left it.
@@ -281,7 +339,14 @@ void Manager::layoutTabletHome() {
     const int cellH = icon + 34;
     const int marginX = std::max(18, screenW / 18);
     const int cols = std::max(3, (screenW - 2 * marginX) / cellW);
-    const int top = tabletStatusRect.bottom() + 24;
+    // --- One UI weather widget ----------------------------------------------
+    // A full-width pill above the grid. It takes a band out of every page's grid
+    // height (rather than only page 0's) so the columns stay aligned through a
+    // page turn; only the pill itself is painted, and only over page 0.
+    tabletWidgetBand = metrics::kTabletWidgetPillH + metrics::kTabletWidgetGap;
+    tabletWidgetRect = Rect{marginX, tabletStatusRect.bottom() + metrics::kTabletWidgetPadY,
+                            screenW - 2 * marginX, metrics::kTabletWidgetPillH};
+    const int top = tabletStatusRect.bottom() + 24 + tabletWidgetBand;
     const int gridBottom = tabletDockRect.empty() ? screenH - 46 : tabletDockRect.y - 18;
 
     // How many rows a page has is what decides how many pages there are, and the
@@ -954,6 +1019,49 @@ void Manager::drawTabletDockPickerView() {
                      alpha(live ? theme::kTabletBadgeGlyph : theme::kTabletStatusSub, a), done);
 }
 
+// The One UI weather pill: a full-width rounded pill on the sky-blue gradient
+// with a square sky glyph at the left, the current temperature in a large weight
+// beside it, and the city and condition under that. Geometry follows the
+// reference pill (76px tall, fully round, ~5.5% inset) from layoutTabletHome().
+void Manager::drawTabletWeatherWidget(float a) {
+    Rect r = tabletWidgetRect;
+    if (r.empty() || r.h < 8 || a <= 0.001f) return;
+    // It belongs to page 0, so it slides with the page and drops out of view once
+    // that page has gone past.
+    r.x += int(std::lround(-tabletPageOffset * double(std::max(1, tabletGridStride))));
+    if (r.right() < 0 || r.x >= screenW) return;
+
+    comp.drawGradient(r, float(r.h) * 0.5f, theme::kTabletWeatherTop, theme::kTabletWeatherBottom,
+                      a);
+
+    const int inset = std::max(14, r.w * 556 / 10000);   // 5.56% of the pill
+    const int glyph = r.h - 2 * (r.h / 8);
+    const int gy = r.y + r.h / 2;
+    tabletWeatherGlyph(comp, r.x + inset + glyph / 2, gy, float(glyph), weatherCondition,
+                       alpha(theme::kTabletWeatherGlyph, a));
+
+    const int textX = r.x + inset + glyph + std::max(10, r.w * 333 / 10000);  // 3.33vw gap
+    const int maxW = std::max(40, r.right() - inset - textX);
+    const int tempPx = clampi(r.h * 45 / 100, 20, 42);
+    const int subPx = clampi(r.h * 22 / 100, 12, 20);
+
+    char tempBuf[16] = {0};
+    std::snprintf(tempBuf, sizeof tempBuf, "%d\u00b0", weatherTemp);
+    const TextTex tt = text.get(tempBuf, tempPx, Weight::Bold);
+    const TextTex st = text.get(tabletFit(text, weatherCity + " \u00b7 " + weatherCondition, subPx,
+                                          maxW),
+                                subPx, Weight::Regular);
+
+    const int blockH = (tt.tex ? tt.h : 0) + ((tt.tex && st.tex) ? 6 : 0) + (st.tex ? st.h : 0);
+    int y = r.y + (r.h - blockH) / 2;
+    if (tt.tex) {
+        comp.drawText(tt, Rect{textX, y, tt.w, tt.h}, alpha(theme::kTabletWeatherInk, a), 1.f);
+        y += tt.h + (st.tex ? 6 : 0);
+    }
+    if (st.tex)
+        comp.drawText(st, Rect{textX, y, st.w, st.h}, alpha(theme::kTabletWeatherSub, a), 1.f);
+}
+
 // One page of the grid, slid sideways by dx. Icons carry their absolute index
 // through the whole file, so a page is a window onto tabletHome rather than a
 // list of its own.
@@ -1056,6 +1164,15 @@ void Manager::drawTabletHome() {
         }
     }
 
+    // --- the One UI weather pill --------------------------------------------
+    // It belongs to page 0, so it travels and fades with that page rather than
+    // staying pinned while the grid turns under it.
+    {
+        const double off = tabletPageOffset;
+        const float wa = a * float(clamp01(1.0 - std::abs(off)));
+        if (wa > 0.001f) drawTabletWeatherWidget(wa);
+    }
+
     // --- dock ---------------------------------------------------------------
     // The page dots, in the strip between the grid and the dock: which page this is
     // out of how many, and a tap on one turns straight to it.
@@ -1064,6 +1181,11 @@ void Manager::drawTabletHome() {
         comp.drawRect(tabletPageDots[i], float(tabletPageDots[i].w) * 0.5f,
                       on ? theme::kTabletLabel : theme::kTabletFolderHover, a);
     }
+
+    // The app drawer, when it is up: a full-screen sheet over the home screen but
+    // under the dock, so the dock floats above it the way One UI's does.
+    if (tabletDrawerAnim > 0.001)
+        drawTabletDrawer(float(clamp01(tabletDrawerAnim)));
 
     // The dock stays up while rearranging, so an icon can be dragged out of the
     // grid into it or lifted back out again.
@@ -1109,6 +1231,29 @@ void Manager::drawTabletHome() {
             if (tabletEdit && i < tabletDockRemoveRects.size())
                 drawTabletDockBadge(tabletDockRemoveRects[i], "x", a, false);
         }
+    }
+
+    // One UI sets the home screen back while an app grows out of its icon (and
+    // again while it collapses back), so the expanding window reads as rising off
+    // the wallpaper rather than simply covering it. The scrim tracks the same
+    // curve the window itself morphs on (see drawClientSprite), and it stays up
+    // while the app is settled so the strips the app does not cover -- the status
+    // bar and the home bar -- do not flash at the end of the open.
+    {
+        double dim = 0.0;
+        for (const auto& cp : clients) {
+            const Client* c = cp.get();
+            if (!c->tabletApp || !c->tabletFromValid) continue;
+            double t;
+            if (c->appear < 1.0) t = easeOutCubic(c->appear);
+            else if (c->closing && c->vanish > 0.0) t = 1.0 - c->vanish * c->vanish * c->vanish;
+            else if (c->minFade > 0.0) t = 1.0 - c->minFade * c->minFade * c->minFade;
+            else t = 1.0;
+            dim = std::max(dim, t);
+        }
+        if (dim > 0.001)
+            comp.drawRect(Rect{0, 0, screenW, screenH}, 0.f, theme::kTabletSplash,
+                          float(0.30 * dim));
     }
 
     // An open folder, then the rename field over it: both belong to the home
@@ -1291,6 +1436,16 @@ void Manager::makeTabletApp(Client* c) {
     // The iOS 26 zoom transition anchors on the icon the app was launched from.
     // `animFrom == frame` keeps drawFrame still; drawClientSprite() morphs the
     // sprite between this rect and the frame on its own.
+    // The One UI / Android 12 splash anchors on the entry the app came from: its
+    // squircle is what is painted over the shape while it grows, so the icon the
+    // user pressed is the icon that turns into the app.
+    if (const TabletEntry* e = tabletEntryFor(c)) {
+        c->tabletIcon = e->icon;
+        c->tabletIconClass = e->wmClass;
+    } else {
+        c->tabletIcon.clear();
+        c->tabletIconClass = c->appName;
+    }
     c->tabletFrom = tabletIconRectFor(c);
     c->tabletFromValid = true;
     c->animFrom = c->frame;
@@ -1331,6 +1486,25 @@ void Manager::drawTabletRunDot(const Rect& box, int jiggle, float a) {
     const Rect dot{box.x + (box.w - d) / 2 + jiggle, box.bottom() + metrics::kTabletRunDotGap,
                    d, d};
     comp.drawRect(dot, float(d) * 0.5f, alpha(theme::kTabletRunDot, a), 1.0f);
+}
+
+// The launcher entry a window belongs to, by the same rule the zoom anchor uses:
+// the grid (or an entry inside a folder on it), then the dock. Null when nothing
+// matches, which is the case the splash answers with the window's letter tile.
+const TabletEntry* Manager::tabletEntryFor(const Client* c) const {
+    if (!c) return nullptr;
+    const auto matches = [&](const TabletEntry& e) { return tabletEntryMatchesClient(e, c); };
+    for (const TabletItem& item : tabletHome) {
+        if (!item.isFolder) {
+            if (matches(item.app)) return &item.app;
+            continue;
+        }
+        for (const TabletEntry& app : item.folder.apps)
+            if (matches(app)) return &app;
+    }
+    for (const TabletEntry& e : tabletDock)
+        if (matches(e)) return &e;
+    return nullptr;
 }
 
 // The home-screen (or dock) icon a window belongs to, matched by the rule above.
@@ -1476,6 +1650,16 @@ bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
         handleOverlayPress(x, y, button, time);
         return true;
     }
+    // The app drawer is modal like the switcher: its grid owns the pointer while it
+    // is up, with the status bar still reaching Control Centre.
+    if (tabletDrawer) {
+        if (button != Button1) return true;
+        if (tabletStatusRect.contains(x, y)) {
+            toggleControlCenter();
+            return true;
+        }
+        return handleTabletDrawerPress(x, y, button);
+    }
     if (button != Button1) return true;  // swallow right/middle clicks
 
     // The page dots turn straight to a page. They are there whether or not the
@@ -1592,6 +1776,12 @@ bool Manager::handleTabletPress(int x, int y, unsigned button, Time time) {
 
 void Manager::handleTabletRelease(int x, int y, unsigned button, Time time) {
     (void)time;
+    // The drawer is modal and its own grid resolves the release: a tap launches,
+    // a swipe pages, a swipe down puts it away.
+    if (tabletDrawer) {
+        handleTabletDrawerRelease(x, y, button);
+        return;
+    }
     // The sheet acts on release, and only on the row the press started on, so
     // sliding off a row before letting go does nothing.
     if (tabletMenu) {
@@ -1632,6 +1822,18 @@ void Manager::handleTabletRelease(int x, int y, unsigned button, Time time) {
         else if (dx >= stride / 3) page = tabletPageSwipeFrom - 1;
         setTabletHomePage(page);
         return;
+    }
+
+    // A swipe up on the wallpaper opens the One UI app drawer. It is the same
+    // armed press as everything else -- what sets it apart is that it travelled
+    // upwards and never landed on an icon, a folder or the dock.
+    if (armed && !dwelled && !dragging && !tabletEdit && item < 0 && dock < 0 && cell < 0) {
+        const int upDx = x - tabletPressPos.x;
+        const int upDy = tabletPressPos.y - y;  // upwards is positive
+        if (upDy > 70 && upDy > std::abs(upDx) * 2) {
+            openTabletDrawer();
+            return;
+        }
     }
 
     // A long press that never travelled was not a drag. The icon it lifted goes back
@@ -1825,7 +2027,7 @@ void Manager::updateTabletGesture(int x, int y) {
     }
     // A clear overshoot opens the switcher immediately; a pause further up is
     // picked up by the dwell check in tickAnimations().
-    if (!tabletGestureSwipe && dy > 230 && !tabletSwitcher) openTabletSwitcher();
+    if (!tabletGestureSwipe && dy > 230 && !tabletSwitcher && !tabletDrawer) openTabletSwitcher();
     dirty = true;
 }
 
@@ -1839,12 +2041,337 @@ void Manager::endTabletGesture() {
         dirty = true;
         return;
     }
+    // The drawer is the home screen's own sheet: a swipe up on the home bar puts
+    // it away rather than going home, so the two gestures do not fight.
+    if (tabletDrawer) {
+        closeTabletDrawer();
+        dirty = true;
+        return;
+    }
     if (tabletGestureSwipe && std::abs(dx) > 60) {
         switchTabletApp(dx > 0 ? -1 : 1);  // drag right reveals the app on the left
     } else if (dy > 30) {
         tabletGoHome();
     }
     dirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// The One UI app drawer
+// ---------------------------------------------------------------------------
+// A full-screen "Apps" screen swiped up from the wallpaper: every tablet app --
+// grid, folder members and dock alike -- gathered into one alphabetical grid,
+// with the One UI search pill above it and the page dots below. It is modal, so
+// its grid owns the pointer while it is up, and it rises from the bottom edge.
+
+// Case-insensitive, so the drawer sorts the way a reader expects regardless of
+// how the .desktop files captialised their names.
+static bool tabletNameLess(const std::string& a, const std::string& b) {
+    const size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char ca = static_cast<unsigned char>(std::tolower(
+            static_cast<unsigned char>(a[i])));
+        const unsigned char cb = static_cast<unsigned char>(std::tolower(
+            static_cast<unsigned char>(b[i])));
+        if (ca != cb) return ca < cb;
+    }
+    return a.size() < b.size();
+}
+
+void Manager::buildTabletDrawerApps() {
+    if (!tabletEntriesBuilt) buildTabletEntries();
+    tabletDrawerApps.clear();
+    tabletDrawerApps.reserve(tabletHome.size() + tabletDock.size());
+    for (const TabletEntry& e : tabletDock) tabletDrawerApps.push_back(e);
+    for (const TabletItem& item : tabletHome) {
+        if (item.isFolder)
+            for (const TabletEntry& e : item.folder.apps) tabletDrawerApps.push_back(e);
+        else
+            tabletDrawerApps.push_back(item.app);
+    }
+    // One UI lists the drawer alphabetically, and so does everyone who reads it.
+    std::stable_sort(tabletDrawerApps.begin(), tabletDrawerApps.end(),
+                     [](const TabletEntry& a, const TabletEntry& b) {
+                         return tabletNameLess(a.name, b.name);
+                     });
+    tabletDrawerPage = 0;
+}
+
+Rect Manager::tabletDrawerCell(int k) const {
+    const int col = k % tabletDrawerCols;
+    const int row = k / tabletDrawerCols;
+    return Rect{tabletDrawerGridX + col * tabletDrawerCellW,
+                tabletDrawerGridTop + row * tabletDrawerCellH,
+                tabletDrawerCellW, tabletDrawerCellH};
+}
+
+void Manager::layoutTabletDrawer() {
+    if (tabletDrawerApps.empty()) buildTabletDrawerApps();
+    tabletDrawerRects.clear();
+    tabletDrawerDots.clear();
+
+    // The search pill spans the width the way the reference does, and the grid is
+    // inset under it; both sit inside the status bar and the dock.
+    const int marginX = std::max(20, screenW / 16);
+    const int searchW = std::min(screenW - 2 * marginX, 760);
+    const int searchY = tabletStatusRect.bottom() + std::max(14, screenH / 22);
+    tabletDrawerSearchRect = Rect{(screenW - searchW) / 2, searchY, searchW,
+                                  metrics::kTabletSearchH};
+
+    // A denser grid than the home screen's: smaller icons, more columns.
+    const int icon = std::clamp(std::min(screenW, screenH) / 14, metrics::kTabletIconMin, 72);
+    tabletDrawerIconSize = icon;
+    const int cellW = icon + icon / 2 + 16;
+    const int cellH = icon + 30;
+    const int cols = std::max(3, (screenW - 2 * marginX) / cellW);
+    tabletDrawerCols = cols;
+    tabletDrawerCellW = cellW;
+    tabletDrawerCellH = cellH;
+    tabletDrawerGridX = (screenW - cols * cellW) / 2;
+    tabletDrawerGridTop = tabletDrawerSearchRect.bottom() + std::max(18, screenH / 26);
+    const int gridBottom = tabletDockRect.empty() ? screenH - 44 : tabletDockRect.y - 14;
+
+    auto rowsFor = [&](int reserved) {
+        return std::max(1, (gridBottom - reserved - tabletDrawerGridTop) / cellH);
+    };
+    int rows = rowsFor(0);
+    const int dotsH =
+        int(tabletDrawerApps.size()) > cols * rows ? metrics::kTabletPageDotsH : 0;
+    if (dotsH) rows = rowsFor(dotsH);
+
+    tabletDrawerPerPage = cols * rows;
+    tabletDrawerPageCount =
+        std::max(1, (int(tabletDrawerApps.size()) + tabletDrawerPerPage - 1) /
+                        tabletDrawerPerPage);
+    tabletDrawerPage = std::clamp(tabletDrawerPage, 0, tabletDrawerPageCount - 1);
+    tabletDrawerFirst = tabletDrawerPage * tabletDrawerPerPage;
+    tabletDrawerStride = cols * cellW + cellW / 2;
+
+    for (int k = 0; k < tabletDrawerPerPage; ++k) {
+        if (tabletDrawerFirst + k >= int(tabletDrawerApps.size())) break;
+        tabletDrawerRects.push_back(tabletDrawerCell(k));
+    }
+
+    if (tabletDrawerPageCount > 1) {
+        const int d = 8, gap = 14;
+        const int totalW = tabletDrawerPageCount * gap - (gap - d);
+        const int dx0 = (screenW - totalW) / 2;
+        const int dy = gridBottom - dotsH + (dotsH - d) / 2;
+        for (int i = 0; i < tabletDrawerPageCount; ++i)
+            tabletDrawerDots.push_back(Rect{dx0 + i * gap, dy, d, d});
+    }
+}
+
+int Manager::tabletDrawerHitTest(int x, int y) const {
+    for (size_t i = 0; i < tabletDrawerRects.size(); ++i)
+        if (tabletDrawerRects[i].contains(x, y)) return tabletDrawerFirst + int(i);
+    return -1;
+}
+
+void Manager::setTabletDrawerPage(int page) {
+    const int clamped = std::clamp(page, 0, tabletDrawerPageCount - 1);
+    if (clamped == tabletDrawerPage) return;
+    tabletDrawerPage = clamped;
+    layoutTabletDrawer();
+    dirty = true;
+}
+
+void Manager::openTabletDrawer() {
+    if (tabletDrawer) return;
+    buildTabletDrawerApps();
+    tabletDrawerPage = 0;
+    tabletDrawerOffset = 0.0;
+    tabletDrawerSwipe = false;
+    tabletDrawerArmed = false;
+    tabletDrawerPressIndex = -1;
+    tabletDrawer = true;
+    layoutTabletDrawer();
+    tabletHover = -1;
+    dirty = true;
+}
+
+void Manager::closeTabletDrawer() {
+    if (!tabletDrawer) return;
+    tabletDrawer = false;
+    tabletDrawerSwipe = false;
+    tabletDrawerArmed = false;
+    tabletDrawerPressIndex = -1;
+    dirty = true;
+}
+
+bool Manager::handleTabletDrawerPress(int x, int y, unsigned button) {
+    if (button != Button1) return true;
+    // The search pill is inert for now -- One UI's search is a screen of its own --
+    // but it still swallows the press so it does not fall through to a cell.
+    tabletDrawerDownX = x;
+    tabletDrawerDownY = y;
+    tabletDrawerArmed = true;
+    tabletDrawerPressIndex = tabletDrawerSearchRect.contains(x, y)
+                                 ? -1
+                                 : tabletDrawerHitTest(x, y);
+    dirty = true;
+    return true;
+}
+
+void Manager::updateTabletDrawerMotion(int x, int y) {
+    if (!tabletDrawerArmed) return;
+    const int dx = x - tabletDrawerDownX;
+    const int dy = y - tabletDrawerDownY;
+    // A sideways drag off a bare part of the sheet turns the page, the same slop
+    // the home screen uses so brushing the sheet does not flick the grid.
+    if (tabletDrawerPressIndex < 0 &&
+        std::abs(dx) > metrics::kTabletSwipeSlop && std::abs(dx) > std::abs(dy)) {
+        if (!tabletDrawerSwipe) {
+            tabletDrawerSwipe = true;
+            tabletDrawerSwipeFrom = tabletDrawerPage;
+        }
+    }
+    if (tabletDrawerSwipe) {
+        const double stride = double(std::max(1, tabletDrawerStride));
+        tabletDrawerOffset = std::clamp(double(tabletDrawerSwipeFrom) - double(dx) / stride,
+                                        -0.35, double(tabletDrawerPageCount - 1) + 0.35);
+        dirty = true;
+    }
+}
+
+void Manager::handleTabletDrawerRelease(int x, int y, unsigned button) {
+    if (button != Button1) {
+        tabletDrawerArmed = false;
+        tabletDrawerPressIndex = -1;
+        return;
+    }
+    const int dx = x - tabletDrawerDownX;
+    const int dy = y - tabletDrawerDownY;
+    const int index = tabletDrawerPressIndex;
+    tabletDrawerArmed = false;
+    tabletDrawerPressIndex = -1;
+
+    if (tabletDrawerSwipe) {
+        tabletDrawerSwipe = false;
+        const int stride = std::max(1, tabletDrawerStride);
+        int page = tabletDrawerSwipeFrom;
+        if (dx <= -stride / 3) page = tabletDrawerSwipeFrom + 1;
+        else if (dx >= stride / 3) page = tabletDrawerSwipeFrom - 1;
+        setTabletDrawerPage(page);
+        return;
+    }
+    // A swipe down puts the drawer away, the way it came up.
+    if (dy > 90 && std::abs(dy) > std::abs(dx)) {
+        closeTabletDrawer();
+        return;
+    }
+    // A tap opens an app and lets the drawer fall away behind it.
+    if (index >= 0 && index < int(tabletDrawerApps.size()) &&
+        std::abs(dx) < 12 && std::abs(dy) < 12) {
+        const TabletEntry e = tabletDrawerApps[size_t(index)];
+        closeTabletDrawer();
+        openTabletEntry(e);
+    }
+    dirty = true;
+}
+
+// The drawer's search glyph: a magnifier, drawn from primitives so it needs no
+// icon theme. It mirrors the reference pill's leading icon.
+static void drawTabletSearchGlyph(Compositor& comp, int cx, int cy, float s, const Color& ink,
+                                  float a) {
+    const float r = s * 0.30f;
+    const float thick = std::max(2.f, s * 0.10f);
+    // A ring with the gap at the lower-right, where the handle meets it.
+    comp.drawArc(cx, cy, r, thick, 2.55f, 8.28f, ink, a);
+    comp.drawRectRotated(int(std::lround(cx + r * 0.86f)), int(std::lround(cy + r * 0.86f)),
+                         int(std::max(2.f, thick)), int(std::lround(r * 1.15f)), -0.785f,
+                         thick * 0.5f, ink, a);
+}
+
+void Manager::drawTabletDrawer(float a) {
+    if (a <= 0.001f) return;
+    // The content rises up from the bottom edge as it opens: what the sheet does
+    // at 0 is off the bottom, at 1 it is where the grid is drawn.
+    const int rise = int(std::lround((1.0 - double(a)) * double(screenH) * 0.18));
+
+    // A dim, frosted backdrop. One UI sits the drawer over a blurred, darkened
+    // wallpaper, so the home icons behind it read as tone rather than as shapes.
+    comp.drawAcrylic(Rect{0, 0, screenW, screenH}, 0.f, theme::kTabletSplash, 0.86f,
+                     theme::kTabletSplash, a);
+
+    // --- search pill --------------------------------------------------------
+    {
+        Rect sr = tabletDrawerSearchRect;
+        sr.y += rise;
+        comp.drawRect(sr, float(metrics::kTabletSearchRadius), theme::kTabletSearch, 0.96f * a);
+        const float glyph = float(sr.h);
+        const int gx = sr.x + sr.h / 2 + 2;
+        const int gy = sr.y + sr.h / 2;
+        drawTabletSearchGlyph(comp, gx, gy, glyph, theme::kTabletSearchIcon, a);
+        const int hintPx = int(sr.h * 0.36f);
+        const TextTex hint = text.get("Search apps", hintPx, Weight::Regular);
+        if (hint.tex)
+            comp.drawText(hint, Rect{sr.x + sr.h + 4, gy - hint.h / 2, hint.w, hint.h},
+                          alpha(theme::kTabletSearchHint, a), a);
+        // The trailing pair from the reference: a microphone and a lens.
+        const int tR = sr.y + sr.h / 2;
+        const int micX = sr.right() - 73;
+        const float micW = glyph * 0.11f, micH = glyph * 0.24f;
+        comp.drawRect(Rect{int(micX - micW / 2), int(tR - micH / 2), int(micW), int(micH)},
+                      micW * 0.5f, theme::kTabletSearchIcon, 0.9f * a);
+        comp.drawArc(micX, int(tR + micH * 0.1f), micW * 0.9f, std::max(2.f, micW * 0.22f),
+                     0.25f, 2.89f, theme::kTabletSearchIcon, a);
+        const int lensX = sr.right() - 18;
+        const float lr = glyph * 0.15f;
+        comp.drawArc(lensX, tR, lr, std::max(2.f, glyph * 0.05f), 0.f, 2.f * kTabletPi - 0.001f,
+                     theme::kTabletSearchIcon, a);
+        comp.drawRect(Rect{int(lensX), int(tR), int(lr * 0.22f), int(lr * 0.22f)}, lr * 0.11f,
+                      theme::kTabletSearchIcon, a);
+    }
+
+    // --- the grid, slid sideways by the page offset -------------------------
+    const int icon = tabletDrawerIconSize;
+    const float radius = float(icon) * metrics::kTabletIconRadius;
+    const double off = tabletDrawerOffset;
+    const int stride = std::max(1, tabletDrawerStride);
+    const int base = int(std::floor(off));
+    const double frac = off - double(base);
+    const int whole = int(std::lround(-frac * stride));
+    auto page = [&](int p, int dx) {
+        if (p < 0 || p >= tabletDrawerPageCount) return;
+        const int first = p * tabletDrawerPerPage;
+        for (int k = 0; k < tabletDrawerPerPage; ++k) {
+            const int index = first + k;
+            if (index >= int(tabletDrawerApps.size())) break;
+            Rect cell = tabletDrawerCell(k);
+            cell.x += dx;
+            cell.y += rise;
+            const Rect box{cell.x + (cell.w - icon) / 2, cell.y, icon, icon};
+            const TabletEntry& e = tabletDrawerApps[size_t(index)];
+            if (!drawAppIcon(box, e.icon, e.wmClass, radius, a))
+                drawAppTile(box, e.name, radius, tabletTint(e.name), false);
+            if (tabletEntryRunning(e)) drawTabletRunDot(box, 0, a);
+            const TextTex t =
+                text.get(tabletFit(text, e.name, metrics::kTabletAppLabelPx, cell.w - 6),
+                         metrics::kTabletAppLabelPx, Weight::Regular);
+            if (!t.tex) continue;
+            comp.drawText(t,
+                          Rect{cell.x + (cell.w - t.w) / 2, box.bottom() + 6, t.w, t.h},
+                          alpha(theme::kTabletLabel, a), a);
+        }
+    };
+    if (tabletDrawerSwipe || std::abs(frac) > 0.001) {
+        page(base, whole);
+        const int entering = frac > 0.0 ? base + 1 : base - 1;
+        const int shift = int(std::lround((frac > 0.0 ? 1.0 - frac : 1.0 + frac) * stride));
+        page(entering, whole + shift);
+    } else {
+        page(base, 0);
+    }
+
+    // --- page dots ----------------------------------------------------------
+    for (size_t i = 0; i < tabletDrawerDots.size(); ++i) {
+        Rect d = tabletDrawerDots[i];
+        d.y += rise;
+        const bool on = int(i) == tabletDrawerPage;
+        comp.drawRect(d, float(d.w) * 0.5f, on ? theme::kTabletLabel : theme::kTabletFolderHover,
+                      a);
+    }
 }
 
 void Manager::switchTabletApp(int dir) {

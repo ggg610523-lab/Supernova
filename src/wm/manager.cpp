@@ -340,6 +340,7 @@ int Manager::run(const Options& options) {
     // them straight where they were rather than in the default column.
     desktopItems = scanDesktop();
     desktopIconPlacement = loadDesktopIconPlacement();
+    desktopNoOverlap = loadDesktopNoOverlap();
     layoutDesktopIcons();
     initWidgets();
     scanExistingWindows();
@@ -349,14 +350,17 @@ int Manager::run(const Options& options) {
     sysctl.init();
 
     // Kiosk / self-test aid: boot straight into the tablet home screen. There is
-    // nothing to transition from at start up, so this skips the splash.
+    // nothing to transition from at start up, so this skips the splash. Reached
+    // either by --tablet or by the WIN11WM_TABLET=1 environment variable.
+    bool bootTablet = options.tablet;
     if (const char* v = std::getenv("WIN11WM_TABLET")) {
-        if (v[0] == '1') {
-            tabletMode = true;
-            tabletAnim = 1.0;
-            applyTabletMode();
-            log("tablet mode: starting on the iOS-like home screen");
-        }
+        if (v[0] == '1') bootTablet = true;
+    }
+    if (bootTablet) {
+        tabletMode = true;
+        tabletAnim = 1.0;
+        applyTabletMode();
+        log("tablet mode: starting on the iOS-like home screen");
     }
 
     // Unified replacement for the old SDL prototype's "--embed prog": the single
@@ -562,12 +566,25 @@ void Manager::tickAnimations(double now) {
     }
     // Cross-fades the home screen (and the taskbar out) around the swap point.
     step(tabletAnim, tabletMode ? 1.0 : 0.0, 300.0);
+    // The app drawer rises and falls, and its grid settles onto a page once a
+    // swipe has let go -- the same page-in-pages offset the home grid uses.
+    step(tabletDrawerAnim, tabletDrawer ? 1.0 : 0.0, 300.0);
+    if (tabletDrawer && !tabletDrawerSwipe && tabletDrawerPageCount > 0) {
+        const double goal = double(tabletDrawerPage);
+        if (std::abs(tabletDrawerOffset - goal) > 0.001) {
+            tabletDrawerOffset += (goal - tabletDrawerOffset) *
+                                  std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+            dirty = true;
+        } else {
+            tabletDrawerOffset = goal;
+        }
+    }
     // Rearrange mode jiggles the icons, so it needs a frame every tick.
     if (tabletEdit && tabletMode) dirty = true;
     // iPhone X home bar: a swipe that pauses on the way up opens the app
     // switcher. No motion event reports the pause (the finger is not moving),
     // so the dwell is detected here.
-    if (tabletGesture && !tabletGestureSwipe && !tabletSwitcher &&
+    if (tabletGesture && !tabletGestureSwipe && !tabletSwitcher && !tabletDrawer &&
         tabletGestureStartY - tabletGestureCurY > 40 &&
         now - tabletGestureLastMove > 320.0) {
         openTabletSwitcher();
@@ -2449,8 +2466,8 @@ void Manager::showContextMenu(Client* c, int x, int y) {
 
 // The desktop's own context menu, reusing the client menu plumbing. Its shape
 // follows what it was opened on: a card offers to be removed, a folder offers to
-// be renamed or deleted, and the create and widget entries are always there.
-// applyContextAction() walks the rows in this same order.
+// be renamed or deleted, and the create, widget and no-overlap entries are
+// always there. applyContextAction() walks the rows in this same order.
 void Manager::openDesktopMenu(int x, int y) {
     contextClient = nullptr;
     contextWidget = widgetAt(x, y);
@@ -2472,6 +2489,9 @@ void Manager::openDesktopMenu(int x, int y) {
     contextItems.push_back("Add Calendar Widget");
     contextItems.push_back("Add Weather Widget");
     contextItems.push_back("Add Digital Clock Widget");
+    // The desktop no-overlap guard, shown as the state it is in so the row both
+    // reports and flips it.
+    contextItems.push_back(desktopNoOverlap ? "Prevent Overlap: On" : "Prevent Overlap: Off");
 
     const int itemH = 32;
     const int width = 210;
@@ -2488,6 +2508,17 @@ void Manager::openDesktopMenu(int x, int y) {
     startOpen = false;
     grabPointer();
     XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    dirty = true;
+}
+
+// Flips the desktop no-overlap option. The desktop is re-laid at once so the
+// change is visible while the menu is still open -- turning it off lets a
+// hand-placed folder that had been nudged aside return to the cell it was left
+// in; turning it on folds the icons that are currently under a widget away.
+void Manager::toggleDesktopNoOverlap() {
+    desktopNoOverlap = !desktopNoOverlap;
+    saveDesktopNoOverlap(desktopNoOverlap);
+    layoutDesktopIcons();
     dirty = true;
 }
 

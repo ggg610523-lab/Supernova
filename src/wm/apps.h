@@ -254,4 +254,13 @@ std::map<std::string, Point> loadDesktopIconPlacement();
 // left. Same atomic write, same "false is never fatal" rule as everything here.
 bool saveDesktopIconPlacement(const std::map<std::string, Point>& placement);
 
+// The desktop no-overlap option: when set, the grid nudges a folder out of a
+// widget's way (and out of another folder's) instead of letting the two stack,
+// and a widget is kept off a folder it would otherwise sit on. Missing or
+// unreadable reads as on, since the option turns the guard off, not on.
+bool loadDesktopNoOverlap();
+
+// Writes that option. False if it could not be stored, which is never fatal.
+bool saveDesktopNoOverlap(bool on);
+
 }  // namespace wm

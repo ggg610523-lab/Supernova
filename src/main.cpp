@@ -34,6 +34,7 @@ void usage(const char* argv0) {
         "  --stats             show a live FPS, frame time and renderer HUD\n"
         "  --perf              like --stats, plus machine-readable PERF lines on stderr\n"
         "  --no-unredirect     keep fullscreen windows inside the compositor\n"
+        "  --tablet            boot straight into the tablet/mobile home screen\n"
         "  -n, --frames N      render N frames then exit (self test)\n"
         "  -e, --exec CMD      launch CMD once the WM is up (repeatable);\n"
         "                      combines with --frames for scripted tests\n"
@@ -97,6 +98,10 @@ int main(int argc, char** argv) {
         }
         if (a == "--no-unredirect") {
             options.unredirect = false;
+            continue;
+        }
+        if (a == "--tablet" || a == "--mobile") {
+            options.tablet = true;
             continue;
         }
         if ((a == "-n" || a == "--frames") && i + 1 < argc) {

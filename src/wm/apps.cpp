@@ -1072,4 +1072,30 @@ bool saveDesktopIconPlacement(const std::map<std::string, Point>& placement) {
     return true;
 }
 
+// Whether the desktop keeps folders and widgets from stacking. Missing or
+// unreadable reads as true: keeping the desktop tidy is the point of the
+// arrangement, and the option exists to switch the guard *off*.
+bool loadDesktopNoOverlap() {
+    const std::string path = configFile("desktop-no-overlap");
+    if (path.empty()) return true;
+    std::ifstream in(path);
+    int v = 1;
+    if (!(in >> v)) return true;
+    return v != 0;
+}
+
+bool saveDesktopNoOverlap(bool on) {
+    const std::string path = configFile("desktop-no-overlap");
+    if (path.empty()) {
+        log("cannot save the desktop overlap option: no XDG_CONFIG_HOME or HOME");
+        return false;
+    }
+    if (!writeFileAtomicImpl(path, std::string(on ? "1\n" : "0\n"))) {
+        log("cannot write the desktop overlap option to %s", path.c_str());
+        return false;
+    }
+    log("saved desktop no-overlap %d to %s", on ? 1 : 0, path.c_str());
+    return true;
+}
+
 }  // namespace wm

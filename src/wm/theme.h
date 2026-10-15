@@ -267,6 +267,20 @@ inline constexpr Color kLaunchHover = rgb(0xFFFFFF, 0.10f);
 inline constexpr Color kLaunchDot = rgb(0xFFFFFF, 0.32f);
 inline constexpr Color kLaunchDotActive = rgb(0xFFFFFF, 0.95f);
 
+// --- One UI home screen (tablet mode) -------------------------------------
+// The widgets and chrome that replace the iOS furniture above while tablet mode
+// is on: a sky-blue weather pill pinned above the app grid, and the white
+// rounded search bar the apps screen puts at the bottom.
+inline constexpr Color kTabletWeatherTop = rgb(0x4C9DFF);      // One UI pill gradient
+inline constexpr Color kTabletWeatherBottom = rgb(0x39C2F2);
+inline constexpr Color kTabletWeatherInk = rgb(0xFFFFFF);
+inline constexpr Color kTabletWeatherSub = rgb(0xFFFFFF, 0.86f);
+inline constexpr Color kTabletWeatherGlyph = rgb(0xFFFFFF);    // the square sky glyph
+inline constexpr Color kTabletSearch = rgb(0xFFFFFF);          // the apps-search pill
+inline constexpr Color kTabletSearchInk = rgb(0x1A1A1F);
+inline constexpr Color kTabletSearchHint = rgb(0x1A1A1F, 0.45f);
+inline constexpr Color kTabletSearchIcon = rgb(0x1A1A1F, 0.62f);
+
 // --- tablet / mobile mode (iOS home screen) -------------------------------
 // A third skin: the iPhone/iPad home screen. White labels and a status bar sit
 // straight on the (blurred) wallpaper, the dock is a heavily translucent glass
@@ -541,12 +555,24 @@ constexpr int kTabletSplashMs = 1100;   // full splash transition
 // The corner factor of a home-screen squircle, shared by the drawn icons and
 // the iOS 26 zoom transition so a window's corners match the icon it grows from.
 constexpr float kTabletIconRadius = 0.24f;
-// Tablet-only app motion (iOS 26): the window zooms out of its home-screen icon
-// when it opens, and collapses back into it when it closes or is sent home.
-// Slightly slower than the Fluent pop because more distance is being covered.
-constexpr int kTabletOpenMs = 340;   // icon -> full app frame
-constexpr int kTabletCloseMs = 300;  // app frame -> icon, on close
-constexpr int kTabletMinMs = 300;    // app frame -> icon, on swipe-up home
+// Tablet-only app motion (One UI). The window morphs out of its home-screen icon
+// when it opens and runs back into it when it closes or is sent home. Durations
+// and easing match Samsung's launcher (gsap: .5s open, .4s close, power3.out).
+constexpr int kTabletOpenMs = 500;   // icon -> full app frame
+constexpr int kTabletCloseMs = 400;  // app frame -> icon, on close
+constexpr int kTabletMinMs = 400;    // app frame -> icon, on swipe-up home
+
+// --- One UI home widgets --------------------------------------------------
+// The weather pill sits above the grid and pushes it down, exactly as the
+// reference does: a full-width 76px pill (radius fully round) with a gap under
+// it before the first row of icons. The app-drawer search bar is the 48px white
+// pill with the 24px radius the reference uses under the grid.
+constexpr int kTabletWidgetPillH = 76;   // weather pill height
+constexpr int kTabletWidgetGap = 18;     // pill -> first icon row
+constexpr int kTabletWidgetPadY = 14;    // status bar -> pill
+constexpr int kTabletSearchH = 48;       // apps-screen search bar height
+constexpr int kTabletSearchRadius = 24;  // its corner radius
+constexpr int kTabletAppLabelPx = 13;    // icon label, as the reference sets it
 
 // --- desktop widgets (iOS 26) ---------------------------------------------
 constexpr int kWidgetRadius = 34;      // squircle corner at the small size

@@ -549,6 +549,12 @@ void Manager::onMotion(XMotionEvent& ev) {
             static_cast<unsigned>(ev.state), dragClient ? " [dragging]" : "");
     }
     if (tabletMode) {
+        // The app drawer owns the pointer while it is up: a sideways drag turns
+        // its pages, a downward drag (resolved on release) puts it away.
+        if (tabletDrawer) {
+            updateTabletDrawerMotion(x, y);
+            return;
+        }
         // Turning a page: a sideways drag that started on bare wallpaper. It only
         // counts as a page turn once it has passed the same slop any other press
         // has to pass, so brushing the wallpaper does not flick the grid.
@@ -608,21 +614,22 @@ void Manager::onMotion(XMotionEvent& ev) {
         if (!launchSwipe && !launchDragMoving) {
             const int dx = x - launchSwipeStartX;
             const int dy = y - launchSwipeStartY;
-            const bool pastSlop =
-                dx * dx + dy * dy >= double(metrics::kLaunchSwipeSlop) *
-                                        double(metrics::kLaunchSwipeSlop);
-            if (launchPressTile >= 0) {
-                // The press came down on a tile, so a drag is a reorder -- in any
-                // direction. Pages are turned with the wheel, the page dots or a
-                // swipe on the bare backdrop, so a horizontal drag over an icon
-                // rearranges it instead of sliding the page out from under it.
-                if (pastSlop) beginLaunchTileDrag(launchPressTile, x, y);
-            } else if (std::abs(dx) > metrics::kLaunchSwipeSlop && std::abs(dx) > std::abs(dy) &&
-                       searchText.empty() && startPageCount > 1) {
-                // A press on the backdrop turns the page.
+            if (std::abs(dx) > metrics::kLaunchSwipeSlop && std::abs(dx) > std::abs(dy) &&
+                searchText.empty() && startPageCount > 1) {
+                // A sideways drag turns the page, wherever the press came down --
+                // an app tile included -- so a tile can never trap the gesture and
+                // the page always slides out from under a swipe. The tile the
+                // press started on is no longer a click waiting to happen.
                 launchSwipe = true;
                 launchSwipeFrom = startPage;
                 launchPageOffset = double(startPage);
+                launchPressTile = -1;
+            } else if (dx * dx + dy * dy >= double(metrics::kLaunchSwipeSlop) *
+                                              double(metrics::kLaunchSwipeSlop)) {
+                // Past the slop without turning into a page turn: the tile the
+                // press came down on lifts out and starts a reorder, exactly as
+                // the desktop icons lift out of the grid.
+                if (launchPressTile >= 0) beginLaunchTileDrag(launchPressTile, x, y);
             }
         }
         if (launchSwipe) {
@@ -744,11 +751,16 @@ void Manager::onKeyPress(XKeyEvent& ev) {
         // Left and right turn the pages of the grid, which is also the only way to
         // reach one without a touchscreen. A rename is modal and keeps them.
         if ((sym == XK_Left || sym == XK_Right) && tabletRenameItem < 0) {
-            setTabletHomePage(tabletHomePage + (sym == XK_Right ? 1 : -1));
+            if (tabletDrawer)
+                setTabletDrawerPage(tabletDrawerPage + (sym == XK_Right ? 1 : -1));
+            else
+                setTabletHomePage(tabletHomePage + (sym == XK_Right ? 1 : -1));
             return;
         }
         if (sym == XK_Escape) {
-            if (tabletMenu) {
+            if (tabletDrawer) {
+                closeTabletDrawer();
+            } else if (tabletMenu) {
                 closeTabletMenu();
             } else if (tabletDockPickerOpen) {
                 closeTabletDockPicker();
@@ -997,9 +1009,10 @@ void Manager::applyContextAction(int index) {
         }
         if (index == row++) addWidget(WidgetKind::Clock);
         else if (index == row++) addWidget(WidgetKind::Battery);
-        else        if (index == row++) addWidget(WidgetKind::Calendar);
+        else if (index == row++) addWidget(WidgetKind::Calendar);
         else if (index == row++) addWidget(WidgetKind::Weather);
-        else if (index == row) addWidget(WidgetKind::DigitalClock);
+        else if (index == row++) addWidget(WidgetKind::DigitalClock);
+        else if (index == row++) toggleDesktopNoOverlap();
         saveDesktopLayout();
         return;
     }

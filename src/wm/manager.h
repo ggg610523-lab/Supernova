@@ -204,6 +204,11 @@ struct Client {
     // minimise. Desktop mode never reads it.
     Rect tabletFrom;
     bool tabletFromValid = false;
+    // One UI / Android 12 splash: the launcher entry this window came from. Its
+    // squircle is painted over the shape while it grows, then cross-fades away to
+    // reveal the content underneath. Desktop mode never reads either.
+    std::string tabletIcon;
+    std::string tabletIconClass;
 };
 
 // Command line options.
@@ -222,6 +227,10 @@ struct Options {
     // Emit a machine-readable "PERF fps=... cpu=... gpu=... draws=..." line on
     // stderr once per sampling window. Used by scripts/bench.sh.
     bool perfLog = false;
+    // Boot straight into the tablet/mobile home screen instead of the Windows 11
+    // desktop. The same as starting with WIN11WM_TABLET=1 -- mobile.sh uses it to
+    // open a phone-sized window already in tablet mode.
+    bool tablet = false;
 };
 
 
@@ -466,6 +475,9 @@ private:
     // The icon under a point, or -1. Tests the cells the user is actually looking
     // at, so a press mid-reflow lands on the icon it visibly hit.
     int desktopItemAt(int x, int y) const;
+    // Flips the desktop no-overlap option, writes it and re-lays the desktop so
+    // the fold is visible at once. The menu row reads the same flag for its label.
+    void toggleDesktopNoOverlap();
 
     // ---- desktop folders (the filesystem work is in apps.cpp)
     // Rebuilds the grid around the desktop directory's current contents. Used
@@ -592,6 +604,10 @@ private:
     // "Folder" when they share nothing.
     static std::string suggestFolderName(const std::vector<TabletEntry>& apps);
     void drawTabletHome();             // wallpaper overlay: icons and dock
+    // One UI pins a full-width weather pill above the grid. It draws itself into
+    // the band layoutTabletHome() reserves, sliding and fading with the page it
+    // belongs to.
+    void drawTabletWeatherWidget(float a);
     void drawTabletFolderView();       // the dimmed backdrop and open folder sheet
     void drawTabletRename();           // the rename field, while one is open
     void drawTabletChrome();           // status bar + home indicator, over the app
@@ -609,7 +625,26 @@ private:
     // home-screen entry that matches it, then the dock, then a spot above the
     // home indicator when it has no icon on the grid.
     Rect tabletIconRectFor(const Client* c) const;
+    // The launcher entry itself, by the same rule: grid (or a folder on it), then
+    // the dock. Null when nothing matches -- the splash then falls back to the
+    // window's own letter tile.
+    const TabletEntry* tabletEntryFor(const Client* c) const;
     void tabletGoHome();               // minimise every open app, back to the grid
+    // ---- the One UI app drawer (the full-screen "Apps" screen) -------------
+    // Every tablet app -- grid, folder members and dock alike -- gathered into one
+    // alphabetical grid, opened by swiping up on the wallpaper and put away by
+    // swiping down, tapping an app, or the home-bar gesture.
+    void buildTabletDrawerApps();
+    void layoutTabletDrawer();
+    Rect tabletDrawerCell(int k) const;
+    int tabletDrawerHitTest(int x, int y) const;
+    void setTabletDrawerPage(int page);
+    void openTabletDrawer();
+    void closeTabletDrawer();
+    bool handleTabletDrawerPress(int x, int y, unsigned button);
+    void handleTabletDrawerRelease(int x, int y, unsigned button);
+    void updateTabletDrawerMotion(int x, int y);
+    void drawTabletDrawer(float a);
     // The iPhone X home-bar gesture, as Apple documents it: swipe up to go home,
     // swipe up and hold (or overshoot) for the app switcher, swipe sideways to
     // step between apps, and swipe a card up inside the switcher to quit it.
@@ -855,6 +890,12 @@ private:
     std::map<std::string, Point> desktopIconPlacement;
     int dragDesktopIcon = -1;             // icon being press-dragged, -1 when none
     bool desktopIconDragging = false;     // press has moved past the click slop
+    // When set, the desktop refuses to stack things: a folder dropped where a
+    // widget (or another hand-placed folder) sits is nudged to the nearest free
+    // cell, and a widget dragged over a folder pushes the folder out of its way,
+    // so the two can never be read on top of each other. Read from
+    // ~/.config/win11wm/desktop-no-overlap and toggled from the desktop menu.
+    bool desktopNoOverlap = true;
     Point desktopIconGrab;                // pointer offset inside the cell at grab
     Point desktopIconPressPos;            // where the press landed (slop test)
     // One 2D spring per icon (position only): icons settle with a little life
@@ -1029,6 +1070,40 @@ private:
     int tabletDragEdge = 0;        // which edge a lifted icon is held against
     Time tabletDragEdgeAt = 0;
     std::vector<Rect> tabletDockRects;
+
+    // --- One UI home widgets ------------------------------------------------
+    // The weather pill sits in a band above the grid and pushes it down, so the
+    // grid top moves for every page and a page turn stays aligned. Only the pill
+    // itself is drawn, and only over the page it belongs to (page 0).
+    Rect tabletWidgetRect;     // the pill, inside the reserved band
+    int tabletWidgetBand = 0;  // height the band takes off the grid
+
+    // --- One UI app drawer --------------------------------------------------
+    // The full-screen "Apps" screen, opened by swiping up on the wallpaper: every
+    // tablet app in one denser grid with the One UI search pill above it. It rises
+    // from the bottom over the home screen and pages sideways like the home grid.
+    bool tabletDrawer = false;
+    double tabletDrawerAnim = 0.0;    // 0 closed, 1 fully up
+    double tabletDrawerOffset = 0.0;  // current page, in pages, for a half turn
+    bool tabletDrawerSwipe = false;
+    int tabletDrawerSwipeFrom = 0;
+    int tabletDrawerPage = 0;
+    int tabletDrawerPageCount = 1;
+    int tabletDrawerFirst = 0;
+    int tabletDrawerPerPage = 1;
+    int tabletDrawerCols = 4;
+    int tabletDrawerIconSize = metrics::kTabletIcon;
+    int tabletDrawerCellW = metrics::kTabletCellW;
+    int tabletDrawerCellH = metrics::kTabletCellH;
+    int tabletDrawerGridX = 0, tabletDrawerGridTop = 0;
+    int tabletDrawerStride = 0;
+    std::vector<TabletEntry> tabletDrawerApps;
+    std::vector<Rect> tabletDrawerRects;   // this page's cells only
+    std::vector<Rect> tabletDrawerDots;
+    Rect tabletDrawerSearchRect;
+    int tabletDrawerPressIndex = -1;       // the cell a press landed on
+    int tabletDrawerDownX = 0, tabletDrawerDownY = 0;  // where that press began
+    bool tabletDrawerArmed = false;
 
     // --- dock physics -------------------------------------------------------
     // The dock row is a closed-loop spring system, not a static row: icons grow

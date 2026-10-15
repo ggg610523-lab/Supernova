@@ -424,6 +424,22 @@ bool Manager::handleWidgetPress(int x, int y, Time time) {
     return true;
 }
 
+namespace {
+
+// Whether a card at `r` would sit on another card on the same page. The card
+// being moved (self) is skipped, and a small pad keeps two cards from merely
+// touching.
+bool cardHitsAny(const Rect& r, const std::vector<Widget>& widgets, int self, int page) {
+    for (size_t i = 0; i < widgets.size(); ++i) {
+        if (int(i) == self) continue;
+        if (widgets[i].page != page) continue;
+        if (r.inflated(12).intersects(widgets[i].rect)) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 void Manager::beginWidgetDrag(int index, int x, int y, bool resize) {
     if (index < 0 || index >= int(widgets.size())) return;
     dragWidget = index;
@@ -462,6 +478,35 @@ void Manager::updateWidgetDrag(int x, int y) {
     if (!widgetResizing) {
         w.rect.x = std::clamp(x - widgetGrab.x, 0, std::max(0, screenW - w.rect.w));
         w.rect.y = std::clamp(y - widgetGrab.y, 0, std::max(0, bottom - w.rect.h));
+        // With no-overlap on, a card is not allowed to sit on another card: the
+        // wanted spot is kept when it is clear, and otherwise the nearest spot
+        // that is gets used, so the card slides around its neighbour under the
+        // pointer instead of stacking on it. The icons reflow around the result.
+        if (desktopNoOverlap) {
+            const int page = tabletMode ? tabletHomePage : 0;
+            if (cardHitsAny(w.rect, widgets, dragWidget, page)) {
+                const int step = 24;
+                const int maxX = std::max(0, screenW - w.rect.w);
+                const int maxY = std::max(0, bottom - w.rect.h);
+                bool found = false;
+                for (int ring = 1; ring <= 80 && !found; ++ring) {
+                    for (int dy = -ring; dy <= ring && !found; ++dy) {
+                        for (int dx = -ring; dx <= ring; ++dx) {
+                            if (std::abs(dx) != ring && std::abs(dy) != ring) continue;
+                            const Rect cand{std::clamp(w.rect.x + dx * step, 0, maxX),
+                                            std::clamp(w.rect.y + dy * step, 0, maxY),
+                                            w.rect.w, w.rect.h};
+                            if (!cardHitsAny(cand, widgets, dragWidget, page)) {
+                                w.rect.x = cand.x;
+                                w.rect.y = cand.y;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } else {
         w.rect.w = std::clamp(x - w.rect.x, metrics::kWidgetMin, std::max(metrics::kWidgetMin, screenW - w.rect.x));
         w.rect.h = std::clamp(y - w.rect.y, metrics::kWidgetMin, std::max(metrics::kWidgetMin, bottom - w.rect.y));
