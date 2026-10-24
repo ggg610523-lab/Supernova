@@ -977,8 +977,10 @@ bool fileInt(const std::string& s, int* out) {
 
 }  // namespace
 
-std::optional<std::vector<Widget>> loadWidgets() {
-    const std::string path = configFile("widgets");
+namespace {
+
+std::optional<std::vector<Widget>> loadWidgetsNamed(const char* leaf) {
+    const std::string path = configFile(leaf);
     if (path.empty()) return std::nullopt;
     std::ifstream in(path);
     if (!in) return std::nullopt;
@@ -1010,24 +1012,37 @@ std::optional<std::vector<Widget>> loadWidgets() {
     return out;
 }
 
-bool saveWidgets(const std::vector<Widget>& widgets) {
-    const std::string path = configFile("widgets");
+bool saveWidgetsNamed(const char* leaf, const std::vector<Widget>& widgets) {
+    const std::string path = configFile(leaf);
     if (path.empty()) {
-        log("cannot save the desktop widgets: no XDG_CONFIG_HOME or HOME");
+        log("cannot save the widgets: no XDG_CONFIG_HOME or HOME");
         return false;
     }
     std::ostringstream text;
-    text << "# win11wm desktop widgets: kind, x, y, w, h, page\n";
+    text << "# win11wm widgets: kind, x, y, w, h, page\n";
     for (const Widget& w : widgets) {
         text << widgetKindWord(w.kind) << '\t' << w.rect.x << '\t' << w.rect.y << '\t'
              << w.rect.w << '\t' << w.rect.h << '\t' << w.page << '\n';
     }
     if (!writeFileAtomicImpl(path, text.str())) {
-        log("cannot write the desktop widgets to %s", path.c_str());
+        log("cannot write the widgets to %s", path.c_str());
         return false;
     }
-    log("saved %zu desktop widget(s) to %s", widgets.size(), path.c_str());
+    log("saved %zu widget(s) to %s", widgets.size(), path.c_str());
     return true;
+}
+
+}  // namespace
+
+std::optional<std::vector<Widget>> loadWidgets() { return loadWidgetsNamed("widgets"); }
+bool saveWidgets(const std::vector<Widget>& widgets) {
+    return saveWidgetsNamed("widgets", widgets);
+}
+std::optional<std::vector<Widget>> loadTabletWidgets() {
+    return loadWidgetsNamed("tablet-widgets");
+}
+bool saveTabletWidgets(const std::vector<Widget>& widgets) {
+    return saveWidgetsNamed("tablet-widgets", widgets);
 }
 
 std::map<std::string, Point> loadDesktopIconPlacement() {

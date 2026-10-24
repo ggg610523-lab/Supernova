@@ -277,9 +277,19 @@ inline constexpr Color kTabletWeatherInk = rgb(0xFFFFFF);
 inline constexpr Color kTabletWeatherSub = rgb(0xFFFFFF, 0.86f);
 inline constexpr Color kTabletWeatherGlyph = rgb(0xFFFFFF);    // the square sky glyph
 inline constexpr Color kTabletSearch = rgb(0xFFFFFF);          // the apps-search pill
+// A little vertical light gives the white pill a glassy edge instead of reading
+// as a flat cut-out, and the shadow lets it float above the frosted grid.
+inline constexpr Color kTabletSearchBottom = rgb(0xF1F5FB);
+inline constexpr Color kTabletSearchBorder = rgb(0x0A1020, 0.10f);
+inline constexpr Color kTabletSearchShadow = rgb(0x000000, 0.28f);
 inline constexpr Color kTabletSearchInk = rgb(0x1A1A1F);
 inline constexpr Color kTabletSearchHint = rgb(0x1A1A1F, 0.45f);
 inline constexpr Color kTabletSearchIcon = rgb(0x1A1A1F, 0.62f);
+inline constexpr Color kTabletSearchClear = rgb(0x1A1A1F, 0.10f);
+// The drawer's backdrop is the blurred wallpaper under a cool near-black scrim;
+// the top wash is a touch heavier so the white search pill always has contrast.
+inline constexpr Color kTabletDrawerScrimTop = rgb(0x05070C, 0.34f);
+inline constexpr Color kTabletDrawerScrimBottom = rgb(0x05070C, 0.56f);
 
 // --- tablet / mobile mode (iOS home screen) -------------------------------
 // A third skin: the iPhone/iPad home screen. White labels and a status bar sit

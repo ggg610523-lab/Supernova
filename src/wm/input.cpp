@@ -555,6 +555,10 @@ void Manager::onMotion(XMotionEvent& ev) {
             updateTabletDrawerMotion(x, y);
             return;
         }
+        if (tabletWidgetPicker) {
+            updateTabletWidgetPickerHover(x, y);
+            return;
+        }
         // Turning a page: a sideways drag that started on bare wallpaper. It only
         // counts as a page turn once it has passed the same slop any other press
         // has to pass, so brushing the wallpaper does not flick the grid.
@@ -575,6 +579,29 @@ void Manager::onMotion(XMotionEvent& ev) {
             tabletPageOffset = std::clamp(double(tabletPageSwipeFrom) - dx / stride, -0.35,
                                           double(tabletHomePageCount - 1) + 0.35);
             dirty = true;
+        }
+
+        // A press that lands on an icon does not have to be held before it can be
+        // moved: the moment the finger travels past the slop the icon is picked up
+        // and carried, which is how a one-finger rearrange is meant to feel. A
+        // still press still becomes a long press above -- the two are told apart by
+        // whether the finger moved, not by waiting for a timer.
+        if (!tabletEdit && tabletPressAt != 0 && !tabletLongPressFired && !tabletPageSwipe &&
+            tabletDragIcon < 0 && !tabletDragFromDock && !tabletDragFromFolder &&
+            tabletFolderOpen < 0) {
+            const int mdx = x - tabletPressPos.x;
+            const int mdy = y - tabletPressPos.y;
+            if (mdx * mdx + mdy * mdy > 8 * 8) {
+                if (tabletPressDock >= 0)
+                    beginTabletDockDrag(tabletPressDock, tabletPressPos.x, tabletPressPos.y);
+                else if (tabletPressItem >= 0)
+                    beginTabletIconDrag(tabletPressItem, tabletPressPos.x, tabletPressPos.y);
+                if (tabletDragIcon >= 0 || tabletDragFromDock) {
+                    tabletLongPressFired = true;  // a drag is never a long press
+                    updateTabletIconDrag(x, y);
+                    return;
+                }
+            }
         }
 
         // An in-flight drag -- a bottom-edge gesture, a switcher card, a home
@@ -732,6 +759,60 @@ void Manager::onKeyPress(XKeyEvent& ev) {
             }
             return;
         }
+        // The app drawer's search field owns the keyboard while the drawer is up.
+        // Escape clears a live query before it dismisses the drawer, so one key
+        // undoes one thing at a time.
+        if (tabletDrawer) {
+            if (sym == XK_Escape) {
+                if (!tabletDrawerSearchText.empty()) clearTabletDrawerSearch();
+                else closeTabletDrawer();
+                dirty = true;
+                return;
+            }
+            if (sym == XK_Left || sym == XK_Right) {
+                setTabletDrawerPage(tabletDrawerPage + (sym == XK_Right ? 1 : -1));
+                return;
+            }
+            if (sym == XK_Return || sym == XK_KP_Enter) {
+                if (!tabletDrawerMatches.empty()) {
+                    const TabletEntry e =
+                        tabletDrawerApps[size_t(tabletDrawerMatches.front())];
+                    closeTabletDrawer();
+                    openTabletEntry(e);
+                }
+                return;
+            }
+            if (sym == XK_BackSpace) {
+                if (!tabletDrawerSearchText.empty()) {
+                    std::string next = tabletDrawerSearchText;
+                    // Remove a whole UTF-8 character, not one byte of it.
+                    size_t cut = next.size();
+                    do {
+                        --cut;
+                    } while (cut > 0 &&
+                             (static_cast<unsigned char>(next[cut]) & 0xC0) == 0x80);
+                    next.resize(cut);
+                    setTabletDrawerSearch(next);
+                }
+                return;
+            }
+            char buf[16] = {0};
+            const int n = XLookupString(&ev, buf, sizeof buf - 1, nullptr, nullptr);
+            bool printable = n > 0;
+            for (int i = 0; i < n && printable; ++i) {
+                const unsigned char ch = static_cast<unsigned char>(buf[i]);
+                if (ch < 0x20 || ch == 0x7F) printable = false;
+            }
+            if (printable && tabletDrawerSearchText.size() < 64)
+                setTabletDrawerSearch(tabletDrawerSearchText + std::string(buf, size_t(n)));
+            return;
+        }
+        // The widget sheet is modal: Escape puts it away and nothing else reaches
+        // the home screen behind it.
+        if (tabletWidgetPicker) {
+            if (sym == XK_Escape) closeTabletWidgetPicker();
+            return;
+        }
         // The quick actions sheet is modal: Escape puts it away, the arrows walk its
         // rows and Return picks one, so the sheet is reachable without a touchscreen.
         if (tabletMenu) {
@@ -764,6 +845,8 @@ void Manager::onKeyPress(XKeyEvent& ev) {
                 closeTabletMenu();
             } else if (tabletDockPickerOpen) {
                 closeTabletDockPicker();
+            } else if (tabletWidgetPicker) {
+                closeTabletWidgetPicker();
             } else if (tabletFolderOpen >= 0) {
                 closeTabletFolder();
             } else if (tabletSwitcher) {

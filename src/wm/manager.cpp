@@ -607,6 +607,10 @@ void Manager::tickAnimations(double now) {
     // reflowed the layout (added, removed, dragged or resized).
     animateDesktopIconReflow(dtMs);
 
+    // Tablet home icons: the same reflow, so an icon carried across the grid
+    // makes its neighbours part and settle rather than snapping around it.
+    if (tabletMode) animateTabletIconReflow(dtMs);
+
     // Launchpad tiles: the same spring reflow, while a reorder drag (or the
     // settle after one) is on screen.
     if (startOpen) animateLaunchTileReflow(dtMs);

@@ -548,8 +548,9 @@ private:
     // icons were dragged into -- written out together. Called whenever either
     // changes and again on the way out, so the desktop comes back as it was left.
     void saveDesktopLayout();
-    void suspendWidgets();                    // taken off the desktop for tablet mode
-    void restoreWidgets();                    // put back when tablet mode is left
+    void suspendWidgets();                    // stash the desktop cards for tablet mode
+    void restoreWidgets();                    // put the desktop cards back on leaving
+    void initTabletWidgets();                 // the phone's own, smaller card set
     void openDesktopMenu(int x, int y);       // right click on the desktop
     void refreshBattery(bool force);
     void refreshWeather(bool force);
@@ -604,10 +605,6 @@ private:
     // "Folder" when they share nothing.
     static std::string suggestFolderName(const std::vector<TabletEntry>& apps);
     void drawTabletHome();             // wallpaper overlay: icons and dock
-    // One UI pins a full-width weather pill above the grid. It draws itself into
-    // the band layoutTabletHome() reserves, sliding and fading with the page it
-    // belongs to.
-    void drawTabletWeatherWidget(float a);
     void drawTabletFolderView();       // the dimmed backdrop and open folder sheet
     void drawTabletRename();           // the rename field, while one is open
     void drawTabletChrome();           // status bar + home indicator, over the app
@@ -635,6 +632,9 @@ private:
     // alphabetical grid, opened by swiping up on the wallpaper and put away by
     // swiping down, tapping an app, or the home-bar gesture.
     void buildTabletDrawerApps();
+    void updateTabletDrawerMatches();
+    void setTabletDrawerSearch(const std::string& query);
+    void clearTabletDrawerSearch();
     void layoutTabletDrawer();
     Rect tabletDrawerCell(int k) const;
     int tabletDrawerHitTest(int x, int y) const;
@@ -644,6 +644,11 @@ private:
     bool handleTabletDrawerPress(int x, int y, unsigned button);
     void handleTabletDrawerRelease(int x, int y, unsigned button);
     void updateTabletDrawerMotion(int x, int y);
+    // The interactive part of the drawer: the finger owns the progress while it
+    // is down, then the spring takes over with the velocity it was let go with.
+    void beginTabletDrawerPull(int fromY, double fromProgress);
+    void updateTabletDrawerPull(int y);
+    void endTabletDrawerPull();
     void drawTabletDrawer(float a);
     // The iPhone X home-bar gesture, as Apple documents it: swipe up to go home,
     // swipe up and hold (or overshoot) for the app switcher, swipe sideways to
@@ -1062,21 +1067,25 @@ private:
     int tabletHomePageCount = 1;
     int tabletHomeFirst = 0;       // absolute index of this page's first icon
     int tabletHomePerPage = 1;     // icons a page holds at this screen size
+    // Every page is packed on its own, because a widget card takes the top of the
+    // page it lives on and only that page. The arrays hold where each page starts
+    // in tabletHome and how many cells it has room for.
+    std::vector<int> tabletPageFirst;
+    std::vector<int> tabletPageTop;
+    std::vector<int> tabletPageCapacity;
     std::vector<Rect> tabletPageDots;
     bool tabletPageSwipe = false;  // a finger is turning the page right now
     int tabletPageSwipeFrom = 0;
     int tabletSwipeStartX = 0;
     double tabletPageOffset = 0.0; // in pages, so a half turn is drawable
+    // The page settles on a spring, and a flick carries its own velocity into it,
+    // so a half-turn never dead-stops or snaps.
+    motion::Spring tabletPageSpring;
+    double tabletPageSwipeVel = 0.0;  // pages per second at the last motion
+    double tabletPageLastMs = 0.0;
     int tabletDragEdge = 0;        // which edge a lifted icon is held against
     Time tabletDragEdgeAt = 0;
     std::vector<Rect> tabletDockRects;
-
-    // --- One UI home widgets ------------------------------------------------
-    // The weather pill sits in a band above the grid and pushes it down, so the
-    // grid top moves for every page and a page turn stays aligned. Only the pill
-    // itself is drawn, and only over the page it belongs to (page 0).
-    Rect tabletWidgetRect;     // the pill, inside the reserved band
-    int tabletWidgetBand = 0;  // height the band takes off the grid
 
     // --- One UI app drawer --------------------------------------------------
     // The full-screen "Apps" screen, opened by swiping up on the wallpaper: every
@@ -1084,6 +1093,19 @@ private:
     // from the bottom over the home screen and pages sideways like the home grid.
     bool tabletDrawer = false;
     double tabletDrawerAnim = 0.0;    // 0 closed, 1 fully up
+    // The drawer follows the finger while it is pulled up from the wallpaper (or
+    // pulled back down to dismiss it) and settles on a spring when let go. The
+    // velocity is in progress units per second, so a quick flick wins over a long
+    // slow drag exactly as it should.
+    bool tabletDrawerDragging = false;
+    bool tabletDrawerPullArmed = false;
+    int tabletDrawerPullStartY = 0;
+    double tabletDrawerPullFrom = 0.0;
+    double tabletDrawerPull = 0.0;
+    double tabletDrawerPullVel = 0.0;
+    double tabletDrawerLastY = 0.0;
+    double tabletDrawerLastMs = 0.0;
+    motion::Spring tabletDrawerSpring;
     double tabletDrawerOffset = 0.0;  // current page, in pages, for a half turn
     bool tabletDrawerSwipe = false;
     int tabletDrawerSwipeFrom = 0;
@@ -1097,13 +1119,20 @@ private:
     int tabletDrawerCellH = metrics::kTabletCellH;
     int tabletDrawerGridX = 0, tabletDrawerGridTop = 0;
     int tabletDrawerStride = 0;
-    std::vector<TabletEntry> tabletDrawerApps;
+    std::vector<TabletEntry> tabletDrawerApps;      // every app, alphabetical
+    std::vector<int> tabletDrawerMatches;           // indices into tabletDrawerApps
+    std::string tabletDrawerSearchText;             // the live query
     std::vector<Rect> tabletDrawerRects;   // this page's cells only
     std::vector<Rect> tabletDrawerDots;
     Rect tabletDrawerSearchRect;
+    Rect tabletDrawerClearRect;                     // the "x" inside the search pill
     int tabletDrawerPressIndex = -1;       // the cell a press landed on
     int tabletDrawerDownX = 0, tabletDrawerDownY = 0;  // where that press began
+    int tabletDrawerHover = -1;            // cell under the pointer, or -1
     bool tabletDrawerArmed = false;
+    bool tabletDrawerSearchPress = false;  // the press started in the search pill
+    bool tabletDrawerClearPress = false;   // ...on its clear button
+    bool tabletDrawerSearchFocused = false;
 
     // --- dock physics -------------------------------------------------------
     // The dock row is a closed-loop spring system, not a static row: icons grow
@@ -1141,6 +1170,28 @@ private:
     int tabletDockPickerHover = -1;
     int tabletDockPickerPress = -1;        // the tile a press landed on
     bool tabletDockPickerDonePress = false;  // the Done button a press landed on
+
+    // --- editing the widgets -------------------------------------------------
+    // Rearrange mode grows a "+" in the top-right corner. It opens a small sheet
+    // that lists every widget kind with a tick, so a card is added from there and
+    // taken off again by unticking the one already on the page. Only the kinds on
+    // the page being shown are ticked, matching the cards that are actually up.
+    Rect tabletWidgetAddRect;               // the "+" button, edit mode only
+    bool tabletWidgetPicker = false;
+    Rect tabletWidgetPickerPanel, tabletWidgetPickerDone;
+    std::vector<Rect> tabletWidgetPickerRows;
+    int tabletWidgetPickerHover = -1;
+    int tabletWidgetPickerPress = -1;       // row a press landed on
+    bool tabletWidgetPickerDonePress = false;
+    void openTabletWidgetPicker();
+    void closeTabletWidgetPicker();
+    void layoutTabletWidgetPicker();
+    bool handleTabletWidgetPickerPress(int x, int y, unsigned button);
+    void handleTabletWidgetPickerRelease(int x, int y);
+    void updateTabletWidgetPickerHover(int x, int y);
+    void drawTabletWidgetPickerView();
+    void toggleTabletWidget(WidgetKind kind);  // add one, or take it off the page
+    void layoutTabletWidgets();                // keep the live cards on the phone screen
 
     // The quick actions sheet: what a still long press opens on an icon. A long
     // press that moves is a drag and always wins; one that holds still opens this
@@ -1192,6 +1243,19 @@ private:
     bool tabletDragOverDock = false;
     int tabletDragDockSlot = -1;      // which dock slot, so the drop lands there
     int tabletDragInside = -1;        // mini cell of the open folder
+    // The stable id of the icon being carried, so its spring can pick up from the
+    // pointer on release (see the reflow springs below).
+    int tabletDragUid = 0;
+
+    // --- grid reflow springs ------------------------------------------------
+    // Every home icon's cell is a spring, keyed by the item's stable uid, so a
+    // rearrange makes the icons glide aside with the shell's own physical feel --
+    // the same arrangement the desktop grid uses -- instead of snapping. Only the
+    // page on screen is eased; turning a page snaps them back to their cells.
+    std::map<int, motion::Spring2> tabletIconSpring;
+    int tabletNextUid = 1;
+    void animateTabletIconReflow(double dtMs);  // one spring step per visible icon
+    void snapTabletIconSprings();               // drop every spring onto its cell
 
     // --- press and hold ------------------------------------------------------
     // A dwell turns a press into a long press, which is how the home screen is

@@ -303,11 +303,16 @@ void Manager::initWidgets() {
     refreshWeather(true);
 }
 
-// Both halves of the desktop's arrangement, written in one call. The cards are
-// held in the stash while tablet mode is up -- that is where their rects are --
-// so the stash is what gets saved from there rather than an empty desktop.
+// Both halves of the desktop's arrangement, written in one call. While tablet
+// mode is up the live set is the phone's, and the desktop's is in the stash: both
+// files are written so neither arrangement is lost on shutdown.
 void Manager::saveDesktopLayout() {
-    saveWidgets(widgetStash.empty() ? widgets : widgetStash);
+    if (tabletMode) {
+        saveTabletWidgets(widgets);
+        saveWidgets(widgetStash.empty() ? widgets : widgetStash);
+    } else {
+        saveWidgets(widgets);
+    }
     saveDesktopIconPlacement(desktopIconPlacement);
 }
 
@@ -353,30 +358,118 @@ void Manager::suspendWidgets() {
 // away, so this is a move rather than a rebuild and the icon grid they had been
 // reflowing around returns with them.
 void Manager::restoreWidgets() {
+    // The cards are no longer taken off the screen for tablet mode, so the stash
+    // is normally empty here and there is nothing to put back. The move is kept
+    // for the case something did stash them, and guarded so an empty stash can
+    // never wipe the live set.
+    if (widgetStash.empty()) return;
     widgets = std::move(widgetStash);
     widgetStash.clear();
     hoverWidget = -1;
     layoutDesktopIcons();
 }
 
+// The phone's own cards. The desktop set is sized for a monitor, so the home
+// screen builds one that fits instead: a small square and a column-wide medium
+// for a first session, or the phone arrangement the user left in its own file.
+// Reads and writes live with the rest of the saved settings in apps.cpp.
+void Manager::initTabletWidgets() {
+    widgets.clear();
+    hoverWidget = -1;
+    dragWidget = -1;
+    if (const auto saved = loadTabletWidgets()) {
+        widgets = *saved;
+        layoutTabletWidgets();
+        refreshBattery(true);
+        refreshWeather(true);
+        dirty = true;
+        return;
+    }
+    // A first phone session opens on a clock over the weather, which is what a
+    // One UI home screen shows before the user rearranges anything. Every size
+    // is derived from the width, so a small phone still fits the cards and a
+    // wide one does not leave them stranded in a corner.
+    const int margin = metrics::kWidgetPad;
+    const int wide = std::max(metrics::kWidgetMin, screenW - 2 * margin);
+    const int square = std::clamp((wide - 12) / 2, 120, wide);
+    const int medH = std::clamp(wide * 2 / 5, 110, 200);
+    int y = tabletStatusRect.bottom() + 8;
+    const int page = std::clamp(tabletHomePage, 0, std::max(0, tabletHomePageCount - 1));
+    widgets.push_back(Widget{WidgetKind::Clock, Rect{margin, y, square, square}, page});
+    widgets.push_back(Widget{WidgetKind::Weather, Rect{margin, y + square + 12, wide, medH}, page});
+    layoutTabletWidgets();
+    refreshBattery(true);
+    refreshWeather(true);
+    dirty = true;
+}
+
+// The tablet home screen keeps its cards: they are the same panels the desktop
+// holds, only the home screen is a phone now, so every card is folded inside the
+// strip between the status bar and the dock and re-paged onto a page that still
+// exists. Runs once when the mode is entered and whenever a page list changes.
+void Manager::layoutTabletWidgets() {
+    if (!tabletMode) return;
+    const int top = tabletStatusRect.bottom() + 4;
+    const int bottom = tabletDockRect.empty() ? screenH - 46 : tabletDockRect.y - 6;
+    const int maxPage = std::max(0, tabletHomePageCount - 1);
+    const int usable = std::max(metrics::kWidgetMin, bottom - top);
+    for (Widget& w : widgets) {
+        w.rect.w = std::clamp(w.rect.w, metrics::kWidgetMin, screenW);
+        w.rect.h = std::clamp(w.rect.h, metrics::kWidgetMin, usable);
+        w.rect.x = std::clamp(w.rect.x, 0, std::max(0, screenW - w.rect.w));
+        w.rect.y = std::clamp(w.rect.y, top, std::max(top, bottom - w.rect.h));
+        w.page = std::clamp(w.page, 0, maxPage);
+    }
+    dirty = true;
+}
+
 void Manager::addWidget(WidgetKind kind) {
     int w = metrics::kWidgetClock, h = metrics::kWidgetClock;
-    switch (kind) {
-        case WidgetKind::Clock: break;
-        case WidgetKind::Battery: w = metrics::kWidgetBatteryW; h = metrics::kWidgetBatteryH; break;
-        case WidgetKind::Calendar:
-            w = metrics::kWidgetCalendarW;
-            h = metrics::kWidgetCalendarH;
-            break;
-        case WidgetKind::Weather: w = metrics::kWidgetWeatherW; h = metrics::kWidgetWeatherH; break;
-        case WidgetKind::DigitalClock:
-            w = metrics::kWidgetDigitalW;
-            h = metrics::kWidgetDigitalH;
-            break;
+    if (tabletMode) {
+        // The phone fits one card per column and stacks them down the page, so a
+        // new card is a column wide rather than the desktop's monitor-sized
+        // footprint -- which would not even fit across a 412px screen.
+        const int wide = std::max(metrics::kWidgetMin, screenW - 2 * metrics::kWidgetPad);
+        const int medH = std::clamp(wide * 2 / 5, 110, 200);
+        switch (kind) {
+            case WidgetKind::Clock:
+                w = h = std::clamp((wide - 12) / 2, 120, wide);
+                break;
+            case WidgetKind::Calendar:
+                w = wide;
+                h = std::clamp(wide, 180, 340);
+                break;
+            default:
+                w = wide;
+                h = medH;
+                break;
+        }
+    } else {
+        switch (kind) {
+            case WidgetKind::Clock: break;
+            case WidgetKind::Battery:
+                w = metrics::kWidgetBatteryW;
+                h = metrics::kWidgetBatteryH;
+                break;
+            case WidgetKind::Calendar:
+                w = metrics::kWidgetCalendarW;
+                h = metrics::kWidgetCalendarH;
+                break;
+            case WidgetKind::Weather:
+                w = metrics::kWidgetWeatherW;
+                h = metrics::kWidgetWeatherH;
+                break;
+            case WidgetKind::DigitalClock:
+                w = metrics::kWidgetDigitalW;
+                h = metrics::kWidgetDigitalH;
+                break;
+        }
     }
-    const int bottom = screenH - metrics::taskbarH;
+    const int bottom = tabletMode ? (tabletDockRect.empty() ? screenH - 46 : tabletDockRect.y - 6)
+                                  : screenH - metrics::taskbarH;
+    const int top = tabletMode ? tabletStatusRect.bottom() + 4 : metrics::kWidgetPad;
     int x = screenW - w - metrics::kWidgetPad;
-    int y = metrics::kWidgetPad;
+    int y = top;
     // Cascade down/left past the cards already on screen. Only the ones sharing this
     // page count as in the way: a card on another page is not on screen to collide
     // with, and the tablet's pages are meant to be laid out independently.
@@ -398,7 +491,7 @@ void Manager::addWidget(WidgetKind kind) {
         if (!clash) break;
     }
     x = std::clamp(x, metrics::kWidgetPad, std::max(metrics::kWidgetPad, screenW - w - metrics::kWidgetPad));
-    y = std::clamp(y, metrics::kWidgetPad, std::max(metrics::kWidgetPad, bottom - h - metrics::kWidgetPad));
+    y = std::clamp(y, top, std::max(top, bottom - h - metrics::kWidgetPad));
     widgets.push_back(Widget{kind, Rect{x, y, w, h}, page});
     if (kind == WidgetKind::Battery) refreshBattery(true);
     else if (kind == WidgetKind::Weather) refreshWeather(true);
@@ -453,7 +546,8 @@ void Manager::beginWidgetDrag(int index, int x, int y, bool resize) {
 void Manager::updateWidgetDrag(int x, int y) {
     if (dragWidget < 0 || dragWidget >= int(widgets.size())) return;
     Widget& w = widgets[dragWidget];
-    const int bottom = screenH - metrics::taskbarH;
+    const int bottom = tabletMode ? (tabletDockRect.empty() ? screenH - 46 : tabletDockRect.y - 6)
+                                  : screenH - metrics::taskbarH;
 
     // Holding a card against a screen edge turns the page, exactly as it does for a
     // lifted icon, so a card can be moved to a page it is not on. The edge state is
@@ -531,8 +625,12 @@ void Manager::endWidgetDrag() {
     layoutDesktopIcons();
     // The card was moved, resized or sent to another page: that is the whole
     // point of saving, so it is written now rather than at the end of the session.
-    // Tablet mode holds the cards in the stash, so save whichever is live.
-    saveWidgets(widgetStash.empty() ? widgets : widgetStash);
+    // The live set is the phone's while tablet mode is up, and the desktop's
+    // otherwise, so each is written to its own file.
+    if (tabletMode)
+        saveTabletWidgets(widgets);
+    else
+        saveWidgets(widgets);
     dirty = true;
 }
 

@@ -197,11 +197,15 @@ struct TabletFolder {
     std::vector<TabletEntry> apps;
 };
 
-// One cell of the home grid: either one app or one folder, never both.
+// One cell of the home grid: either one app or one folder, never both. `uid` is
+// a run-time only identity -- it is never written to disk -- that lets the
+// rearrange animation follow a particular icon through a reorder rather than the
+// slot it happens to occupy, so the icons glide instead of snapping.
 struct TabletItem {
     bool isFolder = false;
     TabletEntry app;
     TabletFolder folder;
+    int uid = 0;
 };
 
 // The home screen as the user left it.
@@ -243,6 +247,12 @@ std::optional<std::vector<Widget>> loadWidgets();
 // Writes the card list, replacing the file atomically. False if it could not be
 // stored, which is never fatal: the arrangement simply will not be remembered.
 bool saveWidgets(const std::vector<Widget>& widgets);
+
+// The tablet home screen keeps its own cards: the desktop's are sized for a
+// monitor and would swamp a phone, so the phone gets a set of its own. Same
+// format and rules as loadWidgets()/saveWidgets(), in a separate file.
+std::optional<std::vector<Widget>> loadTabletWidgets();
+bool saveTabletWidgets(const std::vector<Widget>& widgets);
 
 // The cells the user dragged desktop icons into, keyed by the entry's absolute
 // path. A missing file is an empty map, never an error: the first session simply
