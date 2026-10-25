@@ -108,6 +108,9 @@ void Manager::render() {
     // iOS keeps them over the app that is running.
     if (on(kLayTablet) && tabletAnim > 0.001) drawTabletChrome();
     if (on(kLayCC) && (ccOpen || ccAnim > 0.0)) drawControlCenter();
+    // Settings is a shell-owned modal: above Control Centre, below the desktop's
+    // delete/rename dialogs and the mode-transition splash.
+    if (on(kLayCC) && (settingsOpen || settingsAnim > 0.0)) drawSettings();
     // The desktop's own dialogs are the last word on the screen while they are up,
     // so nothing behind them reads as actionable.
     if (on(kLayDialogs)) {
@@ -900,10 +903,19 @@ void Manager::drawClientSprite(Client* c) {
     s.closePress = c->pressBtn == 2 ? 1.f : 0.f;
     s.genie = float(genie);
     s.genieIcon = genieIcon;
+    if (c->internalSettings) {
+        s.captionTint = true;
+        s.captionColor = theme::isLight() ? rgb(0xF2F2F7) : rgb(0x1C1C1E);
+        s.tintAmount = 1.f;
+    }
     comp.drawWindow(s);
 
     // The warp carries the content; the caption chrome would only float in place.
     if (genie > 0.0) return;
+
+    // Settings is a managed client, but its pixels are painted here rather than
+    // read back from an X pixmap. The caption is still the standard Fluent one.
+    if (c->internalSettings) drawSettingsContent(c);
 
     if (c->captionH <= 0 || f.w < 160) return;
     const float a = float(opacity);

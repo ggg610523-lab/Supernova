@@ -63,6 +63,12 @@ struct WindowSprite {
     // drawn as an ordinary frame.
     float genie = 0.0f;
     Rect genieIcon;
+    // Shell-owned windows can make the caption exactly match their body instead
+    // of the acrylic Mica tint, so Settings reads as one surface rather than a
+    // dialog with a separate title bar.
+    bool captionTint = false;
+    Color captionColor{};
+    float tintAmount = 0.88f;
 };
 
 class Compositor {

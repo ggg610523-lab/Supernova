@@ -104,6 +104,7 @@ void Manager::setTabletMode(bool on) {
 // Applies the new mode. Runs while the splash is opaque, so everything here can
 // be as abrupt as it likes.
 void Manager::applyTabletMode() {
+    if (!tabletMode) closeSettingsWindow();
     closeOverlays();
     cancelDrag();
     closeTabletMenu();
@@ -1171,9 +1172,9 @@ void Manager::layoutTabletWidgetPicker() {
 }
 
 void Manager::toggleTabletWidget(WidgetKind kind) {
-    // Ticked means it is on the page being shown; tapping takes that one card
-    // off. Unticked adds a fresh card onto this page.
-    const int page = tabletHomePage;
+    // Ticked means it is on the home screen; tapping takes that one card off.
+    // Unticked adds a fresh card to the single widget page.
+    const int page = 0;
     for (size_t i = 0; i < widgets.size(); ++i) {
         if (widgets[i].kind == kind && widgets[i].page == page) {
             removeWidget(int(i));
@@ -1249,7 +1250,7 @@ void Manager::drawTabletWidgetPickerView() {
         const WidgetKind kind = kWidgetKinds[i];
         bool on = false;
         for (const Widget& w : widgets)
-            if (w.kind == kind && w.page == tabletHomePage) on = true;
+            if (w.kind == kind && w.page == 0) on = true;
         if (i == tabletWidgetPickerHover)
             comp.drawRect(row.inflated(2), 12.f, theme::kTabletIconHover, a * 0.9f);
         drawTextAt(widgetKindName(kind), 15, Weight::Regular, alpha(theme::kTabletLabel, a),
@@ -1802,6 +1803,10 @@ void Manager::tabletGoHome() {
 // ---------------------------------------------------------------------------
 
 void Manager::openTabletEntry(const TabletEntry& e) {
+    if (e.exec == kSettingsExec) {
+        openSettings();
+        return;
+    }
     if (!e.exec.empty()) {
         noteRecent(e.name, e.exec, e.icon, e.wmClass);
         launchApp(e.exec);
@@ -2362,6 +2367,14 @@ void Manager::buildTabletDrawerApps() {
         else
             tabletDrawerApps.push_back(item.app);
     }
+    // Settings lives in the shell rather than in the tablet folder, so it is
+    // added to the drawer directly; the sentinel Exec opens the internal panel.
+    TabletEntry settings;
+    settings.name = "Settings";
+    settings.icon = "preferences-system";
+    settings.wmClass = "win11wm-settings";
+    settings.exec = kSettingsExec;
+    tabletDrawerApps.push_back(settings);
     // One UI lists the drawer alphabetically, and so does everyone who reads it.
     std::stable_sort(tabletDrawerApps.begin(), tabletDrawerApps.end(),
                      [](const TabletEntry& a, const TabletEntry& b) {
@@ -2668,7 +2681,7 @@ void Manager::drawTabletDrawer(float a) {
     // wallpaper, so the home icons behind it read as tone rather than as shapes.
     // A heavier wash at the top makes the white search pill pop and fades the
     // wallpaper's busiest area out behind the grid.
-    comp.drawAcrylic(Rect{0, 0, screenW, screenH}, 0.f, theme::kTabletSplash, 0.78f,
+    comp.drawAcrylic(Rect{0, 0, screenW, screenH}, 0.f, theme::kTabletSplash, 0.91f,
                      theme::kTabletSplash, a);
     comp.drawGradient(Rect{0, 0, screenW, std::max(1, screenH * 2 / 5)}, 0.f,
                       theme::kTabletDrawerScrimTop,

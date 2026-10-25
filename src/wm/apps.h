@@ -16,6 +16,10 @@
 
 namespace wm {
 
+// The Exec sentinel for the shell's own Settings panel. It is listed like any
+// other launcher, but the shell intercepts it instead of forking a process.
+inline constexpr const char* kSettingsExec = "@win11wm-settings";
+
 struct AppEntry {
     std::string name;       // "Files"
     std::string exec;       // "nautilus %U"  (field codes pre-stripped)

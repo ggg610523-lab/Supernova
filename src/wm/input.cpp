@@ -47,6 +47,17 @@ void Manager::onMapRequest(XMapRequestEvent& ev) {
     if (c->closing) return;
     if (!known) placeNewClient(c);
     mapClient(c);
+    if (c->internalSettings) {
+        // The WM paints this window's content itself, so it needs motion and key
+        // events that ordinary clients keep to themselves. It also skips the
+        // opening scale: the content is laid out for the final frame.
+        XSelectInput(dpy, c->id, PropertyChangeMask | ButtonPressMask |
+                                    ButtonReleaseMask | PointerMotionMask | KeyPressMask);
+        c->appear = 1.0;
+        c->animMs = 0;
+        c->animStart = 0.0;
+        settleGeometry(c);
+    }
     // An app opened from the tablet home screen stays in tablet mode: it fills
     // the display between the status bar and the home indicator.
     if (tabletMode) {
@@ -329,6 +340,11 @@ void Manager::onButtonPress(XButtonEvent& ev) {
     // The mode transition splash swallows input while it plays so a stray click
     // cannot land on a shell that is about to be replaced.
     if (modeSwitching) return;
+    // Settings is modal in both shells, and it owns the pointer while it is up.
+    if (settingsOpen) {
+        handleSettingsPress(x, y, ev.button);
+        return;
+    }
     if (tabletMode) {
         // The app switcher holds the pointer while it is up, so everything is
         // a card interaction, whatever window the event names.
@@ -405,6 +421,9 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
         log("release %s at (%d,%d) on 0x%lx", buttonName(ev.button), x, y,
             static_cast<unsigned long>(ev.window));
     }
+    // Settings acts on the press; its release must not fall through to the home
+    // screen or a window underneath.
+    if (settingsOpen) return;
     if (tabletGesture) {
         endTabletGesture();
         return;
@@ -481,6 +500,10 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
             const size_t gi = startPageBase + size_t(pressed);
             if (gi < appFiltered.size() && appFiltered[gi] < apps.size()) {
                 const size_t ai = appFiltered[gi];
+                if (apps[ai].exec == kSettingsExec) {
+                    openSettings();
+                    return;
+                }
                 noteRecent(apps[ai].name, apps[ai].exec, apps[ai].icon, apps[ai].wmClass);
                 launchApp(apps[ai].exec);
             }
@@ -547,6 +570,17 @@ void Manager::onMotion(XMotionEvent& ev) {
     if (traceInput() && (dragClient || ev.state)) {
         log("motion to (%d,%d) on 0x%lx mods 0x%x%s", x, y, static_cast<unsigned long>(ev.window),
             static_cast<unsigned>(ev.state), dragClient ? " [dragging]" : "");
+    }
+    if (settingsOpen) {
+        updateSettingsHover(x, y);
+        return;
+    }
+    if (ev.window != comp.overlay()) {
+        Client* c = find(ev.window);
+        if (c && c->internalSettings) {
+            updateSettingsHover(x, y);
+            return;
+        }
     }
     if (tabletMode) {
         // The app drawer owns the pointer while it is up: a sideways drag turns
@@ -707,6 +741,23 @@ void Manager::onMotion(XMotionEvent& ev) {
 void Manager::onKeyPress(XKeyEvent& ev) {
     const unsigned mods = ev.state & (ShiftMask | ControlMask | Mod1Mask | Mod4Mask);
     const KeySym sym = XLookupKeysym(&ev, 0);
+
+    // Settings is a shell modal and keeps the keyboard while it is up. Escape
+    // dismisses it; Left/Right walk the three category tabs.
+    if (settingsOpen) {
+        if (sym == XK_Escape) {
+            closeOverlays();
+        } else if (sym == XK_Left || sym == XK_Right) {
+            setSettingsSection(settingsSection + (sym == XK_Right ? 1 : -1));
+        }
+        return;
+    }
+    if (Client* sc = find(ev.window); sc && sc->internalSettings) {
+        if (sym == XK_Escape) closeSettingsWindow();
+        else if (sym == XK_Left || sym == XK_Right)
+            setSettingsSection(settingsSection + (sym == XK_Right ? 1 : -1));
+        return;
+    }
 
     // The tablet home screen has no keyboard shortcuts; Escape still leaves
     // rearrange mode or dismisses Control Centre when it is open.
@@ -927,6 +978,10 @@ void Manager::onKeyPress(XKeyEvent& ev) {
         if (sym == XK_Return || sym == XK_KP_Enter) {
             if (!appFiltered.empty() && appFiltered.front() < apps.size()) {
                 const AppEntry& a = apps[appFiltered.front()];
+                if (a.exec == kSettingsExec) {
+                    openSettings();
+                    return;
+                }
                 noteRecent(a.name, a.exec, a.icon, a.wmClass);
                 launchApp(a.exec);
             }
@@ -1021,6 +1076,10 @@ void Manager::applyContextAction(int index) {
         const int n = int(contextRecents.size());
         if (index >= 0 && index < n) {
             const AppEntry app = contextRecents[size_t(index)];
+            if (app.exec == kSettingsExec) {
+                openSettings();
+                return;
+            }
             noteRecent(app.name, app.exec, app.icon, app.wmClass);
             launchApp(app.exec);
             return;
@@ -1195,11 +1254,17 @@ void Manager::runShortcut(KeySym sym, unsigned mods) {
 }
 
 void Manager::handleClientPress(Client* c, int x, int y, unsigned button) {
-    (void)x;
-    (void)y;
     if (!c || !c->managed) return;
     if (overlayOpen()) {
         closeOverlays();
+        return;
+    }
+    if (c->internalSettings) {
+        focusClient(c, false);
+        const Rect content{c->frame.x + metrics::kBorder, c->frame.y + c->captionH,
+                           c->frame.w - 2 * metrics::kBorder,
+                           c->frame.h - c->captionH - metrics::kBorder};
+        if (content.contains(x, y)) handleSettingsContentPress(x, y, button);
         return;
     }
     if (button == Button1 || button == Button3) {

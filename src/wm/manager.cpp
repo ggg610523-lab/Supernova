@@ -362,6 +362,9 @@ int Manager::run(const Options& options) {
         applyTabletMode();
         log("tablet mode: starting on the iOS-like home screen");
     }
+    if (const char* v = std::getenv("WIN11WM_OPEN_SETTINGS")) {
+        if (v[0] == '1') openSettings();
+    }
 
     // Unified replacement for the old SDL prototype's "--embed prog": the single
     // compositor launches the requested programs and they show up as normal
@@ -545,6 +548,7 @@ void Manager::tickAnimations(double now) {
     // Control Centre: a slightly longer ease so the grid reads as rising out
     // of the taskbar rather than simply appearing.
     step(ccAnim, ccOpen ? 1.0 : 0.0, 210.0);
+    step(settingsAnim, settingsOpen ? 1.0 : 0.0, 180.0);
     // Tablet / mobile mode: the splash fades in, the two shells are swapped
     // while it fully covers the screen, and it fades back out onto the new one.
     if (modeSwitching) {
@@ -1245,8 +1249,8 @@ bool Manager::overlayOpen() const {
     // The desktop's folder dialogs count: while one is up the desktop underneath
     // must not light up under the pointer or offer resize edges, any more than the
     // wallpaper does behind the Control Centre.
-    return startOpen || taskViewOpen || altTabOpen || contextOpen || ccOpen || tabletSwitcher ||
-           confirmDeleteOpen || desktopRenameItem >= 0;
+    return startOpen || taskViewOpen || altTabOpen || contextOpen || ccOpen || settingsOpen ||
+           tabletSwitcher || confirmDeleteOpen || desktopRenameItem >= 0;
 }
 
 bool Manager::pointInOverlaySurface(int x, int y) const {
@@ -1255,6 +1259,7 @@ bool Manager::pointInOverlaySurface(int x, int y) const {
     if (altTabOpen) return true;
     if (contextOpen && contextRect.contains(x, y)) return true;
     if (ccOpen && ccRect.inflated(12).contains(x, y)) return true;
+    if (settingsOpen && settingsPanel.contains(x, y)) return true;
     return false;
 }
 
@@ -1262,6 +1267,9 @@ void Manager::closeOverlays() {
     const bool was = overlayOpen();
     const bool wasCc = ccOpen;
     startOpen = taskViewOpen = altTabOpen = contextOpen = ccOpen = false;
+    settingsOpen = false;
+    settingsHover = -1;
+    settingsNavHover = -1;
     // The desktop's folder dialogs are overlays too and go the same way: anything
     // that would take the desktop away has answered them. They hand back the
     // grabs they took as they close.
@@ -1637,6 +1645,10 @@ int Manager::openWindows() const {
 
 void Manager::closeClient(Client* c) {
     if (!c || !c->alive || c->closing) return;
+    if (c->internalSettings) {
+        closeSettingsWindow();
+        return;
+    }
     if (!windowHasAtom(dpy, c->id, A.wmProtocols, A.wmDelete)) {
         // No close protocol: the only way out is to kill the client.
         XKillClient(dpy, c->id);

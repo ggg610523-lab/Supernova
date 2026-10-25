@@ -399,6 +399,18 @@ std::vector<AppEntry> scanApps() {
         std::sort(names.begin(), names.end());
         for (const std::string& n : names) parseDesktop(dir + "/" + n, &apps, &seen);
     }
+    // Settings is part of the shell, not something installed, so it is appended
+    // after the scan and then sorted in with everything else. Its sentinel Exec is
+    // intercepted by the shell before any process could be forked.
+    AppEntry settings;
+    settings.name = "Settings";
+    settings.exec = kSettingsExec;
+    settings.generic =
+        "win11wm supernova shell system preferences appearance display wallpaper";
+    settings.icon = "preferences-system";
+    settings.wmClass = "win11wm-settings";
+    settings.searchKey = lower(settings.name + " " + settings.generic);
+    apps.push_back(settings);
     std::sort(apps.begin(), apps.end(),
               [](const AppEntry& a, const AppEntry& b) { return a.name < b.name; });
     return apps;

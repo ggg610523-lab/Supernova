@@ -1279,7 +1279,9 @@ void Compositor::drawWindow(const WindowSprite& s) {
     const Rect content{s.frame.x + metrics::kBorder, s.frame.y + capH,
                        s.frame.w - 2 * metrics::kBorder, s.frame.h - capH - metrics::kBorder};
 
-    const Color caption = s.focused ? theme::kCaption : theme::kCaptionIdle;
+    const Color caption = s.captionTint
+                              ? s.captionColor
+                              : (s.focused ? theme::kCaption : theme::kCaptionIdle);
     const Color glyph = s.focused ? theme::kGlyph : theme::kGlyphIdle;
     Color border = s.focused ? theme::kBorderFocus : theme::kBorderIdle;
     const Color shadow = s.focused ? theme::kShadow : theme::kShadowIdle;
@@ -1303,7 +1305,7 @@ void Compositor::drawWindow(const WindowSprite& s) {
     glUniform1f(uRadius_, s.radius);
     glUniform1f(uOpacity_, s.opacity);
     glUniform1f(uMaximized_, s.maximized ? 1.f : 0.f);
-    glUniform1f(uTintAmount_, 0.88f);
+    glUniform1f(uTintAmount_, s.tintAmount);
     glUniform3f(uHover_, s.minHover, s.maxHover, s.closeHover);
     glUniform3f(uPress_, s.minPress ? 1.f : 0.f, s.maxPress ? 1.f : 0.f,
                 s.closePress ? 1.f : 0.f);

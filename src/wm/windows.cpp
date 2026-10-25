@@ -105,6 +105,7 @@ void Manager::removeClient(Client* c) {
         ungrabPointer();
     }
     if (focused == c) focused = nullptr;
+    if (settingsClient == c) settingsClient = nullptr;
     if (contextClient == c) contextClient = nullptr;
     if (hoverResizeClient == c) hoverResizeClient = nullptr;
     altTabOrder.erase(std::remove(altTabOrder.begin(), altTabOrder.end(), c), altTabOrder.end());

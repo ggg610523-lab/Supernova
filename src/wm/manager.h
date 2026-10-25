@@ -209,6 +209,9 @@ struct Client {
     // reveal the content underneath. Desktop mode never reads either.
     std::string tabletIcon;
     std::string tabletIconClass;
+    // The shell's own Settings window: a real managed client whose content is
+    // painted by the WM in the overlay rather than read back from a pixmap.
+    bool internalSettings = false;
 };
 
 // Command line options.
@@ -456,6 +459,40 @@ private:
     // theme::applyMode()'s business; this only commits the setting and asks for a
     // repaint, and it is a no-op when the mode is already what was asked for.
     void setLightMode(bool on);
+
+    // ---- Settings (settings.cpp)
+    // One app, two skins: a Fluent acrylic window with a sidebar on the desktop,
+    // and a full-screen One UI sheet with large cards on the tablet. Both drive
+    // the same rows, so a setting behaves the same in either mode.
+    struct SettingsRow {
+        int id = 0;
+        Rect rect;
+        std::string title;
+        std::string subtitle;
+        bool toggle = false;
+        bool on = false;
+        bool enabled = true;
+        bool info = false;   // a read-only line in the About section
+        bool header = false;  // a grouped-list section title (iOS skin)
+        bool slider = false;  // a 0..100 value drawn as a track/knob
+        int value = 0;
+    };
+    void openSettings();
+    void openSettingsWindow();
+    void closeSettingsWindow();
+    void layoutSettings();
+    void drawSettings();
+    void drawSettingsContent(Client* c);
+    void updateSettingsHover(int x, int y);
+    void updateSettingsSliderDrag(int x, int y);
+    void endSettingsSliderDrag();
+    bool handleSettingsPress(int x, int y, unsigned button);
+    bool handleSettingsContentPress(int x, int y, unsigned button);
+    void activateSettingsRow(int id);
+    void setSettingsSection(int section);
+    // Runs a launcher unless it is the shell's own Settings entry, in which case
+    // it opens the internal panel and no process is forked.
+    bool launchShellApp(const std::string& exec);
 
     // ---- desktop icons (draw.cpp / input.cpp)
     void layoutDesktopIcons();
@@ -1040,6 +1077,20 @@ private:
     std::vector<std::string> ccLaunchers;  // exec strings for the launcher row
     SystemControls sysctl;
     bool dnd = false;                  // Do Not Disturb, enforced by the WM
+
+    // ---- Settings
+    bool settingsOpen = false;       // the tablet's full-screen iOS sheet
+    Client* settingsClient = nullptr;  // the desktop's managed Settings window
+    double settingsAnim = 0.0;
+    int settingsSection = 0;           // Appearance, Network, System, About
+    int settingsHover = -1;            // row under the pointer, -1 for none
+    int settingsNavHover = -1;         // sidebar / tab under the pointer
+    int settingsSliderRow = -1;        // brightness row being dragged, -1 for none
+    Rect settingsPanel;
+    Rect settingsDoneRect;
+    Rect settingsCloseRect;
+    std::vector<Rect> settingsNavRects;
+    std::vector<SettingsRow> settingsRows;
 
     // ---- tablet / mobile mode
     bool tabletMode = false;          // the mode the shell has settled into
