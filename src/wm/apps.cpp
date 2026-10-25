@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cctype>
 #include <cstdio>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
@@ -427,6 +428,13 @@ void launchApp(const std::string& exec) {
         // New session: the app never sees the WM's terminal signals and can
         // never become a zombie we would have to reap.
         setsid();
+        // Signal dispositions survive exec, so an app launched from here would
+        // inherit the WM's SIGCHLD/SIGPIPE = SIG_IGN. A process that ignores
+        // SIGCHLD cannot wait() for its own children (the kernel reaps them
+        // first and waitpid fails with ECHILD), which makes multi-process apps
+        // such as Firefox abort at start-up. Give the app the defaults back.
+        std::signal(SIGCHLD, SIG_DFL);
+        std::signal(SIGPIPE, SIG_DFL);
         execl("/bin/sh", "sh", "-c", exec.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }

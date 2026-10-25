@@ -1,6 +1,6 @@
 // Desktop widgets. Manager methods that own the iOS 18 style full-colour cards on
 // the wallpaper: battery probing, placement, drag/resize, hit-testing and drawing.
-#include "manager.h"
+#include <manager.h>
 
 #include <algorithm>
 #include <cctype>

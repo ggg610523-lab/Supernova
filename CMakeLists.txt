@@ -52,7 +52,7 @@ add_executable(win11wm
   src/wm/tablet.cpp
   src/wm/settings.cpp
 )
-target_include_directories(win11wm PRIVATE src)
+target_include_directories(win11wm PRIVATE src src/wm)
 target_compile_options(win11wm PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
 target_link_libraries(win11wm PRIVATE
   PkgConfig::X11
@@ -76,5 +76,62 @@ pkg_check_modules(RSVG  IMPORTED_TARGET librsvg-2.0)
 if(CAIRO_FOUND AND RSVG_FOUND)
   target_compile_definitions(win11wm PRIVATE WIN11WM_HAVE_RSVG)
   target_link_libraries(win11wm PRIVATE PkgConfig::CAIRO PkgConfig::RSVG)
+endif()
+
+# ---------------------------------------------------------------------------
+# win11wm-wl -- the same Windows 11 shell as a native Wayland compositor.
+#
+# wlroots supplies the backend (nested Wayland, headless, DRM/libinput), the
+# xdg-shell/seat/cursor protocols and the EGL/GLES2 renderer. The shell's own
+# drawing code is shared with the X11 build; only the platform layer differs.
+#
+# The dependency lives in .deps/prefix when it was built locally. wlroots is
+# found through pkg-config, so set PKG_CONFIG_PATH to
+#   .deps/prefix/lib/pkgconfig:.deps/prefix/share/pkgconfig
+# (see the README section on building the backend) when it is not installed
+# system wide. Pass -DWIN11WM_BUILD_WAYLAND=OFF to skip the target.
+option(WIN11WM_BUILD_WAYLAND "Build the win11wm-wl Wayland compositor" ON)
+
+if(WIN11WM_BUILD_WAYLAND)
+  pkg_check_modules(WLROOTS REQUIRED IMPORTED_TARGET wlroots-0.18)
+  pkg_check_modules(WLSERVER REQUIRED IMPORTED_TARGET wayland-server)
+  pkg_check_modules(XKB      REQUIRED IMPORTED_TARGET xkbcommon)
+  pkg_check_modules(GL      REQUIRED IMPORTED_TARGET egl glesv2)
+
+  add_executable(win11wm-wl
+    src/wl/main.cpp
+    src/wl/manager.cpp
+    src/wl/input.cpp
+    src/wl/compositor.cpp
+    src/wm/draw.cpp
+    src/wm/tablet.cpp
+    src/wm/widgets.cpp
+    src/wm/controlcenter.cpp
+    src/wm/settings.cpp
+    src/wm/apps.cpp
+    src/wm/text.cpp
+    src/wm/icons.cpp
+    src/wm/png.cpp
+    src/wm/sysctl.cpp
+  )
+  # src/wl first: the shared shell units include "manager.h", and this is the
+  # Wayland Manager they must see.
+  target_include_directories(win11wm-wl PRIVATE src/wl/include src/wl src/wm src)
+  target_compile_definitions(win11wm-wl PRIVATE WLR_USE_UNSTABLE WIN11WM_WAYLAND)
+  target_compile_options(win11wm-wl PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
+  target_link_libraries(win11wm-wl PRIVATE
+    PkgConfig::WLROOTS
+    PkgConfig::WLSERVER
+    PkgConfig::XKB
+    PkgConfig::GL
+    PkgConfig::FT2
+    PkgConfig::FC
+    PkgConfig::ZLIB
+    PkgConfig::EPOXY
+  )
+  if(CAIRO_FOUND AND RSVG_FOUND)
+    target_compile_definitions(win11wm-wl PRIVATE WIN11WM_HAVE_RSVG)
+    target_link_libraries(win11wm-wl PRIVATE PkgConfig::CAIRO PkgConfig::RSVG)
+  endif()
 endif()
 

@@ -6,7 +6,7 @@
 // caption buttons, snapping and edge resizing. The WM paints its content in the
 // overlay instead of reading it back from a pixmap.
 // Tablet: a full-screen iOS sheet, because mobile mode has no window chrome.
-#include "manager.h"
+#include <manager.h>
 
 #include <algorithm>
 #include <cctype>
@@ -52,18 +52,6 @@ std::string fitText(Text& text, const std::string& s, int px, int maxW) {
     return out + "\u2026";
 }
 
-Rect settingsSliderTrack(const SettingsRow& row) {
-    const int w = std::clamp(row.rect.w / 4, 110, 180);
-    const int h = 6;
-    return Rect{row.rect.right() - 16 - w, row.rect.y + row.rect.h / 2 - h / 2, w, h};
-}
-
-int settingsSliderValueAt(const Rect& track, int x) {
-    if (track.w <= 0) return 0;
-    const double t = double(x - track.x) / double(track.w);
-    return std::clamp(int(std::lround(t * 100.0)), 0, 100);
-}
-
 std::string brightnessSubtitle(int value, int w, int h) {
     return std::to_string(value) + "% \u00B7 " + std::to_string(w) + " \u00D7 " +
            std::to_string(h);
@@ -105,7 +93,7 @@ void Manager::openSettings() {
     settingsNavHover = -1;
     layoutSettings();
     grabPointer();
-    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    grabShellKeyboard();
     dirty = true;
 }
 
@@ -130,7 +118,10 @@ void Manager::openSettingsWindow() {
     const int clientH = frameH - metrics::kCaptionH - metrics::kBorder;
     const int x = (screenW - frameW) / 2;
     const int y = (screenH - frameH) / 2;
-
+#ifdef WIN11WM_WAYLAND
+    Client* c = addInternalWindow("Settings", x, y, frameW, frameH);
+    if (!c) return;
+#else
     XSetWindowAttributes swa{};
     swa.background_pixel = BlackPixel(dpy, DefaultScreen(dpy));
     Window win = XCreateWindow(dpy, root, x, y, clientW, clientH, 0, CopyFromParent,
@@ -152,6 +143,7 @@ void Manager::openSettingsWindow() {
         XDestroyWindow(dpy, win);
         return;
     }
+#endif
     c->internalSettings = true;
     settingsClient = c;
     c->title = "Settings";
@@ -166,8 +158,10 @@ void Manager::openSettingsWindow() {
     // ourselves, and mapping it unredirected would leave a black rectangle on
     // top of the composited shell.
     mapClient(c);
+#ifndef WIN11WM_WAYLAND
     XSelectInput(dpy, win, PropertyChangeMask | ButtonPressMask | ButtonReleaseMask |
                               PointerMotionMask | KeyPressMask);
+#endif
     c->appear = 1.0;
     c->animMs = 0;
     c->animStart = 0.0;
@@ -180,9 +174,13 @@ void Manager::closeSettingsWindow() {
     Client* c = settingsClient;
     settingsClient = nullptr;
     if (!c) return;
+#ifndef WIN11WM_WAYLAND
     const Window id = c->id;
     removeClient(c);
     if (id) XDestroyWindow(dpy, id);
+#else
+    removeClient(c);
+#endif
     dirty = true;
 }
 

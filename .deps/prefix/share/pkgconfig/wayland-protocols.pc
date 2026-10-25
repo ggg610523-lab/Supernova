@@ -1,0 +1,9 @@
+
+prefix=/tmp/win11wm-deps/prefix
+includedir=${prefix}/include
+datarootdir=${prefix}/share
+pkgdatadir=${pc_sysrootdir}${datarootdir}/wayland-protocols
+
+Name: Wayland Protocols
+Description: Wayland protocol files
+Version: 1.49

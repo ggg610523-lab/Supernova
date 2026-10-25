@@ -18,7 +18,7 @@
 // the desktop <-> tablet hand-off, and the Fluent shell's light/dark palette.
 // Everything that needs the outside world goes through SystemControls, which
 // probes asynchronously; this file only reads the cached state and draws.
-#include "manager.h"
+#include <manager.h>
 
 #include <algorithm>
 #include <cmath>
@@ -377,7 +377,7 @@ void Manager::toggleControlCenter() {
     layoutControlCenter();
     sysctl.requestRefresh();
     grabPointer();
-    XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    grabShellKeyboard();
     dirty = true;
 }
 

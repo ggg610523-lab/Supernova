@@ -365,6 +365,13 @@ private:
     void grabPointer();
     void ungrabPointer();
     void closeOverlays();
+    // Keyboard grabs for the shell's modal surfaces. On X11 these really grab
+    // the keyboard; on Wayland being the compositor already means every key is
+    // ours, so the platform hooks are no-ops.
+    void grabShellKeyboard() {
+        XGrabKeyboard(dpy, root, False, GrabModeAsync, GrabModeAsync, CurrentTime);
+    }
+    void ungrabShellKeyboard() { XUngrabKeyboard(dpy, CurrentTime); }
     void showContextMenu(Client* c, int x, int y);
     void openStartMenu();
     // The circle button's flyout: a time-based greeting over the recent apps.

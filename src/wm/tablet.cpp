@@ -21,7 +21,7 @@
 // shell, the two are swapped while it completely covers the screen, and it
 // fades back out onto the new one. That is what makes the change read as a mode
 // switch rather than a redraw.
-#include "manager.h"
+#include <manager.h>
 
 #include <algorithm>
 #include <cctype>

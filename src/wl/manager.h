@@ -1,0 +1,1414 @@
+// The Wayland window manager: xdg-shell policy (map/configure/state/focus/
+// stacking), libinput/Wayland input handling (drag, resize, snapping,
+// shortcuts) and the Windows 11 shell (taskbar, Start, Alt-Tab, Task View,
+// flyouts).
+//
+// Design: we are the compositor, so every client surface is ours to draw. Each
+// xdg_toplevel is wrapped in the Fluent chrome by the same renderer that paints
+// the shell, and input is routed to the focused wlr_surface through the seat.
+// There is no reparenting and no XComposite: client buffers are imported as GL
+// textures directly, which keeps moving and resizing as cheap as the X11 build.
+#pragma once
+
+extern "C" {
+#include <wayland-server-core.h>
+}
+
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "apps.h"
+#include "compositor.h"
+#include "icons.h"
+#include "motion.h"
+#include "sysctl.h"
+#include "text.h"
+#include "theme.h"
+#include "util.h"
+#include "widgets.h"
+
+// Global forward declarations: `struct wlr_output*` written inside namespace wm
+// would otherwise declare a new wm::wlr_output instead of naming wlroots'.
+struct wl_display;
+struct wl_listener;
+struct wlr_allocator;
+struct wlr_backend;
+struct wlr_cursor;
+struct wlr_input_device;
+struct wlr_keyboard;
+struct wlr_output;
+struct wlr_output_layout;
+struct wlr_renderer;
+struct wlr_seat;
+struct wlr_surface;
+struct wlr_xcursor_manager;
+struct wlr_xdg_popup;
+struct wlr_xdg_shell;
+struct wlr_xdg_surface;
+struct wlr_xdg_toplevel;
+struct wlr_xdg_toplevel_decoration_v1;
+
+namespace wm {
+
+// Snap targets, as Windows 11 offers them while a window is dragged to an edge.
+enum SnapZone {
+    kSnapNone = 0,
+    kSnapLeft, kSnapRight, kSnapTop, kSnapBottom,
+    kSnapTopLeft, kSnapTopRight, kSnapBottomLeft, kSnapBottomRight,
+};
+
+// Wayland has no atoms or window ids: metadata arrives through xdg-shell and
+// the X11 event names are replaced by the protocol handlers below. These
+// aliases keep the shared shell code (which only ever passes these values
+// around) compiling unchanged.
+using Time = uint32_t;
+using Window = uintptr_t;
+using KeySym = uint32_t;
+
+// The modifier and button constants the shared shell code spells the X11 way.
+// Their values are the ones X11 uses, so the ported shortcut table needs no
+// translation.
+constexpr unsigned ShiftMask = 1u << 0;
+constexpr unsigned LockMask = 1u << 1;
+constexpr unsigned ControlMask = 1u << 2;
+constexpr unsigned Mod1Mask = 1u << 3;
+constexpr unsigned Mod4Mask = 1u << 6;
+enum { Button1 = 1, Button2 = 2, Button3 = 3, Button4 = 4, Button5 = 5 };
+
+// A managed top level window. `frame` is the chrome we draw around it; the
+// client itself lives at clientRect() and is never reparented.
+struct Client {
+    Client() = default;
+    ~Client();
+    Client(const Client&) = delete;
+    Client& operator=(const Client&) = delete;
+
+    class Manager* manager = nullptr;  // the compositor that owns this client
+    Window id = 0;
+    bool listenersAdded = false;
+    Rect frame;             // outer frame, screen coordinates
+    Rect restore;           // geometry to return to from maximised / snapped
+    int captionH = metrics::kCaptionH;
+    bool frameless = false;  // client asked for no decorations (_MOTIF_WM_HINTS)
+    bool managed = false;   // false for override-redirect / dock / desktop windows
+    bool alive = true;
+    bool mapped = false;
+    bool redirected = false;
+    bool unredirected = false;   // fast path: fullscreen window drawn by the server
+    bool focused = false;
+    bool minimized = false;
+    bool fullscreen = false;
+    bool maximizedH = false, maximizedV = false;
+    bool skipTaskbar = false, skipPager = false;
+    bool isDock = false, isDesktop = false, isDialog = false, isModal = false;
+    bool isSplash = false, isToolbar = false, isMenu = false;
+    bool hasAlpha = false;
+    // Client asked for a blurred backdrop behind its (translucent) content via
+    // _KDE_NET_WM_BLUR_BEHIND_REGION. We render the Windows 11 Mica backdrop
+    // under such a window instead of the flat dark body.
+    bool blurBehind = false;
+    bool inputHint = true;       // WM_HINTS input: false means "focus by protocol"
+    bool takeFocus = false;      // WM_TAKE_FOCUS is in WM_PROTOCOLS
+    bool userPosition = false;   // the client asked for a specific position
+    bool urgent = false;         // _NET_WM_STATE_DEMANDS_ATTENTION
+    int snapZone = kSnapNone;
+    long strut[4] = {0, 0, 0, 0};  // left, right, top, bottom (dock reservations)
+
+    std::string title = "Window";
+    std::string appName;   // lower-case WM_CLASS instance, used to match launchers
+    pid_t pid = 0;
+
+    // WM_NORMAL_HINTS, applied to the *client* size while resizing.
+    int minW = 1, minH = 1, maxW = 0, maxH = 0;
+
+    // ---- compositing (Wayland)
+    // The xdg toplevel and its surface. `id` is a unique small integer kept for
+    // the shell's bookkeeping (the shared draw code compares it in one place).
+    struct wlr_xdg_toplevel* toplevel = nullptr;
+    struct wlr_xdg_surface* xdg = nullptr;
+    struct wlr_surface* surface = nullptr;
+    WindowTex tex;
+    bool needsRepaint = true;
+    int pixW = 0, pixH = 0;     // buffer size the current texture was imported at
+    // Geometry the client asked for through xdg_toplevel.configure; the frame is
+    // laid out around it and the configure is acknowledged by the compositor.
+    int pendingW = 0, pendingH = 0;
+    bool configured = false;
+    bool closeRequested = false;
+    std::string appId;          // xdg_toplevel app_id, used to match launchers
+    bool serverDecorated = true;
+    int configureSerial = 0;
+    // Popups and subsurfaces are drawn relative to their parent surface; the
+    // shell only ever needs the popup list (menus, tooltips).
+    std::vector<struct wlr_xdg_popup*> popups;
+    int bufferW = 0, bufferH = 0;
+    // Protocol listeners owned by this client.
+    struct wl_listener surfaceCommit{}, surfaceDestroy{}, surfaceMap{}, surfaceUnmap{},
+        toplevelDestroy{}, toplevelRequestMove{}, toplevelRequestResize{},
+        toplevelRequestMaximize{}, toplevelRequestFullscreen{}, toplevelRequestMinimize{},
+        toplevelTitle{}, toplevelAppId{}, toplevelClose{}, toplevelShowMenu{};
+
+    GLuint iconTex = 0;
+    int iconW = 0, iconH = 0;
+
+    // caption button interaction: 0 minimise, 1 maximise, 2 close, -1 none
+    int hoverBtn = -1;
+    int pressBtn = -1;
+    double hoverFade[3] = {0.0, 0.0, 0.0};  // eased 0..1 caption-button hover
+
+    // ---- animation
+    double appear = 1.0;      // 0 -> 1 open animation
+    double vanish = 0.0;      // 0 -> 1 close animation
+    double minFade = 0.0;     // 0 -> 1 minimise animation
+    double zoom = 1.0;        // 1 = final geometry, 0 = animation just started
+    Rect drawFrame;           // interpolated frame actually painted
+    Rect animFrom;            // frame at the start of a geometry animation
+    double animStart = 0.0;
+    int animMs = metrics::kAnimMs;
+    // ---- fluid geometry (motion.h)
+    // The painted frame is a physical state rather than a stopwatch-eased
+    // interpolant. `geo` carries (x, y, w, h) as one continuous box (motion::
+    // SpringGeometry), keeping every channel's velocity across retargets so
+    // reversing a maximise mid-flight bends the trajectory instead of restarting
+    // it. `geoSpring` is set the first time a transition is routed through the
+    // springs; until then the legacy timed lerp is used for the launch
+    // placeholder and the tablet zoom, which share their own timelines.
+    motion::SpringGeometry geo;
+    bool geoLive = false;     // springs primed from a real frame
+    bool geoSpring = false;   // geometry is integrated by the springs
+    double attentionPulse = 0.0;
+    // Opened from a desktop icon's launch placeholder: the placeholder already
+    // supplies the reveal, so the usual zoom-in scale would only fight it and
+    // make the window a slightly different size from the tile it replaces.
+    bool fromLaunch = false;
+    bool closing = false;
+    double closeDeadline = 0.0;
+    // Hidden by tablet/mobile mode: minimised when the mode was entered so the
+    // window is neither painted nor clickable, then restored on the way out.
+    bool tabletHidden = false;
+    // Opened from the tablet home screen: it fills the area between the status
+    // bar and the home indicator, with the decorations stowed while it is up.
+    bool tabletApp = false;
+    // iOS 26 zoom transition anchor (tablet mode only): the home-screen or dock
+    // icon the window grows out of on open and collapses back into on close or
+    // minimise. Desktop mode never reads it.
+    Rect tabletFrom;
+    bool tabletFromValid = false;
+    // One UI / Android 12 splash: the launcher entry this window came from. Its
+    // squircle is painted over the shape while it grows, then cross-fades away to
+    // reveal the content underneath. Desktop mode never reads either.
+    std::string tabletIcon;
+    std::string tabletIconClass;
+    // The shell's own Settings window: a real managed client whose content is
+    // painted by the WM in the overlay rather than read back from a pixmap.
+    bool internalSettings = false;
+};
+
+// Command line options.
+struct Options {
+    std::string display;   // unused on Wayland; kept so main.cpp stays shared
+    std::string socket;    // WAYLAND_DISPLAY to advertise (default: auto)
+    bool headless = false; // render offscreen (frame dumps for tests)
+    bool drm = false;      // force the DRM/KMS session backend
+    bool nested = false;   // force nesting inside the host Wayland server
+    bool vsync = true;
+    bool stats = false;
+    bool unredirect = true;
+    int frames = 0;  // > 0: render this many frames and exit (self test)
+    // Optional: launch these commands once the WM owns the display. This
+    // replaces the old SDL prototype's "--embed prog" flag: instead of
+    // forcing one foreign client *inside* another compositor window, the
+    // single GPU compositor just starts the apps and manages them normally,
+    // with DAMAGE-driven repaint and vsynced presentation.
+    std::vector<std::string> launch;
+    // Emit a machine-readable "PERF fps=... cpu=... gpu=... draws=..." line on
+    // stderr once per sampling window. Used by scripts/bench.sh.
+    bool perfLog = false;
+    // Boot straight into the tablet/mobile home screen instead of the Windows 11
+    // desktop. The same as starting with WIN11WM_TABLET=1 -- mobile.sh uses it to
+    // open a phone-sized window already in tablet mode.
+    bool tablet = false;
+    // Write the last rendered frame to this path as a PPM, for tests and for
+    // checking what clients actually put on screen.
+    std::string dumpPath;
+};
+
+
+// The window manager + shell.
+class Manager {
+public:
+    // Plain data for one grid cell, declared next to DesktopItem in apps.h.
+    Manager() = default;
+    ~Manager();
+    Manager(const Manager&) = delete;
+    Manager& operator=(const Manager&) = delete;
+
+    int run(const Options& options);
+    // Signal safe: only sets the flag and asks the Wayland loop to terminate.
+    void stop();
+
+private:
+    // ---- start up / tear down
+    bool openDisplay(const std::string& name, std::string* error);
+    bool claimWm(std::string* error);
+    void setupRootProperties();
+    bool grabKeys(std::string* error);
+    void scanExistingWindows();
+    void shutdown();
+
+    // ---- event loop
+    void loop();
+    void renderFrameOnOutput();
+    void tickAnimations(double now);
+    // Eases every ambient value (hovers, selections, flyout opacity) one frame.
+    void tickFluidMotion(double dtMs);
+    void updateHoverStates(int px, int py);
+
+    // ---- Launchpad transition (motion.h)
+    // The open/close progress is a spring, not a timed ramp. The launchpad is
+    // drawn straight from it: the whole field fades in while scaling from 1.2 to
+    // 1, the way the macOS Web launchpad animates.
+    void stepStartSpring(double dtSec, double now);
+    // Keyboard/pointer grabs are implicit when you are the compositor: the shell
+    // always sees the events, so the X11 grab calls become no-ops.
+    void grabShellKeyboard() {}
+    void ungrabShellKeyboard() {}
+    void requestFrame();
+
+    // ---- client bookkeeping (windows.cpp)
+    Client* find(Window w);
+    Client* add(Window w, bool existing);
+    void removeClient(Client* c);
+    void readTitle(Client* c);
+    void readClassAndPid(Client* c);
+    void readWindowType(Client* c);
+    void readDecorations(Client* c);
+    void readNormalHints(Client* c);
+    void readIcon(Client* c);
+    void readStruts(Client* c);
+    void readAlpha(Client* c);
+    void readOpacity(Client* c);
+    void readBlurBehind(Client* c);
+    void updateClientList();
+    void updateWorkArea();
+    // Wayland has no _NET_WM_STATE to publish; kept for the shared policy code.
+    void updateStateAtoms(Client* c);
+    void ensurePixmap(Client* c);
+    void destroyPixmap(Client* c);
+    void syncClientGeometry(Client* c);
+    void applyFrame(Client* c, bool animate);
+    // Geometry springs (motion.h): settle drops them onto `frame` at rest (an
+    // instant move, e.g. under the pointer during a drag) and step advances one
+    // frame toward `frame`.
+    void settleGeometry(Client* c);
+    void stepGeometry(Client* c, double dtSec);
+    Rect clientRect(const Client* c) const;
+
+    // ---- policy
+    void mapClient(Client* c);
+    void unmapClient(Client* c);
+    void raiseClient(Client* c);
+    void restack();
+    void focusClient(Client* c, bool raise);
+    void focusNext(bool forward);
+    Client* activeClient() const;
+    void closeClient(Client* c);
+    void minimizeClient(Client* c, bool animate);
+    void restoreClient(Client* c);
+    void toggleMaximize(Client* c);
+    void setMaximized(Client* c, bool horizontal, bool vertical);
+    void setFullscreen(Client* c, bool on);
+    void toggleFullscreen(Client* c);
+    void snapClient(Client* c, int zone);
+    Rect snapGeometry(int zone) const;
+    Rect workArea() const;
+    void placeNewClient(Client* c);
+    void toggleShowDesktop();
+    void updateFullscreenRedirection();
+    void activateTaskbarItem(Client* c);
+    void cycleTaskbar(bool backward);
+    int  openWindows() const;
+
+    // ---- input (input.cpp)
+    // Pointer and keyboard arrive from the wlr_seat; the shell's hit testing is
+    // shared with the X11 build's code, which is why these take plain pixels.
+    void onPointerMotion(double x, double y);
+    void onPointerButton(unsigned button, bool pressed, uint32_t time);
+    void onPointerAxis(double delta);
+    void onKey(uint32_t keycode, uint32_t modifiers, bool pressed);
+    void onKeyboardModifiers(uint32_t modifiers);
+    // The shared key handling (search fields, rename fields, Alt-Tab, the Win
+    // shortcuts), lifted from the X11 build with the event struct replaced by
+    // the decoded keysym and typed text.
+    void onKeyPressWithText(uint32_t sym, unsigned mods, const std::string& typed);
+    void runShortcut(uint32_t keysym, unsigned mods);
+    // The X11 handlers' bodies, with the event struct replaced by plain values.
+    void onShellButtonPress(int x, int y, unsigned button, Time time, unsigned state);
+    void onShellButtonRelease(int x, int y, unsigned button, Time time);
+    void onShellMotion(int x, int y);
+    Client* contentAt(int x, int y) const;
+    bool shellHasKeyboard() const;
+    // xdg-shell / surface events (windows.cpp equivalent).
+    void onNewToplevel(struct wlr_xdg_toplevel* toplevel);
+    void onToplevelCommit(Client* c);
+    void onToplevelDestroy(Client* c);
+    void onNewPopup(struct wlr_xdg_popup* popup);
+    void onSurfaceCommit(Client* c);
+    void onRequestMove(Client* c, struct wlr_seat_pointer_request_set_cursor_event* e);
+    void beginInteractiveMove(Client* c);
+    void beginInteractiveResize(Client* c, uint32_t edges);
+
+    void handleOverlayPress(int x, int y, unsigned button, Time time);
+    void handleTaskbarPress(int x, int y, unsigned button);
+    void handleClientPress(Client* c, int x, int y, unsigned button);
+    void beginMove(Client* c, int x, int y);
+    void beginResize(Client* c, int edge, int x, int y);
+    void updateDrag(int x, int y);
+    void endDrag(int x, int y);
+    // Abort a drag without applying a snap: the window keeps the geometry the
+    // drag last pushed, instead of being snapped to whatever (0,0) means.
+    void cancelDrag();
+    int  hitEdge(int x, int y, Client** out) const;      // 1..8 edge, 0 none
+    int  hitCaptionButton(const Client* c, int x, int y) const;
+    int  hitTitleBar(Client* c, int x, int y) const;
+    // The top-most managed client whose *chrome* (caption / resize band, never
+    // the client's own content) covers the point. The overlay is the bottom
+    // window, so clicks on chrome that another window overlaps arrive here
+    // instead; this is how we get them back.
+    Client* chromeAt(int x, int y) const;
+    bool handleChromePress(int x, int y, unsigned button, Time time);
+    void grabPointer();
+    void ungrabPointer();
+    void closeOverlays();
+    void showContextMenu(Client* c, int x, int y);
+    void openStartMenu();
+    // The circle button's flyout: a time-based greeting over the recent apps.
+    void openRingMenu();
+    void toggleTaskView();
+    void toggleControlCenter();
+    bool overlayOpen() const;
+    bool pointInOverlaySurface(int x, int y) const;
+    // The top-most managed client whose frame contains the point (chrome areas
+    // only: client content is not ours to hit test).
+    Client* clientAt(int x, int y) const;
+    int  snapZoneFor(int x, int y) const;
+    void openAltTab(bool backward);
+    void applyContextAction(int index);
+
+    // ---- shell drawing (draw.cpp)
+    void render();
+    void drawDesktop();
+    void drawClientSprite(Client* c);
+    void drawTaskbar();
+    void drawStartMenu();
+    void drawAltTab();
+    void drawTaskView();
+    void drawControlCenter();
+    void drawSnapPreview();
+    void drawContextMenu();
+    void drawStats();
+    void layoutTaskbar();
+    // The rectangle a taskbar button's icon occupies on screen right now: its
+    // static cell, slid by the dock's spread and grown by the zoom. Hover and
+    // clicks test this unioned with the static cell, so the icon the pointer is
+    // actually over is the one that answers (Plank unions the item draw region
+    // into its hover region for the same reason).
+    Rect taskHitRect(size_t index) const;
+    void layoutStartMenu();
+    // Rearranging the Launchpad's tiles: the tile under the pointer lifts out of
+    // the grid and the rest of the page parts around it with the same springy
+    // overshoot the desktop icons use (animateLaunchTileReflow, in draw.cpp).
+    void beginLaunchTileDrag(int slot, int x, int y);
+    void updateLaunchTileDrag(int x, int y);
+    void endLaunchTileDrag(int x, int y);
+    void animateLaunchTileReflow(double dtMs);
+    void drawTextAt(const std::string& s, int px, Weight w, const Color& c, int x, int y);
+    void drawTextCentered(const std::string& s, int px, Weight w, const Color& c, const Rect& r);
+    void drawTextRight(const std::string& s, int px, Weight w, const Color& c, int right, int y);
+    // The same two draws against an explicit Text instance, so the digital clock
+    // can set its time in the display face while the rest of the shell stays in
+    // the UI font. measureIn() is the matching metrics-only call.
+    void drawTextCenteredIn(Text& t, const std::string& s, int px, Weight w, const Color& c,
+                            const Rect& r);
+    int measureIn(Text& t, const std::string& s, int px, Weight w, int* outH = nullptr);
+    // The display face when it loaded, the UI font otherwise, so a missing
+    // Roboto.ttf degrades to an in-family clock rather than no clock.
+    Text& displayText();
+    void drawStartGlyph(const Rect& box, const Color& c);
+    void drawSearchGlyph(const Rect& box, const Color& c);
+    void drawCaptionGlyph(int which, const Rect& box, const Color& c);
+    // Icon for a launcher: the entry's Icon= name first, then its StartupWMClass.
+    // `theme` picks the source -- Hatter's colourful app art by default, Reversal
+    // for the Control Centre. Returns false when nothing resolved, so the caller
+    // can fall back to the coloured letter tile.
+    bool drawAppIcon(const Rect& r, const std::string& iconName, const std::string& wmClass,
+                     float radius, float opacity, IconTheme theme = IconTheme::Hatter);
+    void drawAppTile(const Rect& r, const std::string& name, float radius, const Color& tint,
+                     bool hovered);
+    void drawWindowThumb(const WindowTex& tex, const Rect& dst, float radius, bool focused);
+
+    // ---- Control Centre (controlcenter.cpp)
+    // The iOS grid is 4 columns x 5 rows; a module occupies one or two cells of
+    // it and every interactive part of a module is registered as a CcControl so
+    // hit testing is a plain rectangle scan.
+    struct CcControl {
+        Rect rect;
+        int id = 0;          // CcId
+        int slot = 0;        // index within a multi-button module
+        bool vertical = false;  // slider: value grows upwards
+    };
+    void layoutControlCenter();
+    void updateCcHover(int px, int py);
+    void handleControlCenterPress(int x, int y, unsigned button);
+    void updateCcDrag(int x, int y);
+    void endCcDrag();
+    void activateCcControl(int id);
+    void launchCcApp(int index);
+    // Index into ccControls of a given (id, slot), or -1.
+    int ccControlIndex(int id, int slot) const;
+    // Scale factor (percent) the whole grid is drawn at, so a short screen
+    // shrinks the panel instead of clipping it.
+    int ccScale() const;
+
+    // Re-skins the Fluent shell and remembers the choice. The palette itself is
+    // theme::applyMode()'s business; this only commits the setting and asks for a
+    // repaint, and it is a no-op when the mode is already what was asked for.
+    void setLightMode(bool on);
+
+    // ---- Settings (settings.cpp)
+    // One app, two skins: a Fluent acrylic window with a sidebar on the desktop,
+    // and a full-screen One UI sheet with large cards on the tablet. Both drive
+    // the same rows, so a setting behaves the same in either mode.
+    struct SettingsRow {
+        int id = 0;
+        Rect rect;
+        std::string title;
+        std::string subtitle;
+        bool toggle = false;
+        bool on = false;
+        bool enabled = true;
+        bool info = false;   // a read-only line in the About section
+        bool header = false;  // a grouped-list section title (iOS skin)
+        bool slider = false;  // a 0..100 value drawn as a track/knob
+        int value = 0;
+    };
+    void openSettings();
+    void openSettingsWindow();
+    // A shell-owned "window" with no client behind it: its content is painted by
+    // the WM (the desktop Settings app). Used by settings.cpp on Wayland, where
+    // there is no X window to create.
+    Client* addInternalWindow(const std::string& title, int x, int y, int frameW,
+                              int frameH);
+    void closeSettingsWindow();
+    void layoutSettings();
+    void drawSettings();
+    void drawSettingsContent(Client* c);
+    void updateSettingsHover(int x, int y);
+    void updateSettingsSliderDrag(int x, int y);
+    void endSettingsSliderDrag();
+    bool handleSettingsPress(int x, int y, unsigned button);
+    bool handleSettingsContentPress(int x, int y, unsigned button);
+    void activateSettingsRow(int id);
+    void setSettingsSection(int section);
+    // Runs a launcher unless it is the shell's own Settings entry, in which case
+    // it opens the internal panel and no process is forked.
+    bool launchShellApp(const std::string& exec);
+
+    // ---- desktop icons (draw.cpp / input.cpp)
+    void layoutDesktopIcons();
+    // Eases every icon's shown cell toward its target cell, so the grid reads
+    // like macOS' spring reflow when a widget is placed, removed or dragged.
+    void animateDesktopIconReflow(double dtMs);
+    void drawDesktopIcons();
+    // Returns true when the press landed on an icon (and was consumed).
+    bool handleDesktopPress(int x, int y, Time time);
+    // Carries an icon being dragged: once the press has moved past the slop it
+    // stops being a click and becomes a free placement, following the pointer.
+    void updateDesktopIconDrag(int x, int y);
+    // Drops the drag. A press that never moved is the click it stood for, so the
+    // item opens; one that did leaves the icon where the user put it.
+    void endDesktopIconDrag(int x, int y, unsigned button);
+    void openDesktopItem(const DesktopItem& item, const Rect& fromIcon);
+    // The icon under a point, or -1. Tests the cells the user is actually looking
+    // at, so a press mid-reflow lands on the icon it visibly hit.
+    int desktopItemAt(int x, int y) const;
+    // Flips the desktop no-overlap option, writes it and re-lays the desktop so
+    // the fold is visible at once. The menu row reads the same flag for its label.
+    void toggleDesktopNoOverlap();
+
+    // ---- desktop folders (the filesystem work is in apps.cpp)
+    // Rebuilds the grid around the desktop directory's current contents. Used
+    // after the shell itself creates, renames or deletes something; the cells the
+    // surviving icons already hold are kept, so the rest of the grid glides to
+    // its new place instead of jumping. `selectPath`, when it names an entry that
+    // survived, leaves that entry selected -- the grid is sorted by name, so its
+    // index has moved and cannot be carried across.
+    void refreshDesktop(const std::string& selectPath = {});
+    // Renaming a folder: a field over the icon's own label with the keyboard held,
+    // so a name can be typed without a second dialog. Return commits, Escape
+    // abandons, and either way the grab is handed back.
+    void beginDesktopRename(int index);
+    void commitDesktopRename();
+    void cancelDesktopRename();
+    void drawDesktopRename();
+    // The field drawn over a folder's label while it is named. Shared by the
+    // painter and the press test so what is drawn and what is clickable cannot
+    // drift apart. Empty when no rename is up.
+    Rect desktopRenameRect() const;
+    // Deleting a folder is the one thing here that cannot be undone, so it is only
+    // ever reached through this dialog: Escape or Cancel backs out, Return or
+    // Delete goes ahead.
+    void openConfirmDelete(const std::string& path, const std::string& name);
+    void commitConfirmDelete();
+    void closeConfirmDelete();
+    void drawConfirmDelete();
+
+    // ---- app launch animation (desktop icon -> window, iOS style)
+    // Double-clicking a desktop icon grows a placeholder tile out of the icon
+    // and into the window the app will open, so the launch feels instant even
+    // while the process is still starting. When the real window finally maps it
+    // morphs out of the tile instead of popping in.
+    struct LaunchAnim {
+        Rect from;    // the desktop icon it grew out of
+        Rect to;      // the window rect it settles into
+        Rect rect;    // current animated rect
+        std::string icon;
+        std::string name;
+        double start = 0.0;
+        double ms = 0.0;
+        Client* client = nullptr;  // the real window, once it maps
+        double claimStart = 0.0;
+    };
+    std::vector<LaunchAnim> launches;
+    void beginLaunchAnim(const DesktopItem& item, const Rect& fromIcon);
+    void claimLaunch(Client* c);            // hand a fresh window its launch tile
+    void tickLaunches(double now, double dtMs);
+    void drawLaunches();
+
+    // ---- desktop widgets (widgets.cpp)
+    void initWidgets();                       // default clock + battery
+    void drawWidgets();
+    void drawClockWidget(const Widget& w);
+    void drawBatteryWidget(const Widget& w);
+    void drawCalendarWidget(const Widget& w);
+    void drawWeatherWidget(const Widget& w);
+    void drawDigitalClock(const Widget& w);
+    int  widgetAt(int x, int y) const;        // index, or -1
+    bool widgetOnPage(const Widget& w) const;  // is this card on the page shown?
+    bool handleWidgetPress(int x, int y, Time time);  // true when consumed
+    void beginWidgetDrag(int index, int x, int y, bool resize);
+    void updateWidgetDrag(int x, int y);
+    void endWidgetDrag();
+    void addWidget(WidgetKind kind);
+    void removeWidget(int index);
+    // Both halves of the desktop's arrangement -- the cards and the cells the
+    // icons were dragged into -- written out together. Called whenever either
+    // changes and again on the way out, so the desktop comes back as it was left.
+    void saveDesktopLayout();
+    void suspendWidgets();                    // stash the desktop cards for tablet mode
+    void restoreWidgets();                    // put the desktop cards back on leaving
+    void initTabletWidgets();                 // the phone's own, smaller card set
+    void openDesktopMenu(int x, int y);       // right click on the desktop
+    void refreshBattery(bool force);
+    void refreshWeather(bool force);
+    // Corner grip of a widget, for the resize cursor / press test.
+    Rect widgetGripRect(const Widget& w) const;
+
+    // ---- tablet / mobile mode (tablet.cpp)
+    // An iOS-like home screen: status bar with the date and time, a grid of
+    // squircle app icons, a glass dock and the iPhone X home indicator. The
+    // desktop windows are hidden while it is up and only the Control Centre stays
+    // reachable -- the widget cards come off the desktop entirely. Switching plays
+    // a full-screen splash.
+    void setTabletMode(bool on);       // starts the splash transition
+    void applyTabletMode();            // swap, at the splash midpoint
+    void buildTabletEntries();         // the ordered home/dock lists, once
+    int tabletDockCapacity() const;   // icons the dock row has room for
+    void layoutTabletDockPicker();     // the picker's sheet, tiles and page dots
+    void openTabletDockPicker();       // fill it with everything not in the dock
+    void closeTabletDockPicker();
+    void addTabletDockApps();          // commit the ticked apps to the dock
+    void removeTabletDockApp(int i);   // a remove badge was tapped
+    void drawTabletDockBadge(const Rect& box, const char* glyph, float a, bool tile);
+    void drawTabletDockPickerView();
+
+    void openTabletMenu(int dockIndex, int homeIndex);
+    void closeTabletMenu();
+    void layoutTabletMenu();
+    void drawTabletMenuView();
+    bool runTabletMenuAction(int row);
+    void tabletMenuItems(std::vector<std::string>& labels, std::vector<char>& danger,
+                         std::vector<int>& acts) const;
+    // Put a lifted icon back where it came from without running any drop logic: what
+    // the quick actions gesture needs, where the long press turns out not to have
+    // been a drag after all.
+    void cancelTabletIconDrag();
+    void drawTabletRunDot(const Rect& box, int jiggle, float a);
+    // Whether a home screen entry has a window open. This is the same match that
+    // anchors the launch zoom, so the dot lands under the icon the window came from.
+    bool tabletEntryRunning(const TabletEntry& e) const;
+    bool tabletEntryMatchesClient(const TabletEntry& e, const Client* c) const;
+    void saveTabletLayout();           // write the arrangement the user left
+    bool loadTabletLayout();           // read it back; false when there is none
+    void layoutTabletHome();           // dock/home entries and their rects
+    void layoutTabletFolder();         // the open folder's sheet and 3x3 cells
+    Rect tabletGridCell(int k) const;  // where icon k of a page sits
+    void setTabletHomePage(int page);  // turn to a page, relaying out the grid
+    void drawTabletGridPage(int page, int dx, float a, double wiggle);
+    void closeTabletFolder();          // fold the open folder back into its icon
+    void openTabletFolder(int index);  // zoom a folder's icon out into its sheet
+    // iOS names a new folder after what it thinks is in it. There is no category
+    // database here, so the honest version is the shared word of its apps, and
+    // "Folder" when they share nothing.
+    static std::string suggestFolderName(const std::vector<TabletEntry>& apps);
+    void drawTabletHome();             // wallpaper overlay: icons and dock
+    void drawTabletFolderView();       // the dimmed backdrop and open folder sheet
+    void drawTabletRename();           // the rename field, while one is open
+    void drawTabletChrome();           // status bar + home indicator, over the app
+    void drawTabletSplash();           // the desktop <-> tablet transition
+    bool handleTabletPress(int x, int y, unsigned button, Time time);
+    // A tap is acted on when the button comes back up, not when it goes down, so
+    // that a press held still is still available to become a drag or a long press.
+    void handleTabletRelease(int x, int y, unsigned button, Time time);
+    void openTabletEntry(const TabletEntry& e);
+    // An app opened from the home screen keeps tablet mode and is inset so the
+    // status bar and the home indicator stay tappable above and below it.
+    void makeTabletApp(Client* c);
+    void endTabletApp(Client* c);
+    // The icon rect a tablet window should zoom out of / collapse into: the
+    // home-screen entry that matches it, then the dock, then a spot above the
+    // home indicator when it has no icon on the grid.
+    Rect tabletIconRectFor(const Client* c) const;
+    // The launcher entry itself, by the same rule: grid (or a folder on it), then
+    // the dock. Null when nothing matches -- the splash then falls back to the
+    // window's own letter tile.
+    const TabletEntry* tabletEntryFor(const Client* c) const;
+    void tabletGoHome();               // minimise every open app, back to the grid
+    // ---- the One UI app drawer (the full-screen "Apps" screen) -------------
+    // Every tablet app -- grid, folder members and dock alike -- gathered into one
+    // alphabetical grid, opened by swiping up on the wallpaper and put away by
+    // swiping down, tapping an app, or the home-bar gesture.
+    void buildTabletDrawerApps();
+    void updateTabletDrawerMatches();
+    void setTabletDrawerSearch(const std::string& query);
+    void clearTabletDrawerSearch();
+    void layoutTabletDrawer();
+    Rect tabletDrawerCell(int k) const;
+    int tabletDrawerHitTest(int x, int y) const;
+    void setTabletDrawerPage(int page);
+    void openTabletDrawer();
+    void closeTabletDrawer();
+    bool handleTabletDrawerPress(int x, int y, unsigned button);
+    void handleTabletDrawerRelease(int x, int y, unsigned button);
+    void updateTabletDrawerMotion(int x, int y);
+    // The interactive part of the drawer: the finger owns the progress while it
+    // is down, then the spring takes over with the velocity it was let go with.
+    void beginTabletDrawerPull(int fromY, double fromProgress);
+    void updateTabletDrawerPull(int y);
+    void endTabletDrawerPull();
+    void drawTabletDrawer(float a);
+    // The iPhone X home-bar gesture, as Apple documents it: swipe up to go home,
+    // swipe up and hold (or overshoot) for the app switcher, swipe sideways to
+    // step between apps, and swipe a card up inside the switcher to quit it.
+    std::vector<Client*> tabletAppList() const;  // open tablet apps, bottom..top
+    bool handleTabletGesturePress(int x, int y);
+    void updateTabletGesture(int x, int y);
+    void endTabletGesture();
+    void switchTabletApp(int dir);
+    void openTabletSwitcher();
+    void closeTabletSwitcher();
+    void layoutTabletSwitcher();
+    void drawTabletSwitcher();
+    bool handleTabletSwitcherPress(int x, int y, unsigned button);
+    void updateTabletSwitchDrag(int x, int y);
+    void endTabletSwitchDrag();
+    // Home-screen rearrangement: the icons are dragged between grid cells and
+    // the widgets are moved and resized exactly as they are on the desktop.
+    bool handleTabletIconPress(int x, int y);
+    // A drag can be lifted from the grid, from the dock, or from a page of an open
+    // folder, and released over any of them; endTabletIconDrag() resolves it.
+    void beginTabletIconDrag(int index, int x, int y);
+    void beginTabletDockDrag(int index, int x, int y);
+    void beginTabletFolderDrag(int cell, int x, int y);
+    void updateTabletIconDrag(int x, int y);
+    void endTabletIconDrag();
+    // One spring step for the whole dock row, called every frame the home screen
+    // is up, and the pop of a single icon that a drop or a launch has to bounce.
+    void updateTabletDockPhysics(double dtMs);
+    void bounceTabletDockIcon(int index);
+    // A drop helper, a private member rather than a file static because it names
+    // the nested entry type. It reports true when the folder is left empty, so the
+    // caller can delete it the way iOS does.
+
+    // ---- cursor helper: 0 arrow, 1 text, 2 hresize, 3 vresize, 4 nwse, 5 nesw,
+    // 6 hand. The Wayland build swaps wlr_cursor's image from the Xcursor theme.
+    void setCursor(int which);
+    int cursorShown = 0;
+    std::vector<std::string> cursorNames;
+
+    // ---- Wayland state
+    struct wl_display* wlDisplay = nullptr;
+    struct wlr_backend* backend = nullptr;
+    struct wlr_renderer* renderer = nullptr;
+    struct wlr_allocator* allocator = nullptr;
+    struct wlr_output* output = nullptr;
+    struct wlr_output_layout* outputLayout = nullptr;
+    struct wlr_xdg_shell* xdgShell = nullptr;
+    struct wlr_seat* seat = nullptr;
+    struct wlr_cursor* cursor = nullptr;
+    struct wlr_xcursor_manager* cursorManager = nullptr;
+    struct wl_listener newOutput{}, newXdgSurface{}, newPopup{}, cursorMotion{},
+        cursorMotionAbsolute{}, cursorButton{}, cursorAxis{}, cursorFrame{},
+        requestSetCursor{}, newInput{}, keyboardModifiers{};
+    bool nested = true;
+    struct wlr_keyboard* keyboard = nullptr;
+    struct wl_listener keyboardKey{};
+    struct wl_listener keyboardMods{};
+    unsigned keyMods = 0;
+    double lastIdleRefresh = 0.0;
+    bool runningOnHost = false;
+    int pointerButtonCount = 0;
+    bool buttonConsumed = false;
+    struct wlr_surface* pointerSurface = nullptr;
+    bool pointerSentPress = false;
+    uint32_t lastKeyTime = 0;
+    bool framesLimited = false;
+    int framesTarget = 0;
+    struct wl_event_source* tickTimer = nullptr;
+    struct wl_listener outputFrame{}, outputDestroy{};
+    struct wl_listener xdgMap{}, xdgUnmap{};
+    struct wl_listener decorationNew{};
+
+    std::string assetDir;
+    int screenW = 0, screenH = 0;
+    bool verbose = false;
+    bool dirtyFrame = true;
+    double lastFrameTime = 0.0;
+
+    Compositor comp;
+    Text text;
+    // The digital clock's display face (Roboto at its heaviest cut), loaded from the
+    // same fonts directory. A separate instance keeps its glyph cache and its
+    // heavy weight out of the UI font's.
+    Text clockText;
+    IconStore icons;
+
+    std::vector<std::unique_ptr<Client>> clients;  // bottom .. top
+    Client* focused = nullptr;
+    bool showingDesktop = false;
+
+    // ---- drag / resize
+    Client* dragClient = nullptr;
+    bool dragIsMove = false;
+    int dragEdge = 0;
+    Point dragGrab;         // pointer offset inside the frame when the drag began
+    Rect dragFrameStart;
+    bool dragWasMaximized = false;
+    // Pointer velocity while a move drag is live, in screen pixels per second.
+    // Smoothed across the last few motion events so a release carries a stable
+    // flick speed into the geometry springs (inertia).
+    double dragVelX = 0.0, dragVelY = 0.0;
+    double dragLastMs = 0.0;
+    int dragLastX = 0, dragLastY = 0;
+    int snapZonePreview = kSnapNone;
+    int hoverEdge = 0;
+    Client* hoverResizeClient = nullptr;
+
+    // ---- shell state
+    bool startOpen = false;
+    bool taskViewOpen = false;
+    bool altTabOpen = false;
+    int altTabIndex = 0;
+    std::vector<Client*> altTabOrder;
+    bool contextOpen = false;
+    Client* contextClient = nullptr;   // null = the desktop (widget) menu
+    int contextWidget = -1;            // widget the menu was opened on, or -1
+    int contextPin = -1;               // pinned button the menu was opened on, or -1
+    int contextApp = -1;               // index into apps (Launchpad tile), or -1
+    Rect contextRect;
+    int contextHover = -1;
+    std::vector<std::string> contextItems;
+    // The ring menu reuses the context flyout: the same open/close animation,
+    // pointer grab, hover wipe and dismiss rules, but with a greeting header
+    // over a list of recent apps instead of action strings.
+    bool contextRing = false;
+    std::vector<AppEntry> contextRecents;  // the app each grid cell stands for
+    // A copy of recentFiles taken when the menu opens, so a launch from the menu
+    // never rewrites the grid under the pointer. The visible rows sit between
+    // the app grid and the power row in the same hover index space as them.
+    std::vector<RecentFile> contextFiles;
+    std::vector<Rect> ringRecentRects;     // one square per recent app
+    std::vector<Rect> ringFileRects;       // one row per visible recent file
+    int ringGridH = 0;                     // height of the recent grid, for draw
+    int ringFilesShown = 0;                // visible file rows (<= kRingMaxFiles)
+    int ringFilesLabelTop = 0;             // y of the "Recent files" caption
+    std::vector<Rect> ringPowerRects;      // one per power action, in a row below
+    // The row/cell under a point, or -1. Shared by the hover wipe and the press
+    // handler so the two can never disagree about what is where.
+    int contextRowAt(int x, int y) const;
+    // Lays the panel and its cells out from the current recents; called once when
+    // the menu opens, so the rects stay in step with what drawContextMenu paints.
+    void layoutRingMenu();
+    // Runs one power action (index into the fixed kRingPower table).
+    void runRingPower(int index);
+
+    struct TaskItem {
+        Rect rect;
+        Client* client = nullptr;  // null for a pinned launcher
+        int pin = -1;              // index into pinned, or -1 for a window
+    };
+    std::vector<TaskItem> taskItems;
+    Rect startButtonRect, circleButtonRect, showDesktopRect, clockRect;
+    int hoverTaskIndex = -1;
+    bool hoverStart = false;
+    bool hoverShowDesktop = false;
+    bool hoverClock = false;
+    bool hoverCircle = false;   // the ring button at the left end of the bar
+
+    // ---- pinned taskbar launchers (manager.cpp)
+    // The launchers the user pinned, in pin order. They are laid out right after
+    // the Start button and before the running windows; each keeps its button
+    // whether or not the app is running, and clicking it focuses the app's window
+    // when there is one and starts it when there is not.
+    std::vector<AppEntry> pinned;
+    // The apps launched most recently, newest first, capped at kRingMaxRecents.
+    // Loaded at startup and rewritten on every launch, so the ring menu's list
+    // survives a restart.
+    std::vector<AppEntry> recents;
+    // The files opened most recently, newest first, capped at kRingMaxRecents.
+    // Every non-launcher thing the desktop opens is recorded, so the ring menu
+    // can show what was last worked on. Loaded at startup, written on each open.
+    std::vector<RecentFile> recentFiles;
+    // Records one launch: moves an existing entry to the front, or inserts it.
+    // Never fatal -- a config directory that cannot be written simply means the
+    // list is session-only.
+    void noteRecent(const std::string& name, const std::string& exec,
+                    const std::string& icon, const std::string& wmClass);
+    // Records one file or folder the desktop opened, newest first, deduplicated
+    // by path. Same best-effort persistence as noteRecent().
+    void noteRecentFile(const std::string& name, const std::string& path,
+                        const std::string& icon, bool isDir);
+    // The user's Launchpad arrangement: the Exec strings in grid order. Apps
+    // absent from the list keep their scan order at the end, so the list only
+    // ever has to mention what was dragged. Rewritten when a tile reorder ends.
+    std::vector<std::string> launchpadOrder;
+    bool isPinned(const AppEntry& app) const;
+    void pinApp(const AppEntry& app);       // no-op when already pinned
+    void unpinApp(const std::string& exec);  // no-op when not pinned
+    // The topmost live window of a pinned app, or null when it is not running.
+    Client* clientForPinned(const AppEntry& app) const;
+    void activatePinned(int index);    // focus its window, else launch it
+    void activateTaskItem(int index);  // activateTaskbarItem, pins included
+    void openPinMenu(int appIndex, int pinIndex, int x, int y);  // right-click menu
+    // Reordering: a press on a pinned button arms a drag instead of launching, and
+    // once the pointer has travelled past the slop the button lifts out of the bar
+    // and the pins swap under it until the button is let go. pinDragOrder is the
+    // order as of the press, so Escape can put it back.
+    int pinDrag = -1;              // index into pinned being dragged, -1 when idle
+    int pinDragPressX = 0;
+    bool pinDragMoved = false;
+    std::vector<AppEntry> pinDragOrder;
+    double pinDragLift = 0.0;      // eased lift of the button being dragged
+    void beginPinDrag(int index, int x);
+    void updatePinDrag(int x);
+    void endPinDrag(bool commit);  // commit = false restores the pressed order
+
+    // Resizing the taskbar by its edge, the way Windows 10 let you: grab the strip
+    // along the top of the bar and drag. The grip deliberately straddles the border
+    // -- the bar's own empty margin above the buttons, plus a few pixels of desktop
+    // above that -- so it can be grabbed from either side and, being proportional
+    // to the bar, can never grow into a button.
+    bool taskbarGripAt(int x, int y) const;
+    void beginTaskbarResize(int y);
+    void updateTaskbarResize(int y);
+    void endTaskbarResize();       // saves the thickness the drag settled on
+    void reflowWorkAreaWindows();  // maximised/snapped windows follow the bar
+    int taskbarResizeY = -1;       // pointer y at the press, -1 when not dragging
+    int taskbarResizeH = 0;        // thickness at the press, so the bar tracks the
+                                   // pointer 1:1 instead of accumulating rounding
+
+    // ---- ambient motion (draw.cpp / manager.cpp)
+    // Every hover, selection and flyout eases through these instead of toggling,
+    // which is what makes the whole shell read as one continuous surface. The
+    // vectors are kept the size of the list they decorate.
+    std::vector<double> taskHover;         // per taskbar button
+    std::vector<double> taskPill;          // per taskbar button, running-pill width
+    std::vector<double> taskAppear;        // per taskbar button, ease-in of a new button
+    bool taskAppearPrimed = false;         // first layout fills in, later ones animate
+    std::vector<double> taskPress;         // per taskbar button, the press pop
+    // Dock magnification, following Plank (PositionManager::update_draw_values):
+    // each icon's scale is a parabola in the normalised distance to the pointer,
+    // which reaches *exactly* rest at the zoom radius, and each icon also slides
+    // away from the pointer so the row opens up around it. A single spring holds
+    // Plank's zoom_in_progress, so entering and leaving the bar swells the whole
+    // field instead of snapping it. The Start button is item 0 of the same row.
+    std::vector<double> taskScale;    // per task button, 1.0 .. 1 + peak
+    std::vector<int> taskShift;       // per task button, pixels slid from its cell
+    double startScale = 1.0;          // the Start button (item 0)
+    int startShift = 0;
+    motion::Spring dockZoomSpring{0.0, 0.0};  // Plank's zoom_in_progress (0..1)
+    // Whether the pointer is over the taskbar (or the strip just above it that a
+    // magnified icon grows into). The field reads this rather than pointerY so it
+    // relaxes the moment the pointer leaves, even if no further motion event
+    // arrives.
+    bool pointerOnTaskbar = false;
+    double startHoverAnim = 0.0;           // Start button wash
+    double showDesktopHoverAnim = 0.0;     // show-desktop sliver
+    double clockHoverAnim = 0.0;           // clock/date cluster wash
+    double circleHoverAnim = 0.0;          // ring-button glow
+    std::vector<double> appHover;          // per Launchpad tile
+    std::vector<double> dotHover;          // per page dot
+    std::vector<double> ctxHover;          // per context-menu item
+    double contextAnim = 0.0;              // context menu open (1) / closed (0)
+    std::vector<double> desktopIconHover;  // per desktop icon (hover + selection)
+    std::vector<double> widgetHover;       // per desktop widget
+    std::vector<double> ccHoverFade;       // per Control Centre control
+    double snapPreviewAnim = 0.0;          // snap preview fade
+
+    // ---- desktop icons (live contents of the session's Desktop directory)
+    std::vector<DesktopItem> desktopItems;
+    std::vector<Rect> desktopIconRects;  // target cells computed by layoutDesktopIcons()
+    std::vector<Rect> desktopIconDraw;   // shown cells, eased toward the targets
+    int hoverDesktopIcon = -1;
+    int selectedDesktopIcon = -1;
+    // Icons the user has dragged have their cell remembered here, keyed by path
+    // so a rescan or rename does not lose the spot. Anything absent is laid out
+    // automatically by the grid.
+    std::map<std::string, Point> desktopIconPlacement;
+    int dragDesktopIcon = -1;             // icon being press-dragged, -1 when none
+    bool desktopIconDragging = false;     // press has moved past the click slop
+    // When set, the desktop refuses to stack things: a folder dropped where a
+    // widget (or another hand-placed folder) sits is nudged to the nearest free
+    // cell, and a widget dragged over a folder pushes the folder out of its way,
+    // so the two can never be read on top of each other. Read from
+    // ~/.config/win11wm/desktop-no-overlap and toggled from the desktop menu.
+    bool desktopNoOverlap = true;
+    Point desktopIconGrab;                // pointer offset inside the cell at grab
+    Point desktopIconPressPos;            // where the press landed (slop test)
+    // One 2D spring per icon (position only): icons settle with a little life
+    // instead of a dead exponential, and keep their velocity when retargeted
+    // mid-flight. The lift raises the icon being carried (scale + shadow) and
+    // sinks it on release.
+    std::vector<motion::Spring2> desktopIconPos;
+    motion::Spring desktopIconLift;
+    double desktopIconVelX = 0.0, desktopIconVelY = 0.0;  // pointer speed at drop
+    double desktopIconLastMs = 0.0;
+    int desktopIconLastX = 0, desktopIconLastY = 0;
+
+    // ---- desktop folders: the entry the desktop menu was opened on, and the two
+    // modal dialogs that can sit over the wallpaper while one is being named or
+    // deleted.
+    int contextDesktop = -1;       // desktop item the menu was opened on, or -1
+    int desktopRenameItem = -1;    // the item being renamed, or -1
+    std::string desktopRenameText;
+    bool confirmDeleteOpen = false;
+    // Held by path rather than by index: deleting re-sorts the grid, so an index
+    // captured when the menu was built is not the entry by the time it is used.
+    std::string confirmDeletePath;
+    std::string confirmDeleteName;
+    Rect confirmDeleteOk, confirmDeleteCancel;
+
+    std::vector<AppEntry> apps;
+    std::string searchText;
+    Rect startRect, searchRect;
+    std::vector<Rect> appRects;      // cells of the *current* page
+    std::vector<size_t> appFiltered;
+    std::vector<Rect> appDotRects;   // page-indicator hit targets
+    // ---- desktop widgets
+    // Cards are a desktop surface only: tablet mode takes them off the screen
+    // entirely rather than hiding them behind the home screen.
+    std::vector<Widget> widgets;
+    // Held aside while tablet mode is up, so leaving it gives the user back the
+    // desktop they arranged -- cards included -- exactly as they left it.
+    std::vector<Widget> widgetStash;
+    int hoverWidget = -1;
+    int dragWidget = -1;          // widget being moved/resized, -1 when none
+    bool widgetResizing = false;
+    Point widgetGrab;             // pointer offset inside the widget at grab
+    int batteryPercent = -1;      // -1 = no battery present
+    bool batteryCharging = false;
+    bool batteryFull = false;
+    double lastBatteryProbe = 0.0;
+    // Weather card reading. Offline by design: the shell draws the iOS 18 panel
+    // from ~/.config/win11wm/weather when the user has written one, and from a
+    // pleasant default when they have not. Read at startup, when a Weather card
+    // is added, and on the same slow timer as the battery.
+    std::string weatherCity = "Cupertino";
+    int weatherTemp = 72;
+    std::string weatherCondition = "Partly Cloudy";
+    int weatherHigh = 78;
+    int weatherLow = 64;
+    std::vector<std::pair<std::string, int>> weatherHourly;
+    bool weatherNight = false;
+    double lastWeatherProbe = 0.0;
+    time_t lastClockSecond = 0;
+    int hoverApp = -1;
+    int startHoverDot = -1;
+    int startPage = 0;
+    int startPageCount = 1;
+    size_t startPageBase = 0;        // filtered index of appRects[0]
+    size_t startPageSize = 0;        // cells per page
+    // --- turning a Launchpad page ------------------------------------------
+    // The grid follows a sideways drag and settles on the page it was let go
+    // nearest, the same gesture the tablet home screen uses: a press arms the
+    // turn -- from the bare backdrop *or* from an app tile -- motion past the
+    // slop starts it, and the release commits it. A press on a tile is armed
+    // rather than fired so it can become that swipe; a release that never moved
+    // is the click that launches the app. launchPageOffset is an absolute page
+    // position in pages (not pixels) so a page caught halfway can be drawn
+    // halfway while it eases back onto startPage after the finger lifts.
+    bool launchSwipe = false;        // a page is being dragged right now
+    bool launchPressArmed = false;   // pressed the Launchpad, may become a swipe
+    // The app tile the armed press came down on, or -1 for the bare backdrop.
+    // The press is armed rather than fired, so it can still turn into a swipe
+    // from a tile; the release is what decides between launching and dismissing.
+    int launchPressTile = -1;
+    int launchSwipeFrom = 0;
+    int launchSwipeStartX = 0;
+    int launchSwipeStartY = 0;
+    double launchPageOffset = 0.0;   // absolute page position, in pages
+    // --- rearranging the Launchpad's tiles --------------------------------
+    // A press on a tile is armed (launchPressArmed). When the pointer moves past
+    // the slop *without* turning into a page swipe -- swipes still win for a
+    // sideways drag across a multi-page field -- the press becomes a drag: the
+    // tile lifts out of the grid, the slot it left is what the page reflows
+    // around, and the release drops it back in. launchTilePos springs each tile
+    // toward the appRects slot the grid wants it in, exactly as desktopIconPos
+    // glides the desktop icons; the carried tile is pinned under the pointer.
+    // The order that results is saved as launchpadOrder, so the arrangement
+    // survives a restart. Rows are measured in the appRects index space of the
+    // current page; launchDragTile is always that page's slot.
+    int launchDragTile = -1;           // appRects slot being carried, -1 idle
+    int launchDragFrom = -1;           // slot the carried tile started in
+    bool launchDragMoving = false;     // passed the slop, actually dragging
+    int launchDragPressX = 0, launchDragPressY = 0;
+    int launchDragGrabX = 0, launchDragGrabY = 0;  // pointer offset in the tile
+    int launchDragPosX = 0, launchDragPosY = 0;    // carried tile's top-left
+    double launchDragVelX = 0.0, launchDragVelY = 0.0;  // pointer speed at drop
+    double launchDragLastMs = 0.0;
+    int launchDragLastX = 0, launchDragLastY = 0;
+    std::vector<motion::Spring2> launchTilePos;  // per appRects slot, screen px
+    std::vector<Rect> launchTileDraw;            // eased cells this frame
+    motion::Spring launchTileLift;               // lift of the carried tile
+    int launchTilePage = -1;            // page the springs were built for
+    size_t launchTileTotal = 0;         // appFiltered size the springs were built for
+    // Grid geometry from the last layout, kept so any page can be drawn while
+    // the field is sliding rather than only the one startPage names.
+    int launchCols = metrics::kLaunchCols;
+    int launchCellW = 0;
+    int launchCellH = 0;
+    int launchGridX = 0;
+    int launchGridTop = 0;
+    std::vector<Rect> taskViewRects;
+    Time lastClickTime = 0;
+    Client* lastClickClient = nullptr;
+    double startAnim = 0.0;
+    motion::Spring startSpring;
+    bool startTargetOpen = false;  // the target the spring is currently running to
+    double taskViewAnim = 0.0;
+    double altTabAnim = 0.0;
+    int  taskViewHover = -1;
+
+    // ---- Control Centre
+    bool ccOpen = false;
+    double ccAnim = 0.0;
+    Rect ccRect;                       // the frosted panel
+    int ccAnchorX = 0;                 // zoom origin: the point under the clock
+    int ccAnchorY = 0;
+    std::vector<CcControl> ccControls;  // every clickable part, in draw order
+    int ccHover = -1;
+    int ccDrag = -1;                   // slider being dragged, -1 when none
+    int ccDragValue = 0;               // preview value while dragging
+    std::vector<std::string> ccLaunchers;  // exec strings for the launcher row
+    SystemControls sysctl;
+    bool dnd = false;                  // Do Not Disturb, enforced by the WM
+
+    // ---- Settings
+    bool settingsOpen = false;       // the tablet's full-screen iOS sheet
+    Client* settingsClient = nullptr;  // the desktop's managed Settings window
+    double settingsAnim = 0.0;
+    int settingsSection = 0;           // Appearance, Network, System, About
+    int settingsHover = -1;            // row under the pointer, -1 for none
+    int settingsNavHover = -1;         // sidebar / tab under the pointer
+    int settingsSliderRow = -1;        // brightness row being dragged, -1 for none
+    Rect settingsPanel;
+    Rect settingsDoneRect;
+    Rect settingsCloseRect;
+    std::vector<Rect> settingsNavRects;
+    std::vector<SettingsRow> settingsRows;
+
+    // ---- tablet / mobile mode
+    bool tabletMode = false;          // the mode the shell has settled into
+    double tabletAnim = 0.0;          // 0 = desktop, 1 = tablet
+    bool modeSwitching = false;       // a splash transition is playing
+    bool modeSwapped = false;         // the swap has been applied
+    bool modeSwitchTarget = false;    // value tabletMode takes at the midpoint
+    double modeSwitchStart = 0.0;
+    double splashOpacity = 0.0;       // splash scrim, 0..1
+    std::vector<TabletItem> tabletHome;
+    std::vector<TabletEntry> tabletDock;
+    std::vector<Rect> tabletHomeRects;  // this page's cells only
+
+    // --- the home screen is as many pages wide as it needs ------------------
+    // The grid holds a screenful of icons and the rest carry on onto further pages,
+    // which turn sideways: dragged with a finger across the wallpaper, or by
+    // holding a lifted icon against a screen edge. The page dots between the grid
+    // and the dock say how many there are and which one is showing.
+    int tabletGridCols = 3;
+    int tabletGridCellW = metrics::kTabletCellW;
+    int tabletGridCellH = metrics::kTabletCellH;
+    int tabletGridX = 0, tabletGridTop = 0;
+    int tabletGridStride = 0;      // how far one page slides, in pixels
+    int tabletHomePage = 0;
+    int tabletHomePageCount = 1;
+    int tabletHomeFirst = 0;       // absolute index of this page's first icon
+    int tabletHomePerPage = 1;     // icons a page holds at this screen size
+    // Every page is packed on its own, because a widget card takes the top of the
+    // page it lives on and only that page. The arrays hold where each page starts
+    // in tabletHome and how many cells it has room for.
+    std::vector<int> tabletPageFirst;
+    std::vector<int> tabletPageTop;
+    std::vector<int> tabletPageCapacity;
+    std::vector<Rect> tabletPageDots;
+    bool tabletPageSwipe = false;  // a finger is turning the page right now
+    int tabletPageSwipeFrom = 0;
+    int tabletSwipeStartX = 0;
+    double tabletPageOffset = 0.0; // in pages, so a half turn is drawable
+    // The page settles on a spring, and a flick carries its own velocity into it,
+    // so a half-turn never dead-stops or snaps.
+    motion::Spring tabletPageSpring;
+    double tabletPageSwipeVel = 0.0;  // pages per second at the last motion
+    double tabletPageLastMs = 0.0;
+    int tabletDragEdge = 0;        // which edge a lifted icon is held against
+    Time tabletDragEdgeAt = 0;
+    std::vector<Rect> tabletDockRects;
+
+    // --- One UI app drawer --------------------------------------------------
+    // The full-screen "Apps" screen, opened by swiping up on the wallpaper: every
+    // tablet app in one denser grid with the One UI search pill above it. It rises
+    // from the bottom over the home screen and pages sideways like the home grid.
+    bool tabletDrawer = false;
+    double tabletDrawerAnim = 0.0;    // 0 closed, 1 fully up
+    // The drawer follows the finger while it is pulled up from the wallpaper (or
+    // pulled back down to dismiss it) and settles on a spring when let go. The
+    // velocity is in progress units per second, so a quick flick wins over a long
+    // slow drag exactly as it should.
+    bool tabletDrawerDragging = false;
+    bool tabletDrawerPullArmed = false;
+    int tabletDrawerPullStartY = 0;
+    double tabletDrawerPullFrom = 0.0;
+    double tabletDrawerPull = 0.0;
+    double tabletDrawerPullVel = 0.0;
+    double tabletDrawerLastY = 0.0;
+    double tabletDrawerLastMs = 0.0;
+    motion::Spring tabletDrawerSpring;
+    double tabletDrawerOffset = 0.0;  // current page, in pages, for a half turn
+    bool tabletDrawerSwipe = false;
+    int tabletDrawerSwipeFrom = 0;
+    int tabletDrawerPage = 0;
+    int tabletDrawerPageCount = 1;
+    int tabletDrawerFirst = 0;
+    int tabletDrawerPerPage = 1;
+    int tabletDrawerCols = 4;
+    int tabletDrawerIconSize = metrics::kTabletIcon;
+    int tabletDrawerCellW = metrics::kTabletCellW;
+    int tabletDrawerCellH = metrics::kTabletCellH;
+    int tabletDrawerGridX = 0, tabletDrawerGridTop = 0;
+    int tabletDrawerStride = 0;
+    std::vector<TabletEntry> tabletDrawerApps;      // every app, alphabetical
+    std::vector<int> tabletDrawerMatches;           // indices into tabletDrawerApps
+    std::string tabletDrawerSearchText;             // the live query
+    std::vector<Rect> tabletDrawerRects;   // this page's cells only
+    std::vector<Rect> tabletDrawerDots;
+    Rect tabletDrawerSearchRect;
+    Rect tabletDrawerClearRect;                     // the "x" inside the search pill
+    int tabletDrawerPressIndex = -1;       // the cell a press landed on
+    int tabletDrawerDownX = 0, tabletDrawerDownY = 0;  // where that press began
+    int tabletDrawerHover = -1;            // cell under the pointer, or -1
+    bool tabletDrawerArmed = false;
+    bool tabletDrawerSearchPress = false;  // the press started in the search pill
+    bool tabletDrawerClearPress = false;   // ...on its clear button
+    bool tabletDrawerSearchFocused = false;
+
+    // --- dock physics -------------------------------------------------------
+    // The dock row is a closed-loop spring system, not a static row: icons grow
+    // near the finger, push their neighbours aside, return with a slight
+    // overshoot, and bounce once when an icon is dropped on them or launched
+    // from them. The base slots are the layout's own; everything that is drawn
+    // and hit-tested reads the live rects, which this subsystem rewrites every
+    // frame the row is moving.
+    std::vector<Rect> tabletDockBaseRects;   // the natural slot each icon rests in
+    std::vector<double> tabletDockScale;     // magnification, 1.0 = natural size
+    std::vector<double> tabletDockDrift;     // horizontal deflection off its base
+    std::vector<double> tabletDockDriftV;    // the spring's velocity
+    std::vector<double> tabletDockWobble;    // 1 + the bounce sinusoid, else 1.0
+    std::vector<double> tabletDockWobbleAge; // ms the bounce has run; <0 when idle
+
+    // --- editing the dock ---------------------------------------------------
+    // HarmonyOS edits the dock where it stands rather than on a screen of its
+    // own: a long press puts the home screen into rearrange mode, and while it is
+    // there every dock icon carries a remove badge in its top-right corner. New
+    // apps get in through the long press menu's "Add to Dock" instead of a tile
+    // that grows the row, so the pill keeps its fixed shape.
+    std::vector<Rect> tabletDockRemoveRects;  // one badge per icon, same mode
+    int tabletDockPressRemove = -1;           // the badge a press landed on
+
+    // The picker behind that "+": every launcher on the machine that is not in the
+    // dock yet, twelve to a page, ticked to choose and committed with Done.
+    bool tabletDockPickerOpen = false;
+    Rect tabletDockPickerPanel, tabletDockPickerDone;
+    std::vector<TabletEntry> tabletDockPickerApps;
+    std::vector<Rect> tabletDockPickerRects;
+    std::vector<Rect> tabletDockPickerDots;
+    std::vector<char> tabletDockPickerSel;
+    int tabletDockPickerPage = 0;
+    int tabletDockPickerPageCount = 1;
+    int tabletDockPickerHover = -1;
+    int tabletDockPickerPress = -1;        // the tile a press landed on
+    bool tabletDockPickerDonePress = false;  // the Done button a press landed on
+
+    // --- editing the widgets -------------------------------------------------
+    // Rearrange mode grows a "+" in the top-right corner. It opens a small sheet
+    // that lists every widget kind with a tick, so a card is added from there and
+    // taken off again by unticking the one already on the page. Only the kinds on
+    // the page being shown are ticked, matching the cards that are actually up.
+    Rect tabletWidgetAddRect;               // the "+" button, edit mode only
+    bool tabletWidgetPicker = false;
+    Rect tabletWidgetPickerPanel, tabletWidgetPickerDone;
+    std::vector<Rect> tabletWidgetPickerRows;
+    int tabletWidgetPickerHover = -1;
+    int tabletWidgetPickerPress = -1;       // row a press landed on
+    bool tabletWidgetPickerDonePress = false;
+    void openTabletWidgetPicker();
+    void closeTabletWidgetPicker();
+    void layoutTabletWidgetPicker();
+    bool handleTabletWidgetPickerPress(int x, int y, unsigned button);
+    void handleTabletWidgetPickerRelease(int x, int y);
+    void updateTabletWidgetPickerHover(int x, int y);
+    void drawTabletWidgetPickerView();
+    void toggleTabletWidget(WidgetKind kind);  // add one, or take it off the page
+    void layoutTabletWidgets();                // keep the live cards on the phone screen
+
+    // The quick actions sheet: what a still long press opens on an icon. A long
+    // press that moves is a drag and always wins; one that holds still opens this
+    // instead. It is modal while it is up, so the target can be held by index --
+    // nothing can move the layout while the sheet is on screen. Folders are not a
+    // target: holding one renames it, which is where iOS puts it.
+    bool tabletMenu = false;
+    int tabletMenuItem = -1;         // hovered row
+    int tabletMenuDock = -1;         // target: dock index, or -1 when it is on the grid
+    int tabletMenuHome = -1;         // target: absolute tabletHome index
+    bool tabletMenuFolder = false;   // the target is a folder, not an app
+    Rect tabletMenuPanel;
+    std::vector<Rect> tabletMenuRows;
+    std::vector<std::string> tabletMenuLabels;
+    std::vector<char> tabletMenuDanger;
+    std::vector<double> tabletIconHover;  // per home + dock icon
+    Rect tabletStatusRect, tabletDockRect, tabletHomeBarRect;
+    int tabletIconSize = metrics::kTabletIcon;
+    int tabletDockIconSize = metrics::kTabletDockIcon;
+    int tabletHover = -1;
+    // Last pointer position, kept because the long press is decided on a tick
+    // rather than by an event, so it needs to know where the pointer has got to.
+    int pointerX = 0, pointerY = 0;
+    bool tabletEntriesBuilt = false;  // the lists survive a reorder
+    bool tabletEdit = false;          // rearrange mode, entered by a long press
+
+    // --- app folders ---------------------------------------------------------
+    int tabletFolderOpen = -1;      // grid index of the folder on screen, -1 none
+    int tabletFolderLast = -1;      // the one still fading out, so closing eases
+    int tabletFolderPage = 0;       // which nine of its apps are shown
+    double tabletFolderAnim = 0.0;  // 0 closed, 1 fully open
+    Rect tabletFolderPanel;          // the open folder's rounded sheet
+    std::vector<Rect> tabletFolderRects;  // the 3x3 mini cells on this page
+    int tabletFolderPageCount = 1;
+
+    // --- dragging an icon ----------------------------------------------------
+    int tabletDragIcon = -1;          // icon being dragged, -1 when none
+    int tabletDragTarget = -1;        // grid cell it would drop into
+    Point tabletDragGrab;
+    Rect tabletDragRect;
+    // Where the drag came from, because the drop is resolved against all of them:
+    // a grid cell, the dock, or a page of an open folder.
+    int tabletDragDockIndex = -1;     // dock slot it was lifted from
+    bool tabletDragFromDock = false;
+    bool tabletDragFromFolder = false;
+    // What it is currently over, all of them tested in priority order on release.
+    int tabletDragOverFolder = -1;    // folder icon: the app joins that folder
+    int tabletDragOverApp = -1;       // app icon: the two of them make a new folder
+    bool tabletDragOverDock = false;
+    int tabletDragDockSlot = -1;      // which dock slot, so the drop lands there
+    int tabletDragInside = -1;        // mini cell of the open folder
+    // The stable id of the icon being carried, so its spring can pick up from the
+    // pointer on release (see the reflow springs below).
+    int tabletDragUid = 0;
+
+    // --- grid reflow springs ------------------------------------------------
+    // Every home icon's cell is a spring, keyed by the item's stable uid, so a
+    // rearrange makes the icons glide aside with the shell's own physical feel --
+    // the same arrangement the desktop grid uses -- instead of snapping. Only the
+    // page on screen is eased; turning a page snaps them back to their cells.
+    std::map<int, motion::Spring2> tabletIconSpring;
+    int tabletNextUid = 1;
+    void animateTabletIconReflow(double dtMs);  // one spring step per visible icon
+    void snapTabletIconSprings();               // drop every spring onto its cell
+
+    // --- press and hold ------------------------------------------------------
+    // A dwell turns a press into a long press, which is how the home screen is
+    // rearranged without hunting for a button: hold an icon and it lifts,
+    // hold the background and the whole screen starts jiggling.
+    long tabletPressAt = 0;
+    Point tabletPressPos;
+    int tabletPressItem = -1;         // grid cell under the press, -1 background
+    int tabletPressDock = -1;         // dock slot under the press
+    int tabletFolderPressCell = -1;   // mini cell under the press, in an open folder
+    bool tabletLongPressFired = false;
+    void updateTabletLongPress();     // turns a held press into a long press
+    void beginTabletRename(int index); // long press on a folder
+
+    // --- renaming a folder ---------------------------------------------------
+    // Captured from the keyboard the same way the Start menu's search box is, so
+    // no on-screen keyboard is needed: type, Return to commit, Escape to cancel.
+    int tabletRenameItem = -1;
+    std::string tabletRenameText;
+
+    // ---- iPhone X home-bar gesture
+    bool tabletGesture = false;       // a swipe from the bottom edge is running
+    int tabletGestureStartX = 0, tabletGestureStartY = 0;
+    int tabletGestureCurX = 0, tabletGestureCurY = 0;
+    double tabletGestureLastMove = 0.0;  // for the "swipe up and hold" dwell
+    bool tabletGestureSwipe = false;     // horizontal: step between apps
+
+    // ---- app switcher (swipe a card up to quit, tap to open)
+    bool tabletSwitcher = false;
+    double tabletSwitcherAnim = 0.0;
+    std::vector<Client*> tabletSwitchOrder;  // live, filtered each frame
+    std::vector<Rect> tabletSwitchRects;
+    int tabletSwitchDrag = -1;         // card being swiped up, -1 when none
+    int tabletSwitchFromY = 0;         // pointer y when the swipe began
+    int tabletSwitchTravel = 0;        // current upward travel in pixels
+    Rect tabletSwitchDragRect;
+
+    // ---- loop bookkeeping
+    const Options* opts = nullptr;    // Queued --exec commands: launched once, right after the first present(),
+    // so the GL pipeline (context current, VAO bound, wallpaper baked) exists
+    // before fork() can touch process-global GL state.
+    std::vector<std::string> pendingLaunches;
+    double fpsWindowStart = 0.0;
+    int fpsFrames = 0;
+    int framesRendered = 0;
+    // Timestamp until which frame scheduling is paused because the host still
+    // holds every output buffer (a starved swapchain). Retrying immediately
+    // would only spam "No free output buffer slot" hundreds of times a second.
+    double frameBackoffUntil = 0.0;
+    int frameStarveCount = 0;
+    double lastTick = 0.0;
+    bool running = true;
+    bool dirty = true;
+    bool pendingRedrawFromDamage = false;
+};
+}  // namespace wm

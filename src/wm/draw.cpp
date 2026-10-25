@@ -1,7 +1,7 @@
 // Everything the shell paints. All of it is expressed in screen pixels and
 // handed to the compositor's shader as rects, so the same code produces the
 // rounded corners, the Mica captions and the acrylic surfaces.
-#include "manager.h"
+#include <manager.h>
 
 #include <ctime>
 #include <algorithm>
