@@ -403,6 +403,14 @@ private:
     void render();
     void drawDesktop();
     void drawClientSprite(Client* c);
+    // Wayland clients may paint into child surfaces instead of (or as well as)
+    // the toplevel buffer -- Firefox renders the whole window into a subsurface,
+    // menus are popups. Walks the surface tree and blits each child into the
+    // window's content area.
+    void drawClientSubsurfaces(Client* c, const Rect& frame, const Rect& content,
+                               float radius, bool maximized, float opacity);
+    static void surfaceDrawIterator(struct wlr_surface* surface, int sx, int sy,
+                                    void* data);
     void drawTaskbar();
     void drawStartMenu();
     void drawAltTab();

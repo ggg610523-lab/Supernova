@@ -102,6 +102,12 @@ public:
     void beginFrame();
     void drawWallpaper();
     void drawWindow(const WindowSprite& s);
+    // Blits one of a window's child surfaces (subsurface or popup) into the
+    // window's content area, clipped to the same rounded frame the window
+    // shader uses. `dst` is in screen pixels.
+    void drawWindowContent(const WindowTex& t, const Rect& dst, const Rect& frame,
+                           const Rect& content, float radius, bool maximized,
+                           float opacity = 1.0f);
     static constexpr int kNoClip = -2000000000;
     void drawRect(const Rect& r, float radius, const Color& c, float opacity = 1.0f,
                   int clipTop = kNoClip);

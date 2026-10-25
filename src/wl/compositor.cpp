@@ -230,6 +230,23 @@ void main() {
         return;
     }
 
+    if (uMode == 6) {
+        // A child surface of a window (a subsurface or a popup): a premultiplied
+        // blit of its buffer, clipped to the window's content area and rounded
+        // frame so it cannot spill over the chrome.
+        vec2 halfSize = uFrame.zw * 0.5;
+        vec2 fc = uFrame.xy + halfSize;
+        float r = mix(uRadius, 0.0, uMaximized);
+        float shape = cover(sdRound(p - fc, halfSize, r));
+        float inside = step(uContent.x, p.x) * step(uContent.y, p.y) *
+                       step(p.x, uContent.x + uContent.z) *
+                       step(p.y, uContent.y + uContent.w);
+        vec4 t = texture2D(uTex, vQ);
+        float a = shape * inside * uOpacity * mix(1.0, t.a, uKeepAlpha);
+        gl_FragColor = vec4(t.rgb * a, a);
+        return;
+    }
+
     float d = sdRound(p - c, uRect.zw * 0.5, uRadius);
     vec4 t = texture2D(uTex, vQ);
     vec3 rgb = mix(uColor.rgb, t.rgb * uColor.rgb, uTexMix);
@@ -975,6 +992,30 @@ void Compositor::drawText(const TextTex& t, const Rect& dst, const Color& c, flo
     drawTex(t.tex, dst, 0.f, c, opacity, false, true);
 }
 
+void Compositor::drawWindowContent(const WindowTex& t, const Rect& dst, const Rect& frame,
+                                  const Rect& content, float radius, bool maximized,
+                                  float opacity) {
+    if (!t.valid() || dst.empty() || content.empty()) return;
+    if (!dst.intersects(content)) return;
+    useMainProgram();
+    ++drawsThisFrame_;
+    ++drawsByMode_[2];
+    glUniform1i(uMode_, 6);
+    glUniform4f(uRect_, float(dst.x), float(dst.y), float(dst.w), float(dst.h));
+    glUniform4f(uFrame_, float(frame.x), float(frame.y), float(frame.w), float(frame.h));
+    glUniform4f(uContent_, float(content.x), float(content.y), float(content.w),
+                float(content.h));
+    glUniform1f(uRadius_, radius);
+    glUniform1f(uOpacity_, opacity);
+    glUniform1f(uMaximized_, maximized ? 1.f : 0.f);
+    glUniform1f(uKeepAlpha_, t.alpha ? 1.f : 0.f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, t.tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
 void Compositor::drawWindow(const WindowSprite& s) {
     if (s.frame.empty()) return;
     if (s.genie > 0.001f && s.tex.valid() && drawGenie(s)) return;
@@ -1022,7 +1063,7 @@ void Compositor::drawWindow(const WindowSprite& s) {
 
     const bool hasTex = s.tex.valid();
     glUniform1f(uTexMix_, hasTex ? 1.f : 0.f);
-    glUniform1f(uKeepAlpha_, (hasTex && s.tex.alpha) ? 1.f : 0.f);
+    glUniform1f(uKeepAlpha_, (hasTex && s.tex.alpha && !std::getenv("WIN11WM_FORCE_OPAQUE")) ? 1.f : 0.f);
     glUniform1f(uGlass_, (s.glass && hasTex && s.tex.alpha) ? 1.f : 0.f);
     glUniform1i(uMode_, 2);
     glActiveTexture(GL_TEXTURE0);

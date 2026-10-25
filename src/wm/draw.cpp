@@ -913,6 +913,25 @@ void Manager::drawClientSprite(Client* c) {
     // The warp carries the content; the caption chrome would only float in place.
     if (genie > 0.0) return;
 
+#ifdef WIN11WM_WAYLAND
+    // The window shader above samples the toplevel's own buffer. Toolkits that
+    // paint into child surfaces (Firefox puts the whole window in a subsurface,
+    // menus and tooltips are popups) need those blitted over it, inside the
+    // same content rect and rounded frame.
+    if (!c->internalSettings) {
+        const int subsurfCapH = c->captionH > 0 ? c->captionH : 0;
+        const Rect subsurfContent{f.x + metrics::kBorder, f.y + subsurfCapH,
+                                  f.w - 2 * metrics::kBorder,
+                                  f.h - subsurfCapH - metrics::kBorder};
+        const float subsurfRadius =
+            radiusOverride >= 0.f
+                ? radiusOverride
+                : ((c->fullscreen || s.maximized) ? 0.f : float(metrics::kRadius));
+        drawClientSubsurfaces(c, f, subsurfContent, subsurfRadius, s.maximized,
+                              float(opacity));
+    }
+#endif
+
     // Settings is a managed client, but its pixels are painted here rather than
     // read back from an X pixmap. The caption is still the standard Fluent one.
     if (c->internalSettings) drawSettingsContent(c);

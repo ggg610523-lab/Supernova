@@ -212,6 +212,13 @@ void Manager::ensurePixmap(Client* c) {
     c->bufferH = c->tex.h;
     c->hasAlpha = c->tex.alpha;
     c->needsRepaint = false;
+    if (std::getenv("WIN11WM_TEXDEBUG")) {
+        log("TEXDBG %s buf=%dx%d tex=%dx%d surf=%dx%d scale=%.2f alpha=%d",
+            c->appName.c_str(), c->surface->buffer->base.width,
+            c->surface->buffer->base.height, c->tex.w, c->tex.h,
+            c->surface->current.width, c->surface->current.height,
+            (double)c->surface->current.scale, c->tex.alpha ? 1 : 0);
+    }
 }
 
 void Manager::destroyPixmap(Client* c) {
@@ -522,6 +529,59 @@ void Manager::onSurfaceCommit(Client* c) {
     requestFrame();
 }
 
+// wlr_surface_for_each_surface reports each surface of a tree (the toplevel
+// itself first, then its subsurfaces and popups) with its offset from the root,
+// in surface-local pixels. The toplevel is already on screen through the window
+// shader, so only the children are blitted here.
+struct SurfacePass {
+    Manager* mgr = nullptr;
+    struct wlr_surface* root = nullptr;
+    Rect frame{};
+    Rect content{};
+    float radius = 0.f;
+    float opacity = 1.f;
+    bool maximized = false;
+};
+
+void Manager::surfaceDrawIterator(struct wlr_surface* surface, int sx, int sy, void* data) {
+    auto* pass = static_cast<SurfacePass*>(data);
+    if (!surface || surface == pass->root || !surface->buffer) return;
+    if (surface->current.width <= 0 || surface->current.height <= 0) return;
+    if (std::getenv("WIN11WM_TEXDEBUG"))
+        log("SUBDBG surf=%dx%d at %d,%d scale=%d buf=%dx%d", surface->current.width,
+            surface->current.height, sx, sy, surface->current.scale,
+            surface->buffer ? surface->buffer->base.width : 0,
+            surface->buffer ? surface->buffer->base.height : 0);
+    WindowTex t;
+    if (!pass->mgr->comp.importBuffer(&surface->buffer->base, &t)) return;
+    const Rect dst{pass->content.x + sx, pass->content.y + sy,
+                   surface->current.width, surface->current.height};
+    pass->mgr->comp.drawWindowContent(t, dst, pass->frame, pass->content, pass->radius,
+                                      pass->maximized, pass->opacity);
+    pass->mgr->comp.releaseWindowTex(&t);
+}
+
+void Manager::drawClientSubsurfaces(Client* c, const Rect& frame, const Rect& content,
+                                   float radius, bool maximized, float opacity) {
+    if (!c || !c->surface || !c->mapped || opacity <= 0.01f) return;
+    if (content.w <= 0 || content.h <= 0) return;
+    SurfacePass pass;
+    pass.mgr = this;
+    pass.root = c->surface;
+    pass.frame = frame;
+    pass.content = content;
+    pass.radius = radius;
+    pass.opacity = opacity;
+    pass.maximized = maximized;
+    if (std::getenv("WIN11WM_TEXDEBUG")) {
+        log("SUBPASS %s frame=%d,%d %dx%d content=%d,%d %dx%d toplevel=%dx%d pending=%dx%d",
+            c->appName.c_str(), frame.x, frame.y, frame.w, frame.h, content.x, content.y,
+            content.w, content.h, c->surface->current.width, c->surface->current.height,
+            c->pendingW, c->pendingH);
+    }
+    wlr_surface_for_each_surface(c->surface, surfaceDrawIterator, &pass);
+}
+
 void Manager::onToplevelDestroy(Client* c) {
     if (!c) return;
     c->alive = false;
@@ -569,13 +629,14 @@ void dumpFrameToFile(const std::string& path, int w, int h) {
 }  // namespace
 
 void Manager::renderFrameOnOutput() {
-    static int dbgAttempts, dbgFails; static double dbgLast;
+    static int dbgAttempts, dbgFails, dbgCommitFails; static double dbgLast;
     ++dbgAttempts;
     if (nowMs() - dbgLast > 1000.0) {
         dbgLast = nowMs();
-        log("DBG frame attempts=%d fails=%d starve=%d backoff=%.0f", dbgAttempts, dbgFails,
+        log("DBG frame attempts=%d fails=%d commitfail=%d swap=%p starve=%d backoff=%.0f",
+            dbgAttempts, dbgFails, dbgCommitFails, (void*)(output ? output->swapchain : nullptr),
             frameStarveCount, frameBackoffUntil - nowMs());
-        dbgAttempts = 0; dbgFails = 0;
+        dbgAttempts = 0; dbgFails = 0; dbgCommitFails = 0;
     }
     if (!output || !output->enabled) return;
     struct wlr_output_state state;
@@ -601,6 +662,7 @@ void Manager::renderFrameOnOutput() {
         dumpFrameToFile(opts->dumpPath, screenW, screenH);
     wlr_render_pass_submit(pass);
     if (!wlr_output_commit_state(output, &state)) {
+        ++dbgCommitFails;
         // Nothing was presented, so do not count it as a frame and let the
         // backoff throttle the retry.
         wlr_output_state_finish(&state);
