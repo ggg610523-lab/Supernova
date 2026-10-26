@@ -58,6 +58,11 @@ struct WindowSprite {
     bool captionTint = false;
     Color captionColor{};
     float tintAmount = 0.88f;
+    // Normalized sub-rect of the texture that is the window's visible content.
+    // Clients that draw their own decorations attach a buffer padded with their
+    // drop shadow and mark the real window with xdg_surface.set_window_geometry;
+    // this shows exactly that part.
+    float uvX = 0.f, uvY = 0.f, uvW = 1.f, uvH = 1.f;
 };
 
 class Compositor {
@@ -167,6 +172,7 @@ private:
     GLint uMaximized_ = -1, uScreen_ = -1, uShadowPad_ = -1, uTexMix_ = -1;
     GLint uKeepAlpha_ = -1, uGlass_ = -1, uTintAmount_ = -1, uSaturate_ = -1,
           uClipTop_ = -1, uTex_ = -1, uBlur_ = -1;
+    GLint uTexRect_ = -1;
     GLint uArc_ = -1, uThick_ = -1;
     GLint uBlurDir_ = -1, uWallRes_ = -1;
     GLint uPivot_ = -1, uRot_ = -1;

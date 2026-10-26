@@ -42,22 +42,37 @@ unsigned xModifiers(uint32_t wlrMods) {
 
 Manager::~Manager() { shutdown(); }
 
+Client::Client() {
+    // wl_list_remove() needs a real list: an all-zero wl_listener would make it
+    // dereference NULL. Starting every link as a self loop makes detaching a
+    // listener that was never added (or was already detached) a no-op.
+    for (struct wl_listener* l : {&surfaceCommit, &surfaceDestroy, &surfaceMap,
+                                  &surfaceUnmap, &toplevelDestroy, &toplevelRequestMove,
+                                  &toplevelRequestResize, &toplevelRequestMaximize,
+                                  &toplevelRequestFullscreen, &toplevelRequestMinimize,
+                                  &toplevelTitle, &toplevelAppId, &toplevelClose,
+                                  &toplevelShowMenu, &decorationDestroy})
+        wl_list_init(&l->link);
+}
+
 Client::~Client() {
-    if (!listenersAdded) return;
-    wl_list_remove(&surfaceCommit.link);
-    wl_list_remove(&surfaceDestroy.link);
-    wl_list_remove(&surfaceMap.link);
-    wl_list_remove(&surfaceUnmap.link);
-    wl_list_remove(&toplevelDestroy.link);
-    wl_list_remove(&toplevelRequestMove.link);
-    wl_list_remove(&toplevelRequestResize.link);
-    wl_list_remove(&toplevelRequestMaximize.link);
-    wl_list_remove(&toplevelRequestFullscreen.link);
-    wl_list_remove(&toplevelRequestMinimize.link);
-    wl_list_remove(&toplevelTitle.link);
-    wl_list_remove(&toplevelAppId.link);
-    wl_list_remove(&toplevelClose.link);
-    wl_list_remove(&toplevelShowMenu.link);
+    detachListeners(firing);
+}
+
+void Client::detachListeners(struct wl_listener* skip) {
+    for (struct wl_listener* l : {&surfaceCommit, &surfaceDestroy, &surfaceMap,
+                                  &surfaceUnmap, &toplevelDestroy, &toplevelRequestMove,
+                                  &toplevelRequestResize, &toplevelRequestMaximize,
+                                  &toplevelRequestFullscreen, &toplevelRequestMinimize,
+                                  &toplevelTitle, &toplevelAppId, &toplevelClose,
+                                  &toplevelShowMenu, &decorationDestroy}) {
+        // The listener that is dispatching this destruction has already been
+        // unlinked by wl_signal_emit_mutable; its link now points at neighbours
+        // that may be freed, so leave it alone and make the rest self loops
+        // (removing those twice is then harmless).
+        if (l != skip) wl_list_remove(&l->link);
+        wl_list_init(&l->link);
+    }
 }
 
 void Manager::removeClient(Client* c) {
@@ -181,7 +196,7 @@ Rect Manager::clientRect(const Client* c) const {
 
 void Manager::syncClientGeometry(Client* c) {
     if (!c || !c->alive || !c->toplevel) return;
-    if (c->mapped || c->configured) {
+    if ((c->mapped || c->configured) && c->xdg && c->xdg->initialized) {
         const Rect r = clientRect(c);
         const int cw = std::max(1, r.w);
         const int ch = std::max(1, r.h);
@@ -200,8 +215,8 @@ void Manager::syncClientGeometry(Client* c) {
 void Manager::ensurePixmap(Client* c) {
     if (!c || !c->surface) return;
     if (c->tex.valid() && c->pixW == c->tex.w && c->pixH == c->tex.h) return;
+    if (!c->surface->buffer) return;
     struct wlr_buffer* buffer = &c->surface->buffer->base;
-    if (!buffer) return;
     if (!comp.importBuffer(buffer, &c->tex)) {
         c->pixW = c->pixH = 0;
         return;
@@ -212,13 +227,6 @@ void Manager::ensurePixmap(Client* c) {
     c->bufferH = c->tex.h;
     c->hasAlpha = c->tex.alpha;
     c->needsRepaint = false;
-    if (std::getenv("WIN11WM_TEXDEBUG")) {
-        log("TEXDBG %s buf=%dx%d tex=%dx%d surf=%dx%d scale=%.2f alpha=%d",
-            c->appName.c_str(), c->surface->buffer->base.width,
-            c->surface->buffer->base.height, c->tex.w, c->tex.h,
-            c->surface->current.width, c->surface->current.height,
-            (double)c->surface->current.scale, c->tex.alpha ? 1 : 0);
-    }
 }
 
 void Manager::destroyPixmap(Client* c) {
@@ -390,13 +398,15 @@ void Manager::onNewToplevel(struct wlr_xdg_toplevel* toplevel) {
     c->appName = c->appId;
     std::transform(c->appName.begin(), c->appName.end(), c->appName.begin(),
                    [](unsigned char ch) { return char(std::tolower(ch)); });
-    c->captionH = metrics::kCaptionH;
+    // The caption is only ours when the client asks us to decorate it (see the
+    // xdg-decoration handler): a CSD client brings its own title bar.
+    c->captionH = c->serverDecorated ? metrics::kCaptionH : 0;
     c->minW = 1;
     c->minH = 1;
     c->pendingW = 800;
     c->pendingH = 600;
     c->restore = Rect{0, 0, 800 + 2 * metrics::kBorder,
-                     600 + metrics::kCaptionH + metrics::kBorder};
+                     600 + c->captionH + metrics::kBorder};
     c->frame = c->restore;
     c->drawFrame = c->restore;
     c->hasAlpha = true;
@@ -414,6 +424,9 @@ void Manager::onNewToplevel(struct wlr_xdg_toplevel* toplevel) {
 
     c->surfaceDestroy.notify = [](struct wl_listener* l, void*) {
         Client* cl = wl_container_of(l, cl, surfaceDestroy);
+        // This listener is already unlinked from the signal; the client's
+        // destructor must not try again.
+        if (cl) cl->firing = l;
         if (cl && cl->manager) cl->manager->onToplevelDestroy(cl);
     };
     wl_signal_add(&xs->surface->events.destroy, &c->surfaceDestroy);
@@ -432,6 +445,7 @@ void Manager::onNewToplevel(struct wlr_xdg_toplevel* toplevel) {
 
     c->toplevelDestroy.notify = [](struct wl_listener* l, void*) {
         Client* cl = wl_container_of(l, cl, toplevelDestroy);
+        if (cl) cl->firing = l;
         if (cl && cl->manager) cl->manager->onToplevelDestroy(cl);
     };
     wl_signal_add(&toplevel->events.destroy, &c->toplevelDestroy);
@@ -447,6 +461,16 @@ void Manager::onNewToplevel(struct wlr_xdg_toplevel* toplevel) {
         if (cl && cl->toplevel && cl->toplevel->app_id) cl->appId = cl->toplevel->app_id;
     };
     wl_signal_add(&toplevel->events.set_app_id, &c->toplevelAppId);
+
+    // xdg-shell has no window-type property: a toplevel with a parent is the
+    // closest equivalent of an X11 transient/dialog. Mark it so the shell's
+    // shared policy can treat it like one.
+    c->toplevelSetParent.notify = [](struct wl_listener* l, void*) {
+        Client* cl = wl_container_of(l, cl, toplevelSetParent);
+        if (cl && cl->toplevel) cl->isDialog = cl->toplevel->parent != nullptr;
+    };
+    wl_signal_add(&toplevel->events.set_parent, &c->toplevelSetParent);
+    c->isDialog = toplevel->parent != nullptr;
 
     c->toplevelRequestMove.notify = [](struct wl_listener* l, void*) {
         Client* cl = wl_container_of(l, cl, toplevelRequestMove);
@@ -507,6 +531,26 @@ void Manager::onNewToplevel(struct wlr_xdg_toplevel* toplevel) {
 void Manager::onSurfaceCommit(Client* c) {
     if (!c || !c->surface || !c->xdg || !c->xdg->initialized) return;
 
+    // xdg-decoration is bound before the surface's initial commit, but a
+    // configure cannot be scheduled until that commit has initialized the
+    // xdg_surface. Apply the mode we chose for the client here instead of in
+    // the new_decoration handler.
+    if (c->decoration && !c->decorationModeSet) {
+        wlr_xdg_toplevel_decoration_v1_set_mode(
+            c->decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        c->decorationModeSet = true;
+    }
+
+    if (c->toplevel) {
+        // xdg_toplevel carries the size hints in its committed state, the
+        // Wayland equivalent of WM_NORMAL_HINTS. Keep the shared resize policy
+        // working against the client's own content size.
+        c->minW = std::max(1, c->toplevel->current.min_width);
+        c->minH = std::max(1, c->toplevel->current.min_height);
+        c->maxW = c->toplevel->current.max_width;
+        c->maxH = c->toplevel->current.max_height;
+    }
+
     if (!c->configured) {
         // The surface is initialized now, so it can take its first configure:
         // the size the Fluent frame leaves for the client's content.
@@ -541,20 +585,18 @@ struct SurfacePass {
     float radius = 0.f;
     float opacity = 1.f;
     bool maximized = false;
+    // Window geometry origin inside the client's buffer: child surface offsets
+    // are in buffer space, the content rect starts at the window geometry.
+    int geoX = 0, geoY = 0;
 };
 
 void Manager::surfaceDrawIterator(struct wlr_surface* surface, int sx, int sy, void* data) {
     auto* pass = static_cast<SurfacePass*>(data);
     if (!surface || surface == pass->root || !surface->buffer) return;
     if (surface->current.width <= 0 || surface->current.height <= 0) return;
-    if (std::getenv("WIN11WM_TEXDEBUG"))
-        log("SUBDBG surf=%dx%d at %d,%d scale=%d buf=%dx%d", surface->current.width,
-            surface->current.height, sx, sy, surface->current.scale,
-            surface->buffer ? surface->buffer->base.width : 0,
-            surface->buffer ? surface->buffer->base.height : 0);
     WindowTex t;
     if (!pass->mgr->comp.importBuffer(&surface->buffer->base, &t)) return;
-    const Rect dst{pass->content.x + sx, pass->content.y + sy,
+    const Rect dst{pass->content.x + sx - pass->geoX, pass->content.y + sy - pass->geoY,
                    surface->current.width, surface->current.height};
     pass->mgr->comp.drawWindowContent(t, dst, pass->frame, pass->content, pass->radius,
                                       pass->maximized, pass->opacity);
@@ -573,13 +615,50 @@ void Manager::drawClientSubsurfaces(Client* c, const Rect& frame, const Rect& co
     pass.radius = radius;
     pass.opacity = opacity;
     pass.maximized = maximized;
-    if (std::getenv("WIN11WM_TEXDEBUG")) {
-        log("SUBPASS %s frame=%d,%d %dx%d content=%d,%d %dx%d toplevel=%dx%d pending=%dx%d",
-            c->appName.c_str(), frame.x, frame.y, frame.w, frame.h, content.x, content.y,
-            content.w, content.h, c->surface->current.width, c->surface->current.height,
-            c->pendingW, c->pendingH);
+    if (c->xdg) {
+        pass.geoX = c->xdg->current.geometry.x;
+        pass.geoY = c->xdg->current.geometry.y;
     }
     wlr_surface_for_each_surface(c->surface, surfaceDrawIterator, &pass);
+}
+
+void Manager::popupDrawIterator(struct wlr_surface* surface, int sx, int sy, void* data) {
+    auto* pass = static_cast<SurfacePass*>(data);
+    if (!surface || !surface->buffer) return;
+    if (surface->current.width <= 0 || surface->current.height <= 0) return;
+    WindowTex t;
+    if (!pass->mgr->comp.importBuffer(&surface->buffer->base, &t)) return;
+    const Rect dst{pass->content.x + sx - pass->geoX, pass->content.y + sy - pass->geoY,
+                   surface->current.width, surface->current.height};
+    // Popups bring their own shadow and rounded corners in the buffer, and may
+    // extend past the parent window, so this is an unclipped blit rather than
+    // the window-content path used for subsurfaces.
+    pass->mgr->comp.drawTex(t.tex, dst, 0.f, Color{1.f, 1.f, 1.f, 1.f}, pass->opacity,
+                            true, t.alpha);
+    pass->mgr->comp.releaseWindowTex(&t);
+}
+
+void Manager::drawClientPopups(Client* c) {
+    if (!c || !c->xdg || !c->mapped || c->minimized || !c->alive || c->closing)
+        return;
+    if (c->internalSettings) return;
+    float opacity = float(std::clamp(c->appear, 0.0, 1.0));
+    if (c->vanish > 0.0) opacity *= float(1.0 - c->vanish);
+    if (opacity <= 0.01f) return;
+    const Rect f = c->drawFrame;
+    const int capH = c->captionH > 0 ? c->captionH : 0;
+    const Rect content{f.x + metrics::kBorder, f.y + capH,
+                       f.w - 2 * metrics::kBorder, f.h - capH - metrics::kBorder};
+    if (content.w <= 0 || content.h <= 0) return;
+    SurfacePass pass;
+    pass.mgr = this;
+    pass.content = content;
+    pass.opacity = opacity;
+    if (c->xdg) {
+        pass.geoX = c->xdg->current.geometry.x;
+        pass.geoY = c->xdg->current.geometry.y;
+    }
+    wlr_xdg_surface_for_each_popup_surface(c->xdg, popupDrawIterator, &pass);
 }
 
 void Manager::onToplevelDestroy(Client* c) {
@@ -590,13 +669,85 @@ void Manager::onToplevelDestroy(Client* c) {
     requestFrame();
 }
 
+void Manager::unconstrainPopup(struct wlr_xdg_popup* popup) {
+    if (!popup || !popup->parent || !popup->base || !popup->base->initialized)
+        return;
+
+    // Find the toplevel at the root of this popup tree and the client that owns
+    // it. Nested popups (a submenu of a context menu) walk up through their
+    // parent popups until they reach the toplevel.
+    struct wlr_xdg_surface* root =
+        wlr_xdg_surface_try_from_wlr_surface(popup->parent);
+    while (root && root->role == WLR_XDG_SURFACE_ROLE_POPUP && root->popup) {
+        if (!root->popup->parent) break;
+        root = wlr_xdg_surface_try_from_wlr_surface(root->popup->parent);
+    }
+    if (!root || root->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) return;
+    Client* c = nullptr;
+    for (auto& cl : clients) {
+        if (cl->xdg == root) {
+            c = cl.get();
+            break;
+        }
+    }
+    if (!c) return;
+
+    // Keep the popup inside the usable area. The constraint box is in the root
+    // toplevel surface's coordinate space, whose origin is the buffer origin,
+    // not the window geometry origin.
+    const Rect r = clientRect(c);
+    const struct wlr_box g = root->current.geometry;
+    const Rect wa = workArea();
+    const struct wlr_box box{wa.x - r.x + g.x, wa.y - r.y + g.y, wa.w, wa.h};
+    wlr_xdg_popup_unconstrain_from_box(popup, &box);
+}
+
 void Manager::onNewPopup(struct wlr_xdg_popup* popup) {
-    if (!popup) return;
+    if (!popup || !popup->parent) return;
     popup->base->data = this;
-    // Popups are part of their parent's surface tree; the renderer walks the
-    // parent's buffer for now, and input goes to the popup grab that xdg-shell
-    // installs itself.
-    (void)popup;
+
+    // A configure cannot be scheduled before the popup's xdg_surface has seen
+    // its initial commit, and new_popup is emitted before that commit. Apply
+    // the constraint on the first commit instead.
+    if (popup->base->initialized) {
+        unconstrainPopup(popup);
+        return;
+    }
+
+    struct PendingPopup {
+        Manager* manager;
+        struct wlr_xdg_popup* popup;
+        struct wl_listener commit;
+        struct wl_listener destroy;
+        bool done = false;
+    };
+    auto* pending = new PendingPopup{this, popup, {}, {}, false};
+    pending->commit.notify = [](struct wl_listener* l, void*) {
+        PendingPopup* p = wl_container_of(l, p, commit);
+        // Do not free the listener from inside wl_signal_emit_mutable(): the
+        // emitter walks the list after the callback returns. Keep it attached
+        // and only constrain once; popup destruction unlinks it.
+        if (p->done || !p->popup || !p->popup->base || !p->popup->base->initialized)
+            return;
+        p->done = true;
+        p->manager->unconstrainPopup(p->popup);
+    };
+    wl_signal_add(&popup->base->surface->events.commit, &pending->commit);
+    pending->destroy.notify = [](struct wl_listener* l, void*) {
+        PendingPopup* p = wl_container_of(l, p, destroy);
+        wl_list_remove(&p->commit.link);
+        delete p;
+    };
+    wl_signal_add(&popup->events.destroy, &pending->destroy);
+}
+
+Client* Manager::clientForSurface(struct wlr_surface* surface) const {
+    if (!surface) return nullptr;
+    struct wlr_surface* root = wlr_surface_get_root_surface(surface);
+    for (auto& c : clients) {
+        if (c->surface == root) return c.get();
+    }
+    return nullptr;
 }
 
 void Manager::beginInteractiveMove(Client* c) {
@@ -661,6 +812,12 @@ void Manager::renderFrameOnOutput() {
     if (!opts->dumpPath.empty() && opts->frames > 0 && framesRendered + 1 >= opts->frames)
         dumpFrameToFile(opts->dumpPath, screenW, screenH);
     wlr_render_pass_submit(pass);
+    if (presentation) {
+        for (auto& cp : clients) {
+            if (cp->mapped && cp->surface)
+                wlr_presentation_surface_textured_on_output(cp->surface, output);
+        }
+    }
     if (!wlr_output_commit_state(output, &state)) {
         ++dbgCommitFails;
         // Nothing was presented, so do not count it as a frame and let the
@@ -738,9 +895,53 @@ int Manager::run(const Options& options) {
     wlr_compositor_create(wlDisplay, 6, renderer);
     wlr_subcompositor_create(wlDisplay);
     wlr_data_device_manager_create(wlDisplay);
+    wlr_primary_selection_v1_device_manager_create(wlDisplay);
+    wlr_viewporter_create(wlDisplay);
+    wlr_fractional_scale_manager_v1_create(wlDisplay, 1);
+    presentation = wlr_presentation_create(wlDisplay, backend);
     outputLayout = wlr_output_layout_create(wlDisplay);
+    wlr_xdg_output_manager_v1_create(wlDisplay, outputLayout);
     seat = wlr_seat_create(wlDisplay, "seat0");
     xdgShell = wlr_xdg_shell_create(wlDisplay, 3);
+
+    if (struct wlr_xdg_activation_v1* activation = wlr_xdg_activation_v1_create(wlDisplay)) {
+        requestActivate.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, requestActivate);
+            auto* ev = static_cast<struct wlr_xdg_activation_v1_request_activate_event*>(data);
+            Client* c = m->clientForSurface(ev->surface);
+            if (!c) return;
+            if (c->minimized) m->restoreClient(c);
+            m->focusClient(c, true);
+        };
+        wl_signal_add(&activation->events.request_activate, &requestActivate);
+    }
+
+    // Clipboard and primary selection: the data-device manager only forwards
+    // the client's request; the compositor owns the actual selection.
+    requestSetSelection.notify = [](struct wl_listener* l, void* data) {
+        Manager* m = wl_container_of(l, m, requestSetSelection);
+        auto* ev = static_cast<struct wlr_seat_request_set_selection_event*>(data);
+        wlr_seat_set_selection(m->seat, ev->source, ev->serial);
+    };
+    wl_signal_add(&seat->events.request_set_selection, &requestSetSelection);
+
+    requestSetPrimarySelection.notify = [](struct wl_listener* l, void* data) {
+        Manager* m = wl_container_of(l, m, requestSetPrimarySelection);
+        auto* ev = static_cast<struct wlr_seat_request_set_primary_selection_event*>(data);
+        wlr_seat_set_primary_selection(m->seat, ev->source, ev->serial);
+    };
+    wl_signal_add(&seat->events.request_set_primary_selection, &requestSetPrimarySelection);
+
+    requestStartDrag.notify = [](struct wl_listener* l, void* data) {
+        Manager* m = wl_container_of(l, m, requestStartDrag);
+        auto* ev = static_cast<struct wlr_seat_request_start_drag_event*>(data);
+        if (ev->drag->grab_type == WLR_DRAG_GRAB_KEYBOARD_POINTER) {
+            wlr_seat_start_pointer_drag(m->seat, ev->drag, ev->serial);
+        } else {
+            wlr_seat_start_drag(m->seat, ev->drag, ev->serial);
+        }
+    };
+    wl_signal_add(&seat->events.request_start_drag, &requestStartDrag);
 
     struct wlr_xdg_decoration_manager_v1* deco =
         wlr_xdg_decoration_manager_v1_create(wlDisplay);
@@ -748,9 +949,56 @@ int Manager::run(const Options& options) {
         decorationNew.notify = [](struct wl_listener* l, void* data) {
             Manager* m = wl_container_of(l, m, decorationNew);
             auto* d = static_cast<struct wlr_xdg_toplevel_decoration_v1*>(data);
-            // We draw the Fluent frame ourselves, in every case.
-            wlr_xdg_toplevel_decoration_v1_set_mode(
-                d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+            if (!d || !d->toplevel) return;
+            Client* decoC = nullptr;
+            for (auto& cl : m->clients) {
+                if (cl->toplevel == d->toplevel) {
+                    decoC = cl.get();
+                    break;
+                }
+            }
+            if (!decoC) return;
+
+            // A client may replace its decoration object. Detach the listener
+            // from the old one before reusing the link.
+            if (decoC->decoration && decoC->decoration != d) {
+                wl_list_remove(&decoC->decorationDestroy.link);
+                wl_list_init(&decoC->decorationDestroy.link);
+            }
+            decoC->decoration = d;
+            decoC->decorationModeSet = false;
+            decoC->decorationDestroy.notify = [](struct wl_listener* dl, void*) {
+                Client* cl = wl_container_of(dl, cl, decorationDestroy);
+                cl->decoration = nullptr;
+                cl->decorationModeSet = false;
+                wl_list_init(&dl->link);
+            };
+            wl_signal_add(&d->events.destroy, &decoC->decorationDestroy);
+
+            // Only clients that actually bind xdg-decoration get our Fluent
+            // caption; a CSD client keeps its own title bar and must not get a
+            // second one from us.
+            if (!decoC->serverDecorated) {
+                decoC->serverDecorated = true;
+                if (!decoC->fullscreen) {
+                    // The frame now has a caption bar the client never asked
+                    // for: grow it downward so the window keeps the position it
+                    // already has (a new client is placed by placeNewClient).
+                    const int capH = metrics::kCaptionH;
+                    decoC->captionH = capH;
+                    for (Rect* r : {&decoC->frame, &decoC->restore}) r->h += capH;
+                    decoC->drawFrame = decoC->frame;
+                    m->dirty = true;
+                }
+            }
+
+            // The initial commit may already have happened (a client can bind
+            // decorations late), in which case the mode can be applied now.
+            if (decoC->xdg && decoC->xdg->initialized) {
+                wlr_xdg_toplevel_decoration_v1_set_mode(
+                    d, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+                decoC->decorationModeSet = true;
+            }
         };
         wl_signal_add(&deco->events.new_toplevel_decoration, &decorationNew);
     }
@@ -760,6 +1008,33 @@ int Manager::run(const Options& options) {
     cursorManager = wlr_xcursor_manager_create(nullptr, 24);
     wlr_xcursor_manager_load(cursorManager, 1);
     setCursor(0);
+
+    // A focused client can supply its own cursor image (an I-beam, a resize
+    // arrow). Only honour it while it owns pointer focus; over the shell the
+    // shell's cursor wins again.
+    requestSetCursor.notify = [](struct wl_listener* l, void* data) {
+        Manager* m = wl_container_of(l, m, requestSetCursor);
+        auto* ev = static_cast<struct wlr_seat_pointer_request_set_cursor_event*>(data);
+        if (ev->seat_client != m->seat->pointer_state.focused_client) return;
+        wlr_cursor_set_surface(m->cursor, ev->surface, ev->hotspot_x, ev->hotspot_y);
+        m->cursorShown = -1;
+    };
+    wl_signal_add(&seat->events.request_set_cursor, &requestSetCursor);
+
+    if (struct wlr_cursor_shape_manager_v1* shapes =
+            wlr_cursor_shape_manager_v1_create(wlDisplay, 1)) {
+        requestSetShape.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, requestSetShape);
+            auto* ev =
+                static_cast<struct wlr_cursor_shape_manager_v1_request_set_shape_event*>(data);
+            if (ev->device_type != WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_POINTER) return;
+            const char* name = wlr_cursor_shape_v1_name(ev->shape);
+            if (!name || !m->cursorManager) return;
+            wlr_cursor_set_xcursor(m->cursor, m->cursorManager, name);
+            m->cursorShown = -1;
+        };
+        wl_signal_add(&shapes->events.request_set_shape, &requestSetShape);
+    }
 
     newOutput.notify = [](struct wl_listener* l, void* data) {
         Manager* m = wl_container_of(l, m, newOutput);
@@ -833,8 +1108,10 @@ int Manager::run(const Options& options) {
             dev->type == WLR_INPUT_DEVICE_TABLET) {
             wlr_cursor_attach_input_device(m->cursor, dev);
         }
+        if (dev->type == WLR_INPUT_DEVICE_TOUCH) m->hasTouch = true;
         uint32_t caps = WL_SEAT_CAPABILITY_POINTER;
         if (m->keyboard) caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+        if (m->hasTouch) caps |= WL_SEAT_CAPABILITY_TOUCH;
         wlr_seat_set_capabilities(m->seat, caps);
     };
     wl_signal_add(&backend->events.new_input, &newInput);
@@ -886,6 +1163,50 @@ int Manager::run(const Options& options) {
         m->onPointerAxis(ev->delta);
     };
     wl_signal_add(&cursor->events.axis, &cursorAxis);
+
+    // Touch has no pointer of its own, so the shell and its clients see a
+    // single-finger drag as the left mouse button. That is enough for the
+    // tablet home screen and for every app that expects a pointer; multi-touch
+    // gestures are not translated.
+    cursorTouchDown.notify = [](struct wl_listener* l, void* data) {
+        Manager* m = wl_container_of(l, m, cursorTouchDown);
+        auto* ev = static_cast<struct wlr_touch_down_event*>(data);
+        if (!m->cursor || m->touchDown) return;
+        m->touchDown = true;
+        m->touchId = ev->touch_id;
+        wlr_cursor_warp_absolute(m->cursor, nullptr, ev->x, ev->y);
+        m->onPointerMotion(0.0, 0.0);
+        m->onPointerButton(BTN_LEFT, true, ev->time_msec);
+    };
+    wl_signal_add(&cursor->events.touch_down, &cursorTouchDown);
+
+    cursorTouchMotion.notify = [](struct wl_listener* l, void* data) {
+        Manager* m = wl_container_of(l, m, cursorTouchMotion);
+        auto* ev = static_cast<struct wlr_touch_motion_event*>(data);
+        if (!m->cursor || !m->touchDown || ev->touch_id != m->touchId) return;
+        wlr_cursor_warp_absolute(m->cursor, nullptr, ev->x, ev->y);
+        m->onPointerMotion(0.0, 0.0);
+    };
+    wl_signal_add(&cursor->events.touch_motion, &cursorTouchMotion);
+
+    cursorTouchUp.notify = [](struct wl_listener* l, void* data) {
+        Manager* m = wl_container_of(l, m, cursorTouchUp);
+        auto* ev = static_cast<struct wlr_touch_up_event*>(data);
+        if (!m->touchDown || ev->touch_id != m->touchId) return;
+        m->touchDown = false;
+        m->touchId = -1;
+        m->onPointerButton(BTN_LEFT, false, ev->time_msec);
+    };
+    wl_signal_add(&cursor->events.touch_up, &cursorTouchUp);
+
+    cursorTouchCancel.notify = [](struct wl_listener* l, void*) {
+        Manager* m = wl_container_of(l, m, cursorTouchCancel);
+        if (!m->touchDown) return;
+        m->touchDown = false;
+        m->touchId = -1;
+        m->onPointerButton(BTN_LEFT, false, uint32_t(nowMs()));
+    };
+    wl_signal_add(&cursor->events.touch_cancel, &cursorTouchCancel);
 
     if (!wlr_backend_start(backend)) {
         log("the wlroots backend failed to start");
@@ -1885,6 +2206,24 @@ void Manager::toggleMaximize(Client* c) {
     setMaximized(c, !both, !both);
 }
 
+void Manager::syncToplevelStates(Client* c) {
+    if (!c || !c->toplevel) return;
+    wlr_xdg_toplevel_set_maximized(c->toplevel, c->maximizedH && c->maximizedV);
+    uint32_t edges = WLR_EDGE_NONE;
+    switch (c->snapZone) {
+        case kSnapLeft: edges |= WLR_EDGE_LEFT; break;
+        case kSnapRight: edges |= WLR_EDGE_RIGHT; break;
+        case kSnapTop: edges |= WLR_EDGE_TOP; break;
+        case kSnapBottom: edges |= WLR_EDGE_BOTTOM; break;
+        case kSnapTopLeft: edges |= WLR_EDGE_LEFT | WLR_EDGE_TOP; break;
+        case kSnapTopRight: edges |= WLR_EDGE_RIGHT | WLR_EDGE_TOP; break;
+        case kSnapBottomLeft: edges |= WLR_EDGE_LEFT | WLR_EDGE_BOTTOM; break;
+        case kSnapBottomRight: edges |= WLR_EDGE_RIGHT | WLR_EDGE_BOTTOM; break;
+        default: break;
+    }
+    wlr_xdg_toplevel_set_tiled(c->toplevel, edges);
+}
+
 void Manager::setMaximized(Client* c, bool horizontal, bool vertical) {
     if (!c || !c->managed) return;
     if (c->fullscreen) setFullscreen(c, false);
@@ -1911,6 +2250,7 @@ void Manager::setMaximized(Client* c, bool horizontal, bool vertical) {
         }
         c->frame = f;
     }
+    syncToplevelStates(c);
     applyFrame(c, true);
     syncClientGeometry(c);
     updateStateAtoms(c);
@@ -1932,6 +2272,7 @@ void Manager::setFullscreen(Client* c, bool on) {
         c->captionH = c->frameless ? 0 : metrics::kCaptionH;
         c->frame = clampRect(c->restore, Rect{0, 0, screenW, screenH});
     }
+    if (c->toplevel) wlr_xdg_toplevel_set_fullscreen(c->toplevel, on);
     applyFrame(c, true);
     syncClientGeometry(c);
     updateStateAtoms(c);
@@ -1963,6 +2304,7 @@ void Manager::snapClient(Client* c, int zone) {
         }
         c->frame = snapGeometry(zone);
     }
+    syncToplevelStates(c);
     applyFrame(c, true);
     syncClientGeometry(c);
     updateStateAtoms(c);

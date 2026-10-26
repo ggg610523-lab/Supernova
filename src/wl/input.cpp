@@ -45,6 +45,46 @@ Client* Manager::contentAt(int x, int y) const {
     return nullptr;
 }
 
+Client* Manager::popupAt(int x, int y, struct wlr_surface** surface, double* sx,
+                         double* sy) const {
+    if (surface) *surface = nullptr;
+    for (size_t i = clients.size(); i-- > 0;) {
+        Client* c = clients[i].get();
+        if (!c->managed || !c->mapped || c->minimized || !c->alive || !c->xdg) continue;
+        const Rect r = clientRect(c);
+        const struct wlr_box g = c->xdg->current.geometry;
+        const double lx = double(x - r.x + g.x);
+        const double ly = double(y - r.y + g.y);
+        double px = 0.0, py = 0.0;
+        struct wlr_surface* sub =
+            wlr_xdg_surface_popup_surface_at(c->xdg, lx, ly, &px, &py);
+        if (!sub) continue;
+        if (surface) *surface = sub;
+        if (sx) *sx = px;
+        if (sy) *sy = py;
+        return c;
+    }
+    return nullptr;
+}
+
+void Manager::setPointerFocus(struct wlr_surface* surface, double sx, double sy) {
+    if (pointerSurface == surface) return;
+    if (pointerSurface) wl_list_remove(&pointerSurfaceDestroy.link);
+    pointerSurface = surface;
+    if (!surface) {
+        if (seat) wlr_seat_pointer_notify_clear_focus(seat);
+        return;
+    }
+    pointerSurfaceDestroy.notify = [](struct wl_listener* l, void*) {
+        Manager* m = wl_container_of(l, m, pointerSurfaceDestroy);
+        m->pointerSurface = nullptr;
+        m->pointerSentPress = false;
+        wl_list_init(&l->link);
+    };
+    wl_signal_add(&surface->events.destroy, &pointerSurfaceDestroy);
+    if (seat) wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+}
+
 bool Manager::shellHasKeyboard() const {
     if (settingsOpen || startOpen || ccOpen || altTabOpen || taskViewOpen || contextOpen) return true;
     if (confirmDeleteOpen || desktopRenameItem >= 0) return true;
@@ -70,25 +110,26 @@ void Manager::onPointerMotion(double dx, double dy) {
                            ccDrag >= 0 || tabletPageSwipe || launchSwipe ||
                            tabletDragIcon >= 0 || tabletDragFromDock || tabletDragFromFolder;
     if (shellOwns) {
-        if (pointerSurface) {
-            wlr_seat_pointer_notify_clear_focus(seat);
-            pointerSurface = nullptr;
-        }
+        setPointerFocus(nullptr, 0.0, 0.0);
         return;
     }
-    Client* c = contentAt(x, y);
-    if (c && c->surface) {
-        const Rect r = clientRect(c);
-        const double sx = double(x - r.x);
-        const double sy = double(y - r.y);
-        if (pointerSurface != c->surface) {
-            wlr_seat_pointer_notify_enter(seat, c->surface, sx, sy);
-            pointerSurface = c->surface;
+    struct wlr_surface* popupSurface = nullptr;
+    double popupX = 0.0, popupY = 0.0;
+    Client* popupClient = popupAt(x, y, &popupSurface, &popupX, &popupY);
+    if (popupClient && popupSurface) {
+        setPointerFocus(popupSurface, popupX, popupY);
+        wlr_seat_pointer_notify_motion(seat, nowMs32(), popupX, popupY);
+    } else {
+        Client* c = contentAt(x, y);
+        if (c && c->surface) {
+            const Rect r = clientRect(c);
+            const double sx = double(x - r.x);
+            const double sy = double(y - r.y);
+            setPointerFocus(c->surface, sx, sy);
+            wlr_seat_pointer_notify_motion(seat, nowMs32(), sx, sy);
+        } else {
+            setPointerFocus(nullptr, 0.0, 0.0);
         }
-        wlr_seat_pointer_notify_motion(seat, nowMs32(), sx, sy);
-    } else if (pointerSurface) {
-        wlr_seat_pointer_notify_clear_focus(seat);
-        pointerSurface = nullptr;
     }
 
     // Resize edges get the matching system cursor, the way the X11 build's
@@ -140,23 +181,34 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
     const bool shell = overlayOpen() || settingsOpen || modeSwitching || modDrag ||
                        overTaskbar || chromeAt(x, y) || edge != 0;
 
+    if (!shell) {
+        struct wlr_surface* popupSurface = nullptr;
+        double popupX = 0.0, popupY = 0.0;
+        Client* popupClient = popupAt(x, y, &popupSurface, &popupX, &popupY);
+        if (popupClient && popupSurface) {
+            focusClient(popupClient, true);
+            setPointerFocus(popupSurface, popupX, popupY);
+            pointerSentPress = true;
+            wlr_seat_pointer_notify_button(seat, time, evdevButton,
+                                           WL_POINTER_BUTTON_STATE_PRESSED);
+            requestFrame();
+            return;
+        }
+    }
+
     Client* c = contentAt(x, y);
     if (c && !shell) {
         const Rect r = clientRect(c);
         focusClient(c, true);
-        pointerSurface = c->surface;
+        setPointerFocus(c->surface, double(x - r.x), double(y - r.y));
         pointerSentPress = true;
-        wlr_seat_pointer_notify_enter(seat, c->surface, double(x - r.x), double(y - r.y));
         wlr_seat_pointer_notify_button(seat, time, evdevButton,
                                        WL_POINTER_BUTTON_STATE_PRESSED);
         handleClientPress(c, x, y, button);
         requestFrame();
         return;
     }
-    if (pointerSurface) {
-        wlr_seat_pointer_notify_clear_focus(seat);
-        pointerSurface = nullptr;
-    }
+    setPointerFocus(nullptr, 0.0, 0.0);
     onShellButtonPress(x, y, button, time, keyMods);
     requestFrame();
 }

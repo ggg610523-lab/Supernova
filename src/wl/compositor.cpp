@@ -68,6 +68,7 @@ uniform float uGlass;
 uniform float uTintAmount;
 uniform float uSaturate;
 uniform float uClipTop;
+uniform vec4  uTexRect;
 uniform vec2  uArc;
 uniform float uThick;
 uniform sampler2D uTex;
@@ -177,9 +178,10 @@ void main() {
                                glyphCoverage(p - bc, idx, uMaximized) * uColor2.a);
                 }
             } else {
-                vec2 uv = (p - uContent.xy) / max(uContent.zw, vec2(1.0));
-                bool inTex = uTexMix > 0.5 && uv.x >= 0.0 && uv.y >= 0.0 &&
-                             uv.x <= 1.0 && uv.y <= 1.0;
+                vec2 local = (p - uContent.xy) / max(uContent.zw, vec2(1.0));
+                vec2 uv = uTexRect.xy + local * uTexRect.zw;
+                bool inTex = uTexMix > 0.5 && local.x >= 0.0 && local.y >= 0.0 &&
+                             local.x <= 1.0 && local.y <= 1.0;
                 if (uGlass > 0.5) {
                     body = micaTint(p, uColor.rgb, uTintAmount);
                     alphaMul = 1.0;
@@ -538,6 +540,7 @@ bool Compositor::buildShaders(std::string* error) {
     uTintAmount_ = loc("uTintAmount");
     uSaturate_ = loc("uSaturate");
     uClipTop_ = loc("uClipTop");
+    uTexRect_ = loc("uTexRect");
     uArc_ = loc("uArc");
     uThick_ = loc("uThick");
     uTex_ = loc("uTex");
@@ -1063,8 +1066,9 @@ void Compositor::drawWindow(const WindowSprite& s) {
 
     const bool hasTex = s.tex.valid();
     glUniform1f(uTexMix_, hasTex ? 1.f : 0.f);
-    glUniform1f(uKeepAlpha_, (hasTex && s.tex.alpha && !std::getenv("WIN11WM_FORCE_OPAQUE")) ? 1.f : 0.f);
+    glUniform1f(uKeepAlpha_, (hasTex && s.tex.alpha) ? 1.f : 0.f);
     glUniform1f(uGlass_, (s.glass && hasTex && s.tex.alpha) ? 1.f : 0.f);
+    glUniform4f(uTexRect_, s.uvX, s.uvY, s.uvW, s.uvH);
     glUniform1i(uMode_, 2);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, hasTex ? s.tex.tex : 0);

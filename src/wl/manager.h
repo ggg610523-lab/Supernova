@@ -42,11 +42,14 @@ struct wlr_input_device;
 struct wlr_keyboard;
 struct wlr_output;
 struct wlr_output_layout;
+struct wlr_presentation;
 struct wlr_renderer;
+struct wlr_seat_pointer_request_set_cursor_event;
 struct wlr_seat;
 struct wlr_surface;
 struct wlr_xcursor_manager;
 struct wlr_xdg_popup;
+struct wlr_xdg_toplevel_decoration_v1;
 struct wlr_xdg_shell;
 struct wlr_xdg_surface;
 struct wlr_xdg_toplevel;
@@ -82,8 +85,12 @@ enum { Button1 = 1, Button2 = 2, Button3 = 3, Button4 = 4, Button5 = 5 };
 // A managed top level window. `frame` is the chrome we draw around it; the
 // client itself lives at clientRect() and is never reparented.
 struct Client {
-    Client() = default;
+    Client();
     ~Client();
+    // Unlinks every protocol listener except `skip`, the one whose callback is
+    // running right now. wlroots detaches a listener before invoking it, so
+    // unlinking that one again would walk a stale pointer (see ~Client).
+    void detachListeners(struct wl_listener* skip);
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;
 
@@ -140,17 +147,29 @@ struct Client {
     bool configured = false;
     bool closeRequested = false;
     std::string appId;          // xdg_toplevel app_id, used to match launchers
-    bool serverDecorated = true;
+    // True once the client asks for xdg-decoration server side mode. Clients
+    // that never do (GTK: Firefox, GNOME apps) draw their own title bar, so we
+    // leave the Fluent caption off and let theirs be the window's only one.
+    bool serverDecorated = false;
+    // The client's decoration object, if it bound xdg-decoration. The server
+    // side mode can only be negotiated after the xdg surface's initial commit,
+    // so the request is held here until onSurfaceCommit can apply it.
+    struct wlr_xdg_toplevel_decoration_v1* decoration = nullptr;
+    bool decorationModeSet = false;
     int configureSerial = 0;
     // Popups and subsurfaces are drawn relative to their parent surface; the
     // shell only ever needs the popup list (menus, tooltips).
     std::vector<struct wlr_xdg_popup*> popups;
     int bufferW = 0, bufferH = 0;
+    // The listener currently being dispatched, if the client is being torn down
+    // from inside one of its own callbacks.
+    struct wl_listener* firing = nullptr;
     // Protocol listeners owned by this client.
     struct wl_listener surfaceCommit{}, surfaceDestroy{}, surfaceMap{}, surfaceUnmap{},
         toplevelDestroy{}, toplevelRequestMove{}, toplevelRequestResize{},
         toplevelRequestMaximize{}, toplevelRequestFullscreen{}, toplevelRequestMinimize{},
-        toplevelTitle{}, toplevelAppId{}, toplevelClose{}, toplevelShowMenu{};
+        toplevelTitle{}, toplevelAppId{}, toplevelSetParent{}, toplevelClose{},
+        toplevelShowMenu{}, decorationDestroy{};
 
     GLuint iconTex = 0;
     int iconW = 0, iconH = 0;
@@ -321,6 +340,12 @@ private:
     void restoreClient(Client* c);
     void toggleMaximize(Client* c);
     void setMaximized(Client* c, bool horizontal, bool vertical);
+    // Mirror the frame we gave a window into the xdg_toplevel state it is told
+    // about. Toolkits read the configure states array to decide whether to keep
+    // their own shadow, rounded corners and resize grips, so a maximized or
+    // snapped window that never says so draws its client side decorations as if
+    // it were still floating.
+    void syncToplevelStates(Client* c);
     void setFullscreen(Client* c, bool on);
     void toggleFullscreen(Client* c);
     void snapClient(Client* c, int zone);
@@ -351,12 +376,22 @@ private:
     void onShellButtonRelease(int x, int y, unsigned button, Time time);
     void onShellMotion(int x, int y);
     Client* contentAt(int x, int y) const;
+    // The client and leaf surface under a point when that point is inside one
+    // of the client's xdg popups. Coordinates are returned in the leaf surface's
+    // own space, ready for wlr_seat_pointer_notify_*.
+    Client* popupAt(int x, int y, struct wlr_surface** surface, double* sx,
+                    double* sy) const;
+    // Keep the seat's pointer focus tied to a surface's lifetime: popups and
+    // toplevels can be destroyed between two motion events.
+    void setPointerFocus(struct wlr_surface* surface, double sx, double sy);
     bool shellHasKeyboard() const;
     // xdg-shell / surface events (windows.cpp equivalent).
     void onNewToplevel(struct wlr_xdg_toplevel* toplevel);
     void onToplevelCommit(Client* c);
     void onToplevelDestroy(Client* c);
     void onNewPopup(struct wlr_xdg_popup* popup);
+    void unconstrainPopup(struct wlr_xdg_popup* popup);
+    Client* clientForSurface(struct wlr_surface* surface) const;
     void onSurfaceCommit(Client* c);
     void onRequestMove(Client* c, struct wlr_seat_pointer_request_set_cursor_event* e);
     void beginInteractiveMove(Client* c);
@@ -411,6 +446,13 @@ private:
                                float radius, bool maximized, float opacity);
     static void surfaceDrawIterator(struct wlr_surface* surface, int sx, int sy,
                                     void* data);
+    // Popups (menus, tooltips, dropdowns) are not part of the toplevel's
+    // subsurface tree: wlroots keeps them on the xdg surface separately. They
+    // also draw outside the window's content rect, so they get their own pass
+    // above the normal window stack.
+    void drawClientPopups(Client* c);
+    static void popupDrawIterator(struct wlr_surface* surface, int sx, int sy,
+                                  void* data);
     void drawTaskbar();
     void drawStartMenu();
     void drawAltTab();
@@ -769,9 +811,13 @@ private:
     struct wlr_seat* seat = nullptr;
     struct wlr_cursor* cursor = nullptr;
     struct wlr_xcursor_manager* cursorManager = nullptr;
+    struct wlr_presentation* presentation = nullptr;
     struct wl_listener newOutput{}, newXdgSurface{}, newPopup{}, cursorMotion{},
         cursorMotionAbsolute{}, cursorButton{}, cursorAxis{}, cursorFrame{},
-        requestSetCursor{}, newInput{}, keyboardModifiers{};
+        cursorTouchDown{}, cursorTouchUp{}, cursorTouchMotion{}, cursorTouchCancel{},
+        requestSetCursor{}, requestSetShape{}, requestSetSelection{},
+        requestSetPrimarySelection{}, requestStartDrag{}, requestActivate{},
+        newInput{}, keyboardModifiers{};
     bool nested = true;
     struct wlr_keyboard* keyboard = nullptr;
     struct wl_listener keyboardKey{};
@@ -782,7 +828,11 @@ private:
     int pointerButtonCount = 0;
     bool buttonConsumed = false;
     struct wlr_surface* pointerSurface = nullptr;
+    struct wl_listener pointerSurfaceDestroy{};
     bool pointerSentPress = false;
+    bool hasTouch = false;
+    bool touchDown = false;
+    int32_t touchId = -1;
     uint32_t lastKeyTime = 0;
     bool framesLimited = false;
     int framesTarget = 0;

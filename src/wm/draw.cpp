@@ -12,6 +12,12 @@
 
 #include "theme.h"
 
+#ifdef WIN11WM_WAYLAND
+// The window geometry a client declares lives on its xdg_surface; only the
+// Wayland build has one.
+#include "wlr.h"
+#endif
+
 namespace wm {
 
 namespace metrics {
@@ -93,6 +99,12 @@ void Manager::render() {
     }
 
     if (on(kLayClients)) drawLaunches();
+
+    // Menus and tooltips hang off a client but paint outside its frame and
+    // above every other normal window.
+    if (on(kLayClients)) {
+        for (auto& cp : clients) drawClientPopups(cp.get());
+    }
 
     if (on(kLaySnap)) drawSnapPreview();
     if (on(kLayTaskbar) && tabletAnim < 0.999) drawTaskbar();
@@ -384,6 +396,11 @@ void Manager::drawDesktopIcons() {
         desktopIconDraw.size() != desktopItems.size())
         layoutDesktopIcons();
     const double lift = std::clamp(desktopIconLift.value, 0.0, 1.4);
+    const bool drawImages = std::getenv("WIN11WM_NO_ICON_IMAGES") == nullptr;
+    const bool drawLabels = std::getenv("WIN11WM_NO_ICON_LABELS") == nullptr;
+    int labelLimit = -1;
+    if (const char* v = std::getenv("WIN11WM_ICON_LABELS_N")) labelLimit = std::atoi(v);
+    int labelsDrawn = 0;
 
     const auto drawOne = [&](size_t i, bool lifted) {
         const DesktopItem& item = desktopItems[i];
@@ -423,11 +440,16 @@ void Manager::drawDesktopIcons() {
                           float(hl));
         }
         // The item's own icon first, then a generic one, then a letter tile.
-        const char* fallback = item.isDir ? "folder" : "text-plain";
-        if (!drawAppIcon(icon, item.icon, std::string(), 6.f, 1.0f) &&
-            !drawAppIcon(icon, fallback, std::string(), 6.f, 1.0f)) {
-            drawAppTile(icon, item.name, 8.f, tileTint(item.name), hovered);
+        if (drawImages) {
+            const char* fallback = item.isDir ? "folder" : "text-plain";
+            if (!drawAppIcon(icon, item.icon, std::string(), 6.f, 1.0f) &&
+                !drawAppIcon(icon, fallback, std::string(), 6.f, 1.0f)) {
+                drawAppTile(icon, item.name, 8.f, tileTint(item.name), hovered);
+            }
         }
+        if (!drawLabels) return;
+        if (labelLimit >= 0 && labelsDrawn >= labelLimit) return;
+        ++labelsDrawn;
         const std::string label = ellipsize(text, item.name, 11, cell.w - 8);
         if (label.empty()) return;
         const TextTex t = text.get(label, 11, Weight::Regular);
@@ -642,17 +664,37 @@ void Manager::drawLaunches() {
 }
 
 void Manager::drawDesktop() {
-    comp.drawWallpaper();
+    // Benchmark hook (WIN11WM_DLAYERS): splits the wallpaper layer so a run can
+    // attribute its cost to the photo, the desktop grid or the widget cards.
+    unsigned layers = ~0u;
+    if (const char* v = std::getenv("WIN11WM_DLAYERS")) layers = std::strtoul(v, nullptr, 0);
+    const auto on = [&](unsigned bit) { return (layers & bit) != 0; };
+
+    const bool glTiming = std::getenv("WIN11WM_GLTIMING") != nullptr;
+    const auto mark = [&](const char* what, double& t) {
+        if (!glTiming) return;
+#ifdef WIN11WM_WAYLAND
+        glFinish();
+#endif
+        const double now = nowMs();
+        std::fprintf(stderr, "[win11wm] %s %.2fms\n", what, now - t);
+        t = now;
+    };
+    double t0 = glTiming ? nowMs() : 0.0;
+    if (on(1u << 0)) comp.drawWallpaper();
+    mark("wallpaper", t0);
     // Tablet mode replaces the desktop grid with the iOS home screen. The widget
     // cards stay on the screen in both modes now: on the tablet home they sit
     // behind the icons, so a card never swallows a tap meant for one.
-    if (tabletAnim < 0.999) drawDesktopIcons();
+    if (on(1u << 1) && tabletAnim < 0.999) drawDesktopIcons();
+    mark("icons", t0);
     if (tabletAnim > 0.001) {
-        drawWidgets();
-        drawTabletHome();
-    } else {
+        if (on(1u << 2)) drawWidgets();
+        if (on(1u << 3)) drawTabletHome();
+    } else if (on(1u << 2)) {
         drawWidgets();
     }
+    mark("widgets", t0);
     // The dock picker is modal, so it goes over the home screen rather than under
     // it.
     if (tabletDockPickerOpen) drawTabletDockPickerView();
@@ -886,6 +928,24 @@ void Manager::drawClientSprite(Client* c) {
 
     WindowSprite s;
     s.tex = c->tex;
+#ifdef WIN11WM_WAYLAND
+    // A client that draws its own title bar attaches a buffer padded with its drop
+    // shadow and names the window itself with xdg_surface window geometry. Show
+    // exactly that part, so the app sits flush in the frame instead of floating
+    // inside it with a transparent margin all around.
+    if (c->xdg && c->surface && s.tex.valid()) {
+        const int sw = c->surface->current.width;
+        const int sh = c->surface->current.height;
+        const struct wlr_box g = c->xdg->current.geometry;
+        if (sw > 0 && sh > 0 && g.width > 0 && g.height > 0 &&
+            (g.x || g.y || g.width != sw || g.height != sh)) {
+            s.uvX = float(g.x) / float(sw);
+            s.uvY = float(g.y) / float(sh);
+            s.uvW = float(g.width) / float(sw);
+            s.uvH = float(g.height) / float(sh);
+        }
+    }
+#endif
     s.frame = f;
     s.captionH = c->captionH;
     s.maximized = c->maximizedH && c->maximizedV;
