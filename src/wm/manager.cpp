@@ -343,6 +343,9 @@ int Manager::run(const Options& options) {
     desktopNoOverlap = loadDesktopNoOverlap();
     layoutDesktopIcons();
     initWidgets();
+    // Widgets claim desktop cells; lay the grid out again after their saved
+    // positions are known so icons never start underneath a widget card.
+    layoutDesktopIcons();
     scanExistingWindows();
     updateClientList();
     // Kick the first state probe now, off the critical path, so the Control

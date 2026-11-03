@@ -513,8 +513,19 @@ constexpr int kRingPowerCount = 4;
 constexpr int kTabletStatusH = 52;
 constexpr int kTabletIcon = 68;         // app icon edge at 100%
 constexpr int kTabletIconMin = 48;
+constexpr int kTabletIconMax = 84;
 constexpr int kTabletCellW = 106;       // icon + label cell
 constexpr int kTabletCellH = 108;
+
+// One icon edge for both the tablet home screen and the desktop grid. The
+// desktop used to hard-code 48px while tablet mode scaled to the screen, so the
+// same app looked two different sizes depending on where it was shown.
+inline int homeIconEdge(int w, int h) {
+    int edge = (w < h ? w : h) / 11;
+    if (edge < kTabletIconMin) edge = kTabletIconMin;
+    if (edge > kTabletIconMax) edge = kTabletIconMax;
+    return edge;
+}
 constexpr int kTabletDockIcon = 62;
 // iOS caps its dock at four icons. HarmonyOS 6 raised its own from four columns
 // to five, and a tablet row has width for more again, so this is a ceiling the

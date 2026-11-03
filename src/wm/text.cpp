@@ -40,7 +40,7 @@ constexpr int kRenderFlags = FT_LOAD_RENDER | FT_LOAD_FORCE_AUTOHINT | FT_LOAD_T
 int weightToFc(Weight w) {
     switch (w) {
         case Weight::Bold: return FC_WEIGHT_BOLD;
-        case Weight::Medium: return FC_WEIGHT_MEDIUM;
+        case Weight::Medium: return FC_WEIGHT_DEMIBOLD;
         default: return FC_WEIGHT_REGULAR;
     }
 }
@@ -96,7 +96,9 @@ uint32_t nextCodepoint(const std::string& s, size_t* i) {
 // ---------------------------------------------------------------------------
 bool loadVariableFont(FT_Library lib, const std::string& path, void* faces[3],
                       bool hasOpsz[3], double opszMin[3], double opszMax[3]) {
-    const int weights[3] = {400, 500, 700};
+    // Regular / SemiBold / Bold: the three cuts Fluent uses for body text,
+    // buttons and headings. 500 is too close to Regular at caption sizes.
+    const int weights[3] = {400, 600, 700};
     for (int i = 0; i < 3; ++i) {
         FT_Face face = nullptr;
         if (FT_New_Face(lib, path.c_str(), 0, &face) != 0 || !face) return false;
@@ -291,24 +293,26 @@ bool Text::initFromFile(const std::string& path) {
             shutdown();
             return false;
         }
-        // The display face is the same variable Roboto as the UI font: drive its
-        // wght axis to the heaviest the file carries so the clock keeps thick
-        // digits. A default-instance open of the variable file would render the
-        // Regular cut at this size and read as nothing at all.
+        // The display face is the same variable Roboto as the UI font: use its
+        // Semibold cut so the clock has presence without turning into a black
+        // slab. Pushing wght to the file's 900 maximum was much heavier than the
+        // Fluent widget clock.
         FT_MM_Var* mm = nullptr;
         if (FT_Get_MM_Var(face, &mm) == 0 && mm) {
             if (mm->num_axis > 0 && mm->num_axis <= 16) {
                 FT_Fixed coords[16];
-                double heaviest = 0.0;
+                bool hasWeight = false;
                 for (FT_UInt a = 0; a < mm->num_axis; ++a) {
                     coords[a] = mm->axis[a].def;
-                    if (mm->axis[a].tag != FT_MAKE_TAG('w', 'g', 'h', 't')) continue;
-                    heaviest = std::max(heaviest, double(mm->axis[a].maximum) / 65536.0);
+                    if (mm->axis[a].tag == FT_MAKE_TAG('w', 'g', 'h', 't'))
+                        hasWeight = true;
                 }
-                if (heaviest > 0.0) {
+                if (hasWeight) {
                     for (FT_UInt a = 0; a < mm->num_axis; ++a) {
                         if (mm->axis[a].tag != FT_MAKE_TAG('w', 'g', 'h', 't')) continue;
-                        coords[a] = FT_Fixed(heaviest * 65536.0);
+                        const double lo = double(mm->axis[a].minimum) / 65536.0;
+                        const double hi = double(mm->axis[a].maximum) / 65536.0;
+                        coords[a] = FT_Fixed(std::clamp(600.0, lo, hi) * 65536.0);
                     }
                     FT_Set_Var_Design_Coordinates(face, mm->num_axis, coords);
                 }
@@ -408,6 +412,8 @@ void Text::layout(const std::string& s, void* facePtr, int* outW, int* outH) {
 // Render `s` into a tightly packed RGBA bitmap (white + coverage in alpha) and
 // hand it to GL. One texture per cached string, alpha-blended by the shader.
 void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int width, int height) {
+    if (std::getenv("WIN11WM_GLTIMING"))
+        std::fprintf(stderr, "[text] rasterise \"%s\" %dx%d\n", s.c_str(), width, height);
     FT_Face face = static_cast<FT_Face>(facePtr);
     std::vector<unsigned char> buf(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
     const int baseline = static_cast<int>(face->size->metrics.ascender >> 6);

@@ -60,6 +60,54 @@ std::string ellipsize(Text& text, const std::string& s, int px, int maxW) {
     return out + "\u2026";
 }
 
+// Desktop labels wrap to two lines like Windows 11 instead of chopping a long
+// app or folder name after the first few characters. If a single word is wider
+// than the cell, only that line is ellipsized.
+std::vector<std::string> wrapTwoLines(Text& text, const std::string& s, int px, int maxW) {
+    if (s.empty() || maxW <= 0) return {};
+    if (text.measure(s, px) <= maxW) return {s};
+
+    size_t best = std::string::npos;
+    int bestBalance = 0x7fffffff;
+    for (size_t i = 1; i < s.size(); ++i) {
+        if (s[i] != ' ' && s[i] != '-' && s[i] != '_') continue;
+        std::string a = s.substr(0, i);
+        std::string b = s.substr(i + 1);
+        while (!b.empty() && b.front() == ' ') b.erase(b.begin());
+        if (a.empty() || b.empty()) continue;
+        const int wa = text.measure(a, px);
+        const int wb = text.measure(b, px);
+        if (wa > maxW || wb > maxW) continue;
+        const int balance = std::abs(wa - wb);
+        if (balance < bestBalance) {
+            bestBalance = balance;
+            best = i;
+        }
+    }
+    if (best != std::string::npos) {
+        std::string b = s.substr(best + 1);
+        while (!b.empty() && b.front() == ' ') b.erase(b.begin());
+        return {s.substr(0, best), b};
+    }
+
+    std::string first;
+    size_t cut = 0;
+    for (size_t i = 0; i < s.size();) {
+        size_t j = i + size_t(std::max(1, utf8Len(static_cast<unsigned char>(s[i]))));
+        if (j > s.size()) j = s.size();
+        const std::string candidate = s.substr(0, j);
+        if (text.measure(candidate, px) > maxW) break;
+        first = candidate;
+        cut = j;
+        i = j;
+    }
+    if (first.empty()) return {ellipsize(text, s, px, maxW)};
+    std::string rest = s.substr(cut);
+    while (!rest.empty() && rest.front() == ' ') rest.erase(rest.begin());
+    if (rest.empty()) return {first};
+    return {first, ellipsize(text, rest, px, maxW)};
+}
+
 Color tileTint(const std::string& name) {
     size_t h = 5381;
     for (unsigned char ch : name) h = h * 33 + ch;
@@ -141,9 +189,15 @@ void Manager::render() {
 // The desktop grid lays out top-to-bottom and then starts a new column to the
 // right, which is the order Windows fills its desktop in.
 void Manager::layoutDesktopIcons() {
+    if (std::getenv("WIN11WM_DEBUG_GRID"))
+        log("grid: %zu item(s), %zu widget(s)", desktopItems.size(), widgets.size());
     desktopIconRects.assign(desktopItems.size(), Rect{});
-    const int cellW = 92, cellH = 92, gapX = 6, gapY = 2;
-    const int marginX = 10, marginY = 10;
+    // Match the tablet home screen's icon edge and cell proportions, so an app
+    // does not change size when the same desktop is shown in tablet mode.
+    const int edge = metrics::homeIconEdge(screenW, screenH);
+    const int cellW = edge + edge / 2 + 24, cellH = edge + 34;
+    const int gapX = 4, gapY = 2;
+    const int marginX = 12, marginY = 8;
     const int usableH = screenH - metrics::taskbarH - marginY;
     const int rows = std::max(1, (usableH + gapY) / (cellH + gapY));
     const auto cellAt = [&](int n) {
@@ -225,6 +279,9 @@ void Manager::layoutDesktopIcons() {
             if (!blocked)
                 for (const Widget& w : widgets)
                     if (cell.inflated(8).intersects(w.rect)) {
+                        if (std::getenv("WIN11WM_DEBUG_GRID"))
+                            log("grid: item %zu cell %d,%d blocked by widget %d,%d %dx%d", i,
+                                cell.x, cell.y, w.rect.x, w.rect.y, w.rect.w, w.rect.h);
                         blocked = true;
                         break;
                     }
@@ -422,9 +479,10 @@ void Manager::drawDesktopIcons() {
         // being held above the desktop rather than painted on it. A handful of
         // rounded layers with a quadratic falloff stands in for a real blur, the
         // same trick the taskbar uses for its soft top edge.
-        const int grow = int(std::lround(48.0 * 0.10 * lg));
-        const Rect icon{cell.x + (cell.w - (48 + grow)) / 2, cell.y + 8 - grow / 2,
-                        48 + grow, 48 + grow};
+        const int edge = metrics::homeIconEdge(screenW, screenH);
+        const int grow = int(std::lround(double(edge) * 0.10 * lg));
+        const Rect icon{cell.x + (cell.w - (edge + grow)) / 2, cell.y - grow / 2,
+                        edge + grow, edge + grow};
         if (lg > 0.001) {
             constexpr int kLayers = 5;
             for (int s = kLayers; s >= 1; --s) {
@@ -444,25 +502,26 @@ void Manager::drawDesktopIcons() {
                           float(hl));
         }
         // The item's own icon first, then a generic one, then a letter tile.
+        const float iconRadius = float(edge) * metrics::kTabletIconRadius;
         if (drawImages) {
             const char* fallback = item.isDir ? "folder" : "text-plain";
-            if (!drawAppIcon(icon, item.icon, std::string(), 6.f, 1.0f) &&
-                !drawAppIcon(icon, fallback, std::string(), 6.f, 1.0f)) {
-                drawAppTile(icon, item.name, 8.f, tileTint(item.name), hovered);
+            if (!drawAppIcon(icon, item.icon, std::string(), iconRadius, 1.0f) &&
+                !drawAppIcon(icon, fallback, std::string(), iconRadius, 1.0f)) {
+                drawAppTile(icon, item.name, iconRadius, tileTint(item.name), hovered);
             }
         }
         if (!drawLabels) return;
         if (labelLimit >= 0 && labelsDrawn >= labelLimit) return;
         ++labelsDrawn;
-        const std::string label = ellipsize(text, item.name, 11, cell.w - 8);
+        const std::string label = ellipsize(text, item.name, 12, cell.w - 8);
         if (label.empty()) return;
-        const TextTex t = text.get(label, 11, Weight::Regular);
+        const TextTex t = text.get(label, 12, Weight::Regular);
         if (!t.tex) return;
         const int lx = cell.x + (cell.w - t.w) / 2;
         const int ly = icon.bottom() + 6;
-        // Desktop labels sit on a photo, so a one pixel dark drop shadow keeps
-        // them legible over a light patch of wallpaper.
-        comp.drawText(t, Rect{lx + 1, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.65f}, 1.0f);
+        // The same 12px label and one-pixel shadow the tablet home screen uses,
+        // so labels read at the same weight in both modes.
+        comp.drawText(t, Rect{lx, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.72f}, 1.0f);
         comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kDesktopLabel, 1.0f);
     };
 
@@ -1068,7 +1127,11 @@ void Manager::layoutTaskbar() {
     if (x < 8) x = 8;
     startButtonRect = Rect{x, top, w, h};
     x += w + gap;
-    const int rightLimit = screenW - 150;  // the clock cluster owns the right side
+    // The clock cluster grows with the bar, otherwise a thick taskbar leaves the
+    // time and date stranded as tiny 13px text beside 64px icons.
+    const int clockScale = std::clamp(metrics::taskbarH / metrics::kTaskbarDefaultH, 1, 2);
+    const int clockW = 116 * clockScale;
+    const int rightLimit = screenW - clockW - 34 * clockScale;
     // Pinned launchers come first, in the order they were pinned: the buttons
     // the user arranged stay where they put them while the window buttons after
     // them grow and shrink with what is running.
@@ -1096,7 +1159,7 @@ void Manager::layoutTaskbar() {
     const int indent = 16;
     circleButtonRect = Rect{indent, y + (metrics::taskbarH - d) / 2, d, d};
 
-    clockRect = Rect{screenW - 140, y, 116, metrics::taskbarH};
+    clockRect = Rect{screenW - clockW - 24 * clockScale, y, clockW, metrics::taskbarH};
     showDesktopRect = Rect{screenW - 14, y, 14, metrics::taskbarH};
 }
 
@@ -1360,16 +1423,20 @@ void Manager::drawTaskbar() {
     const int right = clockRect.right();
     // The clock is a two-line stack, centred in the bar rather than hung off fixed
     // offsets, so it stays in the middle when the bar is dragged thicker or thinner.
-    // 29 is the stack's own height: 13px time, 5px gap, 11px date.
-    const int top = y + (metrics::taskbarH - 29) / 2;
+    // Both lines scale with the bar so a 96px taskbar does not keep 13px text.
+    const int clockScale = std::clamp(metrics::taskbarH / metrics::kTaskbarDefaultH, 1, 2);
+    const int timePx = 13 * clockScale;
+    const int datePx = 11 * clockScale;
+    const int gap = 5 * clockScale;
+    const int top = y + (metrics::taskbarH - (timePx + gap + datePx)) / 2;
     // The whole cluster takes a hover wash, the way the tray does in Windows 11, so
     // the click target looks like it exists before it is pressed.
     if (clockHoverAnim > 0.001) {
         comp.drawRect(Rect{clockRect.x + 2, y + 4, clockRect.w - 4, metrics::taskbarH - 8},
                       4.f, theme::kItemHover, float(clockHoverAnim));
     }
-    drawTextRight(hhmm, 13, Weight::Regular, theme::kText, right, top);
-    drawTextRight(dateStr, 11, Weight::Regular, theme::kTextMuted, right, top + 18);
+    drawTextRight(hhmm, timePx, Weight::Regular, theme::kText, right, top);
+    drawTextRight(dateStr, datePx, Weight::Regular, theme::kTextMuted, right, top + timePx + gap);
 
     if (showDesktopHoverAnim > 0.001)
         comp.drawRect(showDesktopRect, 2.f, theme::kItemHover, float(showDesktopHoverAnim));

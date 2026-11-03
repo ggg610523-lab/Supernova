@@ -236,6 +236,7 @@ struct Options {
     bool headless = false; // render offscreen (frame dumps for tests)
     bool drm = false;      // force the DRM/KMS session backend
     bool nested = false;   // force nesting inside the host Wayland server
+    bool fullscreen = false; // ask the host to fullscreen the nested output
     bool vsync = true;
     bool stats = false;
     bool unredirect = true;

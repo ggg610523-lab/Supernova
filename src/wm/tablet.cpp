@@ -310,7 +310,7 @@ void Manager::layoutTabletHome() {
 
     // --- home grid: squircle + label cells, top aligned, as many pages of them
     // as the apps need --------------------------------------------------
-    const int icon = std::clamp(std::min(screenW, screenH) / 11, metrics::kTabletIconMin, 84);
+    const int icon = metrics::homeIconEdge(screenW, screenH);
     tabletIconSize = icon;
     const int cellW = icon + icon / 2 + 24;
     const int cellH = icon + 34;

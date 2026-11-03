@@ -95,6 +95,7 @@ option(WIN11WM_BUILD_WAYLAND "Build the win11wm-wl Wayland compositor" ON)
 if(WIN11WM_BUILD_WAYLAND)
   pkg_check_modules(WLROOTS REQUIRED IMPORTED_TARGET wlroots-0.18)
   pkg_check_modules(WLSERVER REQUIRED IMPORTED_TARGET wayland-server)
+  pkg_check_modules(WLCLIENT REQUIRED IMPORTED_TARGET wayland-client)
   pkg_check_modules(XKB      REQUIRED IMPORTED_TARGET xkbcommon)
   pkg_check_modules(GL      REQUIRED IMPORTED_TARGET egl glesv2)
 
@@ -103,6 +104,7 @@ if(WIN11WM_BUILD_WAYLAND)
     src/wl/manager.cpp
     src/wl/input.cpp
     src/wl/compositor.cpp
+    src/wl/host_output.cpp
     src/wm/draw.cpp
     src/wm/tablet.cpp
     src/wm/widgets.cpp
@@ -117,11 +119,19 @@ if(WIN11WM_BUILD_WAYLAND)
   # src/wl first: the shared shell units include "manager.h", and this is the
   # Wayland Manager they must see.
   target_include_directories(win11wm-wl PRIVATE src/wl/include src/wl src/wm src)
+  # The nested Wayland backend exposes no public fullscreen call. When the
+  # matching wlroots source tree is available, use its private output struct to
+  # reach the host xdg_toplevel; otherwise --fullscreen is a no-op.
+  if(EXISTS "${CMAKE_SOURCE_DIR}/.deps/src/wlroots/include/backend/wayland.h")
+    target_include_directories(win11wm-wl PRIVATE
+      "${CMAKE_SOURCE_DIR}/.deps/src/wlroots/include")
+  endif()
   target_compile_definitions(win11wm-wl PRIVATE WLR_USE_UNSTABLE WIN11WM_WAYLAND)
   target_compile_options(win11wm-wl PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
   target_link_libraries(win11wm-wl PRIVATE
     PkgConfig::WLROOTS
     PkgConfig::WLSERVER
+    PkgConfig::WLCLIENT
     PkgConfig::XKB
     PkgConfig::GL
     PkgConfig::FT2

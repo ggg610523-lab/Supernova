@@ -44,6 +44,7 @@ void usage(const char* argv0) {
         "\n"
         "  --headless          render offscreen (no host compositor needed)\n"
         "  --drm               take over a TTY through the DRM/libinput backend\n"
+        "  --fullscreen        ask the host to fullscreen the nested output\n"
         "  --socket NAME       Wayland socket name to advertise\n"
         "  --no-vsync          do not hint vsync (nesting still paces us)\n"
         "  --stats             draw the FPS/frame-time HUD\n"
@@ -79,6 +80,10 @@ int main(int argc, char** argv) {
         }
         if (a == "--drm") {
             options.drm = true;
+            continue;
+        }
+        if (a == "--fullscreen") {
+            options.fullscreen = true;
             continue;
         }
         if (a == "--nested") {

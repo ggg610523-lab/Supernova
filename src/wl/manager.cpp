@@ -4,6 +4,7 @@
 #include "manager.h"
 
 #include "wlr.h"
+#include "host_output.h"
 #include <xkbcommon/xkbcommon.h>
 
 #include <linux/input-event-codes.h>
@@ -332,6 +333,11 @@ void Manager::mapClient(Client* c) {
     if (output && c->surface) wlr_surface_send_enter(c->surface, output);
     syncClientGeometry(c);
     raiseClient(c);
+    // The Wayland client has finally mapped: hand it the launch tile so it
+    // grows out of the desktop icon and the placeholder cross-fades away. The
+    // X11 path does this from mapRequest; without it the placeholder lingers
+    // until its 8s timeout and the real window just pops in.
+    claimLaunch(c);
     focusClient(c, false);
     dirty = true;
     requestFrame();
@@ -1240,6 +1246,9 @@ int Manager::run(const Options& options) {
         wlr_output_state_finish(&st);
         wlr_output_create_global(o, m->wlDisplay);
         wlr_output_layout_add_auto(m->outputLayout, o);
+        if (m->opts && m->opts->fullscreen && wlr_output_is_wl(o) &&
+            !wm_wl_output_set_fullscreen(o))
+            log("cannot fullscreen the nested output");
         m->outputFrame.notify = [](struct wl_listener* l, void*) {
             Manager* mm = wl_container_of(l, mm, outputFrame);
             mm->renderFrameOnOutput();
@@ -1456,6 +1465,10 @@ int Manager::run(const Options& options) {
     desktopNoOverlap = loadDesktopNoOverlap();
     layoutDesktopIcons();
     initWidgets();
+    // Widgets occupy desktop cells, so the grid must be laid out again once
+    // their saved positions exist; otherwise icons are placed underneath the
+    // clock, weather and calendar cards on the first frame.
+    layoutDesktopIcons();
     updateClientList();
     sysctl.init();
 
