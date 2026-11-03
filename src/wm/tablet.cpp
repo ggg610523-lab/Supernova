@@ -2069,12 +2069,19 @@ void Manager::handleTabletRelease(int x, int y, unsigned button, Time time) {
     // on whichever page it was let go nearest to.
     if (tabletPageSwipe) {
         tabletPageSwipe = false;
-        const int dx = x - tabletSwipeStartX;
-        const int stride = std::max(1, tabletGridStride);
-        int page = tabletPageSwipeFrom;
-        if (dx <= -stride / 3) page = tabletPageSwipeFrom + 1;
-        else if (dx >= stride / 3) page = tabletPageSwipeFrom - 1;
+        // The page is decided by where the flick is heading, not by how far the
+        // finger travelled, and the finger's velocity goes into the spring: a
+        // short fast swipe turns the page, a long slow one can still settle back
+        // to the page it came from, and either way the motion is continuous.
+        const double vel = tabletPageDrag.velocity(nowMs());
+        const int page = motion::flickTarget(tabletPageOffset, vel, tabletHomePageCount);
+            log("release off=%.4f vel=%.3f -> page %d of %d", tabletPageOffset, vel, page,
+                tabletHomePageCount);
+        tabletPageSpring.value = tabletPageOffset;
+        tabletPageSpring.velocity = vel;
+        tabletPageSpring.configureIOS(0.40, 0.90);
         setTabletHomePage(page);
+        dirty = true;
         return;
     }
 
@@ -2581,12 +2588,18 @@ void Manager::updateTabletDrawerMotion(int x, int y) {
         if (!tabletDrawerSwipe) {
             tabletDrawerSwipe = true;
             tabletDrawerSwipeFrom = tabletDrawerPage;
+            drawerPageDrag.reset();
+            drawerPageDrag.push(double(tabletDrawerPage), nowMs());
         }
     }
     if (tabletDrawerSwipe) {
         const double stride = double(std::max(1, tabletDrawerStride));
-        tabletDrawerOffset = std::clamp(double(tabletDrawerSwipeFrom) - double(dx) / stride,
-                                        -0.35, double(tabletDrawerPageCount - 1) + 0.35);
+        double page = double(tabletDrawerSwipeFrom) - double(dx) / stride;
+        const double last = double(std::max(0, tabletDrawerPageCount - 1));
+        if (page < 0.0) page = -motion::rubberBand(-page, 1.0);
+        else if (page > last) page = last + motion::rubberBand(page - last, 1.0);
+        tabletDrawerOffset = page;
+        drawerPageDrag.push(page, nowMs());
         dirty = true;
     }
 }
@@ -2623,10 +2636,11 @@ void Manager::handleTabletDrawerRelease(int x, int y, unsigned button) {
     }
     if (tabletDrawerSwipe) {
         tabletDrawerSwipe = false;
-        const int stride = std::max(1, tabletDrawerStride);
-        int page = tabletDrawerSwipeFrom;
-        if (dx <= -stride / 3) page = tabletDrawerSwipeFrom + 1;
-        else if (dx >= stride / 3) page = tabletDrawerSwipeFrom - 1;
+        const double vel = drawerPageDrag.velocity(nowMs());
+        const int page = motion::flickTarget(tabletDrawerOffset, vel, tabletDrawerPageCount);
+        tabletDrawerSpring.value = tabletDrawerOffset;
+        tabletDrawerSpring.velocity = vel;
+        tabletDrawerSpring.configureIOS(0.40, 0.90);
         setTabletDrawerPage(page);
         return;
     }

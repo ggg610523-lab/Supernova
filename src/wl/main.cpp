@@ -48,7 +48,8 @@ void usage(const char* argv0) {
         "  --socket NAME       Wayland socket name to advertise\n"
         "  --no-vsync          do not hint vsync (nesting still paces us)\n"
         "  --stats             draw the FPS/frame-time HUD\n"
-        "  --perf              like --stats, plus PERF lines on stderr\n"
+        "  --perf              machine-readable PERF lines and an end-of-run\n"
+        "                      BENCH summary on stdout, without the HUD\n"
         "  --tablet            boot into the tablet/mobile home screen\n"
         "  --preload-assets    decode every launcher icon at start-up, so the first\n"
         "                      Start menu / desktop repaint never stalls (slower start)\n"
@@ -105,7 +106,9 @@ int main(int argc, char** argv) {
             continue;
         }
         if (a == "--perf") {
-            options.stats = true;
+            // Measurements only. Deliberately *not* --stats: the HUD asks for a
+            // frame every tick so its numbers stay live, which is exactly the
+            // frame traffic a frame-pacing benchmark has to be free of.
             options.perfLog = true;
             continue;
         }

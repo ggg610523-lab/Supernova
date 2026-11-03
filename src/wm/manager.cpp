@@ -546,15 +546,37 @@ void Manager::tickAnimations(double now) {
         v = target > v ? std::min(target, v + d) : std::max(target, v - d);
         dirty = true;
     };
-    // The Launchpad is a spring, not a linear step: it overshoots a touch on the
-    // way in and settles decisively on the way out (see stepStartSpring).
+    // The overlays move on springs, the way an iOS sheet does: a damping
+    // fraction and a response (the period of the undamped system, in seconds),
+    // both straight from UISpringTimingParameters / .spring(response:dampingFraction:).
+    // A spring is not a timed ramp -- it keeps its velocity when the target
+    // flips mid-flight, so tapping the clock twice opens and reverses the panel
+    // with one continuous motion instead of restarting it from zero.
+    const auto spring = [&](motion::Spring& s, double& v, double target, double response,
+                            double damping) {
+        if (s.value != v) s.adopt(v, true);
+        if (s.settled(target)) {
+            s.value = target;
+            s.velocity = 0.0;
+            if (v == target) return;
+            v = target;
+            dirty = true;
+            return;
+        }
+        s.configureIOS(response, damping);
+        s.step(target, dt);
+        v = s.value;
+        dirty = true;
+    };
+    // Task View rises with almost no bounce; Alt-Tab is the snappiest of the
+    // four (it is a hold-to-cycle switcher and must feel instant); Control
+    // Centre pops out of the clock with the most bounce, which is the iOS feel;
+    // Settings is heavier, a full window rather than a panel.
     stepStartSpring(dt, now);
-    step(taskViewAnim, taskViewOpen ? 1.0 : 0.0, 170.0);
-    step(altTabAnim, altTabOpen ? 1.0 : 0.0, 120.0);
-    // Control Centre: a slightly longer ease so the grid reads as rising out
-    // of the taskbar rather than simply appearing.
-    step(ccAnim, ccOpen ? 1.0 : 0.0, 210.0);
-    step(settingsAnim, settingsOpen ? 1.0 : 0.0, 180.0);
+    spring(taskViewSpring, taskViewAnim, taskViewOpen ? 1.0 : 0.0, 0.34, 0.90);
+    spring(altTabSpring, altTabAnim, altTabOpen ? 1.0 : 0.0, 0.26, 0.95);
+    spring(ccSpring, ccAnim, ccOpen ? 1.0 : 0.0, 0.44, 0.74);
+    spring(settingsSpring, settingsAnim, settingsOpen ? 1.0 : 0.0, 0.38, 0.88);
     // Tablet / mobile mode: the splash fades in, the two shells are swapped
     // while it fully covers the screen, and it fades back out onto the new one.
     if (modeSwitching) {
@@ -581,12 +603,15 @@ void Manager::tickAnimations(double now) {
     step(tabletDrawerAnim, tabletDrawer ? 1.0 : 0.0, 300.0);
     if (tabletDrawer && !tabletDrawerSwipe && tabletDrawerPageCount > 0) {
         const double goal = double(tabletDrawerPage);
-        if (std::abs(tabletDrawerOffset - goal) > 0.001) {
-            tabletDrawerOffset += (goal - tabletDrawerOffset) *
-                                  std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+        if (std::abs(tabletDrawerSpring.value - tabletDrawerOffset) > 1e-9)
+            tabletDrawerSpring.adopt(tabletDrawerOffset, true);
+        if (!tabletDrawerSpring.settled(goal)) {
+            tabletDrawerSpring.step(goal, dtMs / 1000.0);
+            tabletDrawerOffset = tabletDrawerSpring.value;
             dirty = true;
-        } else {
+        } else if (tabletDrawerOffset != goal) {
             tabletDrawerOffset = goal;
+            dirty = true;
         }
     }
     // Rearrange mode jiggles the icons, so it needs a frame every tick.
@@ -839,12 +864,20 @@ void Manager::tickFluidMotion(double dtMs) {
     // rather than pixels so that a page caught halfway can be drawn halfway.
     if (tabletMode && !tabletPageSwipe && tabletHomePageCount > 0) {
         const double goal = double(tabletHomePage);
-        if (std::abs(tabletPageOffset - goal) > 0.001) {
-            tabletPageOffset +=
-                (goal - tabletPageOffset) * std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+        // The release handed the flick's velocity to this spring, so the page
+        // arrives still moving and settles with the same physics as everything
+        // else. A page set programmatically (a keyboard page key, a dot) writes
+        // the offset outright; adopting it keeps the spring from dragging the
+        // page back to where it was.
+        if (std::abs(tabletPageSpring.value - tabletPageOffset) > 1e-9)
+            tabletPageSpring.adopt(tabletPageOffset, true);
+        if (!tabletPageSpring.settled(goal)) {
+            tabletPageSpring.step(goal, dtMs / 1000.0);
+            tabletPageOffset = tabletPageSpring.value;
             dirty = true;
-        } else {
+        } else if (tabletPageOffset != goal) {
             tabletPageOffset = goal;
+            dirty = true;
         }
     }
 
@@ -855,12 +888,15 @@ void Manager::tickFluidMotion(double dtMs) {
     // for the tail of a swipe.
     if (startOpen && !launchSwipe) {
         const double goal = double(startPage);
-        if (std::abs(launchPageOffset - goal) > 0.001) {
-            launchPageOffset +=
-                (goal - launchPageOffset) * std::min(1.0, dtMs / double(metrics::kLaunchPageTurnMs));
+        if (std::abs(launchPageSpring.value - launchPageOffset) > 1e-9)
+            launchPageSpring.adopt(launchPageOffset, true);
+        if (!launchPageSpring.settled(goal)) {
+            launchPageSpring.step(goal, dtMs / 1000.0);
+            launchPageOffset = launchPageSpring.value;
             dirty = true;
-        } else {
+        } else if (launchPageOffset != goal) {
             launchPageOffset = goal;
+            dirty = true;
         }
     }
 

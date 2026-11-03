@@ -10,8 +10,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
+
+#include <unistd.h>
 
 #include "png.h"
 #include "theme.h"
@@ -1056,6 +1059,7 @@ void Compositor::destroyTexture(GLuint tex) {
 void Compositor::beginFrame() {
     cpuFrameStart_ = nowMs();
     drawsThisFrame_ = 0;
+    for (long& n : drawsByMode_) n = 0;
     mainProgramBound_ = false;
 
     GLint bound = 0;
@@ -1298,6 +1302,12 @@ void Compositor::present() {
     const double now = nowMs();
     lastFrameSec_ = lastPresentMs_ > 0.0 ? (now - lastPresentMs_) / 1000.0 : 0.0;
     lastPresentMs_ = now;
+    if (verbose_ && benchFirstMs_ > 0.0) noteBench(lastFrameSec_ * 1000.0);
+    if (benchFirstMs_ <= 0.0) benchFirstMs_ = now;
+    benchLastMs_ = now;
+    ++benchFrames_;
+    benchDraws_ += drawsThisFrame_;
+    for (int i = 0; i < 6; ++i) benchPrims_[i] += drawsByMode_[i];
     if (fpsWindowStart_ <= 0.0) fpsWindowStart_ = now;
     ++fpsFrames_;
     const double span = now - fpsWindowStart_;
@@ -1310,6 +1320,118 @@ void Compositor::present() {
                 drawsThisFrame_);
         }
     }
+}
+
+// ---------------------------------------------------------- --perf summary
+void Compositor::addBucket(long* buckets, double ms) {
+    int i = int(ms * 4.0);
+    if (i < 0) i = 0;
+    if (i > kBenchBuckets) i = kBenchBuckets;  // 100 ms+ falls in the last bucket
+    ++buckets[i];
+}
+
+void Compositor::noteBench(double intervalMs) {
+    // Start-up is not the steady state: the first frames compile shaders, bake
+    // the wallpaper and build the glyph atlas. Those belong in a start-up time,
+    // not in a frame-time percentile of a running session.
+    constexpr long kWarmupFrames = 30;
+    if (benchFrames_ <= kWarmupFrames) return;
+    // A shell with nothing moving presents nothing, so the gap either side of an
+    // idle stretch is not a dropped frame and must not be counted as one. 100 ms
+    // is beyond any refresh interval a display can ask for (10 Hz) and below the
+    // gap an idle session leaves. A sample counts only when the frame before it
+    // was also part of a run, which drops the one gap either side of an idle
+    // stretch as well as the stretch itself.
+    constexpr double kIdleGapMs = 100.0;
+    const bool inRun = benchPrevMs_ > 0.0 && benchPrevMs_ <= kIdleGapMs &&
+                       intervalMs <= kIdleGapMs;
+    benchPrevMs_ = intervalMs;
+    if (!inRun) return;
+    addBucket(benchInterval_, intervalMs);
+    addBucket(benchCpu_, cpuFrameMs_);
+    ++benchSamples_;
+    benchCpuSumMs_ += cpuFrameMs_;
+    benchMaxIntervalMs_ = std::max(benchMaxIntervalMs_, intervalMs);
+    benchMaxCpuMs_ = std::max(benchMaxCpuMs_, cpuFrameMs_);
+}
+
+void Compositor::reportBench() const {
+    const double span = (benchLastMs_ - benchFirstMs_) / 1000.0;
+    if (!verbose_ || benchFrames_ < 2 || span <= 0.0) return;
+    // `benchFrames_` includes the first frame, which has no interval before it.
+    const long frames = benchFrames_;
+
+    // p-th percentile of a bucket histogram: the value at which p% of the
+    // samples have been seen, reported at the bucket's upper edge.
+    const auto pct = [](const long* buckets, double p) {
+        long total = 0;
+        for (int i = 0; i <= kBenchBuckets; ++i) total += buckets[i];
+        if (total <= 0) return 0.0;
+        long seen = 0;
+        for (int i = 0; i <= kBenchBuckets; ++i) {
+            seen += buckets[i];
+            if (double(seen) >= p * double(total)) return double(i + 1) / 4.0;
+        }
+        return double(kBenchBuckets + 1) / 4.0;
+    };
+
+    const double p50 = pct(benchInterval_, 0.50);
+    const double p99 = pct(benchInterval_, 0.99);
+    const double cpuAvg = benchCpuSumMs_ / double(std::max(1L, benchSamples_));
+    // The mean frame interval over the samples that are frames at all (idle gaps
+    // are excluded above), which is the rate the shell actually ran at.
+    long sampled = 0;
+    double intervalSum = 0.0;
+    for (int i = 0; i <= kBenchBuckets; ++i) {
+        sampled += benchInterval_[i];
+        intervalSum += double(benchInterval_[i]) * (double(i) + 0.5) / 4.0;
+    }
+    const double intervalAvg = sampled > 0 ? intervalSum / double(sampled) : 0.0;
+    // A frame that took longer than a whole period and a half missed at least
+    // one presentation; the refresh rate is unknown here, so the median
+    // interval stands in for the display period.
+    long dropped = 0;
+    for (int i = 0; i <= kBenchBuckets; ++i) {
+        if (double(i + 1) / 4.0 > p50 * 1.5) dropped += benchInterval_[i];
+    }
+
+    // Resident set size, in the units /proc reports it (pages of 4 KiB).
+    double rssMb = 0.0;
+    if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+        long pages = 0, resident = 0;
+        if (std::fscanf(f, "%ld %ld", &pages, &resident) == 2)
+            rssMb = double(resident) * double(sysconf(_SC_PAGESIZE)) / (1024.0 * 1024.0);
+        std::fclose(f);
+    }
+
+    std::printf("BENCH frames=%ld sampled=%ld span=%.2fs fps=%.1f draws=%.1f rss=%.1fMB\n",
+                frames, sampled, span, intervalAvg > 0.0 ? 1000.0 / intervalAvg : 0.0,
+                double(benchDraws_) / double(frames), rssMb);
+    if (sampled == 0) {
+        std::printf("BENCH no steady-state frames: the shell never drew a run of "
+                    "frames (idle, or shorter than the warm-up)\n");
+        return;
+    }
+    std::printf("BENCH interval_ms avg=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f "
+                "low1%%=%.1ffps dropped=%ld (%.1f%%)\n",
+                intervalAvg, p50, pct(benchInterval_, 0.95), p99, benchMaxIntervalMs_,
+                p99 > 0.0 ? 1000.0 / p99 : 0.0, dropped,
+                sampled > 0 ? 100.0 * double(dropped) / double(sampled) : 0.0);
+    std::printf("BENCH cpu_ms avg=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f\n", cpuAvg,
+                pct(benchCpu_, 0.50), pct(benchCpu_, 0.95), pct(benchCpu_, 0.99),
+                benchMaxCpuMs_);
+    // Not a number to be trusted at zero: this build has no GL timer query, so
+    // GPU time is simply not measured here (see PERF's gpu= field).
+    std::printf("BENCH gpu_ms unmeasured (no GL timer query in this context)\n");
+
+    // Primitive submissions per frame, by shader mode. Unlike the HUD line these
+    // are averages over the run, not one frame's snapshot.
+    const double n = double(frames);
+    std::printf("BENCH prims/frame fill=%.0f acrylic=%.0f window=%.0f texture=%.0f "
+                "gradient=%.0f arc=%.0f\n",
+                double(benchPrims_[0]) / n, double(benchPrims_[1]) / n,
+                double(benchPrims_[2]) / n, double(benchPrims_[3]) / n,
+                double(benchPrims_[4]) / n, double(benchPrims_[5]) / n);
 }
 
 void Compositor::destroyGl() {

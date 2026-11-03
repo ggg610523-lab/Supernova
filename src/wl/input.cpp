@@ -479,12 +479,14 @@ void Manager::onShellButtonRelease(int x, int y, unsigned button, Time time) {
         }
         if (launchSwipe) {
             launchSwipe = false;
-            const int dx = x - launchSwipeStartX;
-            const int stride = std::max(1, launchCellW * launchCols);
-            int page = launchSwipeFrom;
-            if (dx <= -stride / 3) page = launchSwipeFrom + 1;
-            else if (dx >= stride / 3) page = launchSwipeFrom - 1;
-            page = std::clamp(page, 0, std::max(0, startPageCount - 1));
+            // Where the flick is heading decides the page, and the finger's
+            // velocity is handed to the spring, so a short fast swipe turns the
+            // page while a long slow one can still settle back where it started.
+            const double vel = launchPageDrag.velocity(nowMs());
+            const int page = motion::flickTarget(launchPageOffset, vel, startPageCount);
+            launchPageSpring.value = launchPageOffset;
+            launchPageSpring.velocity = vel;
+            launchPageSpring.configureIOS(0.40, 0.90);
             if (page != startPage) {
                 startPage = page;
                 layoutStartMenu();
@@ -603,15 +605,23 @@ void Manager::onShellMotion(int x, int y) {
             if (std::abs(dx) > metrics::kTabletSwipeSlop && std::abs(dx) > std::abs(dy)) {
                 tabletPageSwipe = true;
                 tabletPageSwipeFrom = tabletHomePage;
+                tabletPageDrag.reset();
+                tabletPageDrag.push(double(tabletHomePage), nowMs());
             }
         }
         if (tabletPageSwipe) {
-            // The page follows the finger, a third of a page of drag to commit,
-            // which is about as far as a thumb comfortably reaches.
+            // The page follows the finger one for one inside its range. Past the
+            // first or the last page it is *rubber-banded* instead of clamped: the
+            // grid keeps giving, less and less, so the edge reads as elastic rather
+            // than as a wall, and it springs back on release.
             const double stride = double(std::max(1, tabletGridStride));
             const double dx = double(x - tabletSwipeStartX);
-            tabletPageOffset = std::clamp(double(tabletPageSwipeFrom) - dx / stride, -0.35,
-                                          double(tabletHomePageCount - 1) + 0.35);
+            double page = double(tabletPageSwipeFrom) - dx / stride;
+            const double last = double(std::max(0, tabletHomePageCount - 1));
+            if (page < 0.0) page = -motion::rubberBand(-page, 1.0);
+            else if (page > last) page = last + motion::rubberBand(page - last, 1.0);
+            tabletPageOffset = page;
+            tabletPageDrag.push(page, nowMs());
             dirty = true;
         }
 
@@ -684,6 +694,8 @@ void Manager::onShellMotion(int x, int y) {
                 launchSwipe = true;
                 launchSwipeFrom = startPage;
                 launchPageOffset = double(startPage);
+                launchPageDrag.reset();
+                launchPageDrag.push(launchPageOffset, nowMs());
                 launchPressTile = -1;
             } else if (dx * dx + dy * dy >= double(metrics::kLaunchSwipeSlop) *
                                               double(metrics::kLaunchSwipeSlop)) {
@@ -696,8 +708,12 @@ void Manager::onShellMotion(int x, int y) {
         if (launchSwipe) {
             const int stride = std::max(1, launchCellW * launchCols);
             const double dx = double(x - launchSwipeStartX);
-            launchPageOffset = std::clamp(double(launchSwipeFrom) - dx / stride, -0.35,
-                                          double(startPageCount - 1) + 0.35);
+            double page = double(launchSwipeFrom) - dx / stride;
+            const double last = double(std::max(0, startPageCount - 1));
+            if (page < 0.0) page = -motion::rubberBand(-page, 1.0);
+            else if (page > last) page = last + motion::rubberBand(page - last, 1.0);
+            launchPageOffset = page;
+            launchPageDrag.push(page, nowMs());
             dirty = true;
             return;
         }

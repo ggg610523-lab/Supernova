@@ -164,6 +164,8 @@ void Manager::requestFrame() {
 }
 
 void Manager::shutdown() {
+    // The --perf run summary, before the GL context goes away.
+    comp.reportBench();
     if (tickTimer) {
         wl_event_source_remove(tickTimer);
         tickTimer = nullptr;
@@ -922,12 +924,27 @@ void Manager::syncOutputSize() {
 void Manager::renderFrameOnOutput() {
     if (!output || !output->enabled) return;
     syncOutputSize();
+    // The output's frame event is the display link: step the shell's motion by
+    // exactly one refresh interval here, at the moment before its pixels are
+    // produced, and only then decide whether there is anything to present. This
+    // is what makes an animation's position and its presentation agree -- the
+    // old order (step on a 16 ms timer, draw whenever the timer was late) is
+    // what made motion look uneven.
+    const double frameNow = nowMs();
+    const bool moved = tickAnimations(frameNow);
+    // Ask for the next frame from *inside* the frame callback, not after the
+    // present: the request then names the very next vblank, so consecutive
+    // frames are one refresh period apart instead of one period plus however
+    // long this one took to draw. A backend that schedules relative to the
+    // request (headless) shows the difference directly; a vblank-locked one
+    // (DRM, nested Wayland) targets the same scanout either way.
+    if (moved) wlr_output_schedule_frame(output);
     // A commit asks the backend for another frame event once the buffer has been
     // presented. Rendering unconditionally here therefore never goes idle: the
     // compositor would rebuild and present the whole shell at the monitor's
     // refresh rate even with nothing on screen changing. Only draw when an event
-    // or the animation tick actually marked the shell dirty (or a --frames self
-    // test asks for every frame); the tick calls requestFrame() otherwise.
+    // or the step above marked the shell dirty (or a --frames self test asks for
+    // every frame).
     if (!dirty && !(opts && opts->frames > 0)) return;
 
     struct wlr_output_state state;
@@ -1515,14 +1532,17 @@ int Manager::run(const Options& options) {
     }
     static size_t testScriptPos = 0;
 
-    // Animation tick: 60Hz while anything is moving, and a slower heartbeat for
-    // the clock/battery widgets when the shell is idle.
+    // The event-loop timer no longer drives motion: animations are stepped by the
+    // output's frame event (see renderFrameOnOutput), one step per presented
+    // frame. What is left is the polling clock -- long-press and gesture dwell,
+    // close deadlines, the battery/clock/sysctl probes -- which has to tick even
+    // when the shell is idle and no frames are being produced.
     tickTimer = wl_event_loop_add_timer(
         evloop,
         [](void* data) -> int {
             Manager* m = static_cast<Manager*>(data);
             const double now = nowMs();
-            m->tickAnimations(now);
+            m->pollTimers(now);
             if (m->cursor && testScriptPos < testScript.size()) {
                 const std::string& step = testScript[testScriptPos++];
                 int a = 0, b = 0, c = 0;
@@ -1554,6 +1574,8 @@ int Manager::run(const Options& options) {
                 }
                 m->requestFrame();
             }
+            // A reading that changed while idle still needs a frame; motion is
+            // not started from here, so an idle shell stays idle.
             if (m->dirty || (m->opts && m->opts->frames > 0)) m->requestFrame();
             // libwayland does not re-arm a timer from the callback's return
             // value: without this explicit update the tick fires once at start
@@ -1590,14 +1612,25 @@ void Manager::loop() {
 }
 
 // === PORTED SHELL ===
-void Manager::tickAnimations(double now) {
+// Display-link step. The shell used to be driven by a self-rescheduling 16 ms
+// timer: each tick took 16 ms *plus* however long the work took, so the next
+// frame drifted a little further behind the monitor's vblank every time, and an
+// animation's position was sampled at the timer's moment rather than at the
+// moment its pixels were shown. On a 60 Hz output that is ~52 uneven steps a
+// second; on a 120 Hz one the whole shell snaps at half its refresh rate. Now
+// the output's frame event calls this, so every presented frame advances the
+// animation by exactly one display period and frames are paced by scanout.
+bool Manager::tickAnimations(double now) {
     double dt = now - lastTick;
     lastTick = now;
     if (dt <= 0.0 || dt > 0.1) dt = 1.0 / 60.0;  // ignore stalls and the first frame
     const double dtMs = dt * 1000.0;
 
-    // The home screen's long press is a timer, not an event, so it is serviced here.
-    if (tabletAnim > 0.5) updateTabletLongPress();
+    // Anything the step moves has to survive the fact that the caller already
+    // has a reason to draw (an input event, a client commit): keep that reason
+    // and report motion separately, so "moved" really means "still in flight".
+    const bool pending = dirty;
+    dirty = false;
 
     // The open folder eases in and out, and the sheet is laid out as it moves so
     // its cells are always where they are painted.
@@ -1659,19 +1692,6 @@ void Manager::tickAnimations(double now) {
         }
     }
 
-    // A close that never gets an answer is forced: the window is unmapped and
-    // the client killed, which is the "end task" behaviour users expect.
-    for (size_t i = clients.size(); i-- > 0;) {
-        Client* c = clients[i].get();
-        if (!c->closing || c->closeDeadline <= 0.0 || now <= c->closeDeadline) continue;
-        if (c->toplevel) wlr_xdg_toplevel_send_close(c->toplevel);
-        c->closing = false;
-        c->alive = false;
-        unmapClient(c);
-        removeClient(c);
-        dirty = true;
-    }
-
     // Minimised windows leave the screen once the animation has finished.
     for (auto& cp : clients) {
         Client* c = cp.get();
@@ -1685,15 +1705,41 @@ void Manager::tickAnimations(double now) {
         v = target > v ? std::min(target, v + d) : std::max(target, v - d);
         dirty = true;
     };
-    // The Launchpad is a spring, not a linear step: it overshoots a touch on the
-    // way in and settles decisively on the way out (see stepStartSpring).
+    // The overlays move on springs, the way an iOS sheet does: a damping
+    // fraction and a response (the period of the undamped system, in seconds),
+    // both straight from UISpringTimingParameters / .spring(response:dampingFraction:).
+    // A spring is not a timed ramp -- it keeps its velocity when the target
+    // flips mid-flight, so tapping the clock twice opens and reverses the panel
+    // with one continuous motion instead of restarting it from zero.
+    const auto spring = [&](motion::Spring& s, double& v, double target, double response,
+                            double damping) {
+        // A mode switch or a reset writes the value outright; adopt it so the
+        // spring starts from what is actually on screen.
+        if (s.value != v) s.adopt(v, true);
+        if (s.settled(target)) {
+            s.value = target;
+            s.velocity = 0.0;
+            if (v == target) return;
+            v = target;
+            dirty = true;
+            return;
+        }
+        s.configureIOS(response, damping);
+        s.step(target, dt);
+        v = s.value;
+        dirty = true;
+    };
+    // The Launchpad is a spring too: it overshoots a touch on the way in and
+    // settles decisively on the way out (see stepStartSpring).
     stepStartSpring(dt, now);
-    step(taskViewAnim, taskViewOpen ? 1.0 : 0.0, 170.0);
-    step(altTabAnim, altTabOpen ? 1.0 : 0.0, 120.0);
-    // Control Centre: a slightly longer ease so the grid reads as rising out
-    // of the taskbar rather than simply appearing.
-    step(ccAnim, ccOpen ? 1.0 : 0.0, 210.0);
-    step(settingsAnim, settingsOpen ? 1.0 : 0.0, 180.0);
+    // Task View rises with almost no bounce; Alt-Tab is the snappiest of the
+    // four (it is a hold-to-cycle switcher and must feel instant); Control
+    // Centre pops out of the clock with the most bounce, which is the iOS feel;
+    // Settings is heavier, a full window rather than a panel.
+    spring(taskViewSpring, taskViewAnim, taskViewOpen ? 1.0 : 0.0, 0.34, 0.90);
+    spring(altTabSpring, altTabAnim, altTabOpen ? 1.0 : 0.0, 0.26, 0.95);
+    spring(ccSpring, ccAnim, ccOpen ? 1.0 : 0.0, 0.44, 0.74);
+    spring(settingsSpring, settingsAnim, settingsOpen ? 1.0 : 0.0, 0.38, 0.88);
     // Tablet / mobile mode: the splash fades in, the two shells are swapped
     // while it fully covers the screen, and it fades back out onto the new one.
     if (modeSwitching) {
@@ -1720,33 +1766,24 @@ void Manager::tickAnimations(double now) {
     step(tabletDrawerAnim, tabletDrawer ? 1.0 : 0.0, 300.0);
     if (tabletDrawer && !tabletDrawerSwipe && tabletDrawerPageCount > 0) {
         const double goal = double(tabletDrawerPage);
-        if (std::abs(tabletDrawerOffset - goal) > 0.001) {
-            tabletDrawerOffset += (goal - tabletDrawerOffset) *
-                                  std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+        if (std::abs(tabletDrawerSpring.value - tabletDrawerOffset) > 1e-9)
+            tabletDrawerSpring.adopt(tabletDrawerOffset, true);
+        if (!tabletDrawerSpring.settled(goal)) {
+            tabletDrawerSpring.step(goal, dtMs / 1000.0);
+            tabletDrawerOffset = tabletDrawerSpring.value;
             dirty = true;
-        } else {
+        } else if (tabletDrawerOffset != goal) {
             tabletDrawerOffset = goal;
+            dirty = true;
         }
     }
-    // Rearrange mode jiggles the icons, so it needs a frame every tick.
+    // Rearrange mode jiggles the icons, so it keeps the display link running for
+    // as long as it is up.
     if (tabletEdit && tabletMode) dirty = true;
-    // iPhone X home bar: a swipe that pauses on the way up opens the app
-    // switcher. No motion event reports the pause (the finger is not moving),
-    // so the dwell is detected here.
-    if (tabletGesture && !tabletGestureSwipe && !tabletSwitcher && !tabletDrawer &&
-        tabletGestureStartY - tabletGestureCurY > 40 &&
-        now - tabletGestureLastMove > 320.0) {
-        openTabletSwitcher();
-    }
     step(tabletSwitcherAnim, tabletSwitcher ? 1.0 : 0.0, 220.0);
-    // Always drain an in-flight probe, even with the panel closed, so a probe
-    // that was running when it closed cannot leak its pipe. Only a live panel
-    // asks for the periodic refresh.
-    if (sysctl.poll() && ccOpen) dirty = true;
+    // The grid follows the panel as it eases open, so its layout is a motion
+    // concern; the probe that fills it runs on the timer (pollTimers).
     if (ccOpen) {
-        // Keep the reading fresh so an external change (a keyboard volume key,
-        // NetworkManager) shows up while the panel is visible.
-        sysctl.requestRefresh(4.0);
         if (!ccControls.empty() && ccAnim < 1.0) layoutControlCenter();
     } else if (ccAnim <= 0.0 && !ccControls.empty()) {
         ccControls.clear();
@@ -1770,6 +1807,52 @@ void Manager::tickAnimations(double now) {
     // Everything else the shell shows: hover washes, selections, flyouts and the
     // snap preview all ease rather than toggle.
     tickFluidMotion(dtMs);
+
+    const bool moved = dirty;
+    dirty = pending || moved;
+    return moved;
+}
+
+// Everything in the old 16 ms tick that was never motion: the probes, the
+// deadlines and the timers that judge a press by how long it is held. These
+// have to run whether or not a frame is being drawn -- a long press with the
+// shell asleep still has to become a long press -- so they stay on the event
+// loop's timer. Nothing here advances an animation; each block that finds a
+// new reading marks the shell dirty, and the caller asks for a frame.
+void Manager::pollTimers(double now) {
+    // A close that never gets an answer is forced: the window is unmapped and
+    // the client killed, which is the "end task" behaviour users expect.
+    for (size_t i = clients.size(); i-- > 0;) {
+        Client* c = clients[i].get();
+        if (!c->closing || c->closeDeadline <= 0.0 || now <= c->closeDeadline) continue;
+        if (c->toplevel) wlr_xdg_toplevel_send_close(c->toplevel);
+        c->closing = false;
+        c->alive = false;
+        unmapClient(c);
+        removeClient(c);
+        dirty = true;
+    }
+
+    // The home screen's long press is a timer, not an event.
+    if (tabletAnim > 0.5) updateTabletLongPress();
+
+    // iPhone X home bar: a swipe that pauses on the way up opens the app
+    // switcher. No motion event reports the pause (the finger is not moving).
+    if (tabletGesture && !tabletGestureSwipe && !tabletSwitcher && !tabletDrawer &&
+        tabletGestureStartY - tabletGestureCurY > 40 &&
+        now - tabletGestureLastMove > 320.0) {
+        openTabletSwitcher();
+    }
+
+    // Always drain an in-flight probe, even with the panel closed, so a probe
+    // that was running when it closed cannot leak its pipe. Only a live panel
+    // asks for the periodic refresh.
+    if (sysctl.poll() && ccOpen) dirty = true;
+    if (ccOpen) {
+        // Keep the reading fresh so an external change (a keyboard volume key,
+        // NetworkManager) shows up while the panel is visible.
+        sysctl.requestRefresh(4.0);
+    }
 
     // Widgets: repaint the analog clock when the wall second changes, and
     // re-probe the battery every few seconds. The tablet status bar shows the
@@ -1978,12 +2061,20 @@ void Manager::tickFluidMotion(double dtMs) {
     // rather than pixels so that a page caught halfway can be drawn halfway.
     if (tabletMode && !tabletPageSwipe && tabletHomePageCount > 0) {
         const double goal = double(tabletHomePage);
-        if (std::abs(tabletPageOffset - goal) > 0.001) {
-            tabletPageOffset +=
-                (goal - tabletPageOffset) * std::min(1.0, dtMs / double(metrics::kTabletPageTurnMs));
+        // The release handed the flick's velocity to this spring, so the page
+        // arrives still moving and settles with the same physics as everything
+        // else. A page set programmatically (a keyboard page key, a dot) writes
+        // the offset outright; adopting it keeps the spring from dragging the
+        // page back to where it was.
+        if (std::abs(tabletPageSpring.value - tabletPageOffset) > 1e-9)
+            tabletPageSpring.adopt(tabletPageOffset, true);
+        if (!tabletPageSpring.settled(goal)) {
+            tabletPageSpring.step(goal, dtMs / 1000.0);
+            tabletPageOffset = tabletPageSpring.value;
             dirty = true;
-        } else {
+        } else if (tabletPageOffset != goal) {
             tabletPageOffset = goal;
+            dirty = true;
         }
     }
 
@@ -1994,12 +2085,15 @@ void Manager::tickFluidMotion(double dtMs) {
     // for the tail of a swipe.
     if (startOpen && !launchSwipe) {
         const double goal = double(startPage);
-        if (std::abs(launchPageOffset - goal) > 0.001) {
-            launchPageOffset +=
-                (goal - launchPageOffset) * std::min(1.0, dtMs / double(metrics::kLaunchPageTurnMs));
+        if (std::abs(launchPageSpring.value - launchPageOffset) > 1e-9)
+            launchPageSpring.adopt(launchPageOffset, true);
+        if (!launchPageSpring.settled(goal)) {
+            launchPageSpring.step(goal, dtMs / 1000.0);
+            launchPageOffset = launchPageSpring.value;
             dirty = true;
-        } else {
+        } else if (launchPageOffset != goal) {
             launchPageOffset = goal;
+            dirty = true;
         }
     }
 

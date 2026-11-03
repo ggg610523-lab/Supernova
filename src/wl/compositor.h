@@ -143,11 +143,16 @@ public:
     // Real GL submission count for the last frame; batched primitives collapse
     // into one of these.
     long drawCallsLastFrame() const { return drawsThisFrame_; }
-    // Elements submitted this frame split by shader mode (0 fill, 1 acrylic,
-    // 2 window, 3 texture, 4 gradient, 5 arc). Primitive counts, not draws.
+    // Elements submitted in the last frame split by shader mode (0 fill, 1
+    // acrylic, 2 window, 3 texture, 4 gradient, 5 arc). Primitive counts, not
+    // draws; cleared at the start of every frame so the HUD reads per frame.
     const long* drawsByMode() const { return drawsByMode_; }
     bool hasTimerQuery() const { return false; }
     void setVerbosePerf(bool on) { verbose_ = on; }
+    // --perf: one summary of the whole run, printed by the manager when it shuts
+    // down. Percentiles come from a 0.25 ms histogram rather than stored
+    // samples, so a long session costs nothing to measure.
+    void reportBench() const;
 
 private:
     bool buildGl(std::string* error);
@@ -233,6 +238,24 @@ private:
     double gpuFrameMs_ = 0.0;
     double cpuFrameStart_ = 0.0;
     bool verbose_ = false;
+
+    // ---- --perf frame-time histogram
+    // 400 buckets of 0.25 ms (0..100 ms) plus an overflow bucket for stalls.
+    static constexpr int kBenchBuckets = 400;
+    void noteBench(double intervalMs);
+    void addBucket(long* buckets, double ms);
+    long benchInterval_[kBenchBuckets + 1] = {0};
+    long benchCpu_[kBenchBuckets + 1] = {0};
+    long benchFrames_ = 0;
+    long benchSamples_ = 0;
+    long benchDraws_ = 0;
+    long benchPrims_[6] = {0};
+    double benchFirstMs_ = 0.0;
+    double benchLastMs_ = 0.0;
+    double benchPrevMs_ = 0.0;
+    double benchMaxIntervalMs_ = 0.0;
+    double benchMaxCpuMs_ = 0.0;
+    double benchCpuSumMs_ = 0.0;
 };
 
 }  // namespace wm

@@ -115,6 +115,27 @@ struct Spring {
         setFrequency(hz);
     }
 
+    // ---- UIKit / SwiftUI parameterisation ----------------------------------
+    // Apple designs springs with a damping fraction and a *response*: the period
+    // of one oscillation of the undamped system, in seconds. Response is 1/f, and
+    // is deliberately not a duration -- a spring runs until its amplitude is
+    // negligible (SwiftUI's .spring(response:dampingFraction:); WWDC 2018,
+    // "Designing Fluid Interfaces"). With unit mass this is
+    //   stiffness k = (2 pi / response)^2
+    //   damping   c = 4 pi zeta / response = 2 zeta sqrt(k m)
+    // which is what the frequency form above already encodes.
+    void configureIOS(double responseSec, double dampingFraction) {
+        configure(1.0 / std::max(responseSec, 1e-3), std::max(dampingFraction, 0.0));
+    }
+    double response() const { return 1.0 / std::max(frequency(), 1e-9); }
+
+    // UIKit's initial velocity is expressed as a *fraction of the remaining
+    // distance per second* (UISpringTimingParameters(dampingRatio:velocity:)),
+    // so a spring that should start as fast as a 0.3 s move is 1/0.3.
+    void startFractionalVelocity(double distance, double fractionPerSec) {
+        velocity = distance * fractionPerSec;
+    }
+
     // Time for the response envelope to decay to `frac` of its initial offset
     // (seconds), so a feel can be described as "a ~0.3 s transition" rather than
     // quoted as a stiffness. The envelope is exp(-zeta omega t).
@@ -133,32 +154,49 @@ struct Spring {
         if (resetVelocity) velocity = 0.0;
     }
 
-    // One frame. For the critically damped case the exact closed-form solution is
-    // used, which is unconditionally stable at any dt; otherwise a stable
-    // sub-stepped semi-implicit (symplectic) Euler is used. Returns the new value.
+    // One frame. All three regimes use their exact closed-form solution, so the
+    // trajectory is the same at 60, 120 or a dropped 30 Hz frame -- there is no
+    // integration error for the frame rate to change the feel with, and no
+    // sub-stepping. Solving e'' + 2 zeta w e' + w^2 e = 0 for e = x - x*:
+    //
+    //   underdamped  e = e^(-zeta w t) (e0 cos(wd t) + B sin(wd t)),  wd = w sqrt(1-z^2)
+    //   critical     e = (e0 + (v0 + w e0) t) e^(-w t)
+    //   overdamped   e = C1 e^(r1 t) + C2 e^(r2 t),  r = -zeta w +- w sqrt(z^2-1)
     double step(double target, double dtSec) {
         const double dt = clamp(dtSec, 0.0, 0.25);  // ignore absurd deltas
         if (dt <= 0.0) return value;
         const double w = std::sqrt(stiffness / std::max(mass, 1e-9));
-        if (std::abs(zeta - 1.0) < 1e-3) {
-            // Critically damped exact solution of  e'' + 2w e' + w^2 e = 0,
-            // e = x - x*, from (e0, v0):
-            //   e(t) = (e0 + (v0 + w e0) t) e^(-w t)
-            //   v(t) = (v0 - w (v0 + w e0) t) e^(-w t)
-            const double e0 = value - target;
-            const double c1 = velocity + w * e0;
-            const double decay = std::exp(-w * dt);
-            value = target + (e0 + c1 * dt) * decay;
-            velocity = (velocity - w * c1 * dt) * decay;
+        if (w <= 1e-9) {
+            value = target;
+            velocity = 0.0;
             return value;
         }
-        const double c = 2.0 * zeta * std::sqrt(stiffness * mass);
-        const int steps = clampi(static_cast<int>(std::ceil(dt / 0.004)), 1, 64);
-        const double h = dt / steps;
-        for (int i = 0; i < steps; ++i) {
-            const double a = (stiffness * (target - value) - c * velocity) / mass;
-            velocity += a * h;
-            value += velocity * h;
+        const double e0 = value - target;
+        const double v0 = velocity;
+        if (std::abs(zeta - 1.0) < 1e-3) {
+            const double c1 = v0 + w * e0;
+            const double decay = std::exp(-w * dt);
+            value = target + (e0 + c1 * dt) * decay;
+            velocity = (v0 - w * c1 * dt) * decay;
+        } else if (zeta < 1.0) {
+            const double wd = w * std::sqrt(1.0 - zeta * zeta);
+            const double sigma = zeta * w;
+            const double b = (v0 + sigma * e0) / wd;
+            const double decay = std::exp(-sigma * dt);
+            const double cs = std::cos(wd * dt);
+            const double sn = std::sin(wd * dt);
+            value = target + decay * (e0 * cs + b * sn);
+            velocity = decay * (v0 * cs - (sigma * b + e0 * wd) * sn);
+        } else {
+            const double root = w * std::sqrt(zeta * zeta - 1.0);
+            const double r1 = -zeta * w + root;
+            const double r2 = -zeta * w - root;
+            const double c1 = (v0 - e0 * r2) / (r1 - r2);
+            const double c2 = e0 - c1;
+            const double e1 = std::exp(r1 * dt);
+            const double e2 = std::exp(r2 * dt);
+            value = target + c1 * e1 + c2 * e2;
+            velocity = c1 * r1 * e1 + c2 * r2 * e2;
         }
         return value;
     }
@@ -167,6 +205,82 @@ struct Spring {
         return std::abs(value - target) < eps && std::abs(velocity) < eps;
     }
 };
+
+// --------------------------------------------- 1a. Overscroll and flick speed
+//
+// A paged surface has two jobs beyond the spring itself: resist a drag past its
+// first or last page, and know how fast the finger was moving when it let go.
+
+// iOS rubber-banding. `overshoot` is how far the finger has travelled past the
+// limit, `dimension` the size of the page along that axis, and `c` the
+// stiffness; the result is how far the content is *shown* as moved. The curve
+// asymptotes at dimension*c, so the page can never be dragged out of the window
+// however hard it is pulled, and each further pixel of finger travel buys less
+// movement. (UIScrollView's behaviour; the same curve is derived in objc.io's
+// "Interactive Gestures: Building a Custom Scroll View".)
+inline double rubberBand(double overshoot, double dimension, double c = 0.55) {
+    if (overshoot <= 0.0 || dimension <= 0.0) return 0.0;
+    return (overshoot * dimension * c) / (dimension + c * overshoot);
+}
+
+// Finger velocity at the moment of release, the way UIKit estimates it: the
+// displacement over roughly the last tenth of a second, not the delta of the
+// last motion event (which is often a single pixel and always noisy). Eight
+// samples is more than a display's worth of motion events, so a normal drag
+// never wraps the ring.
+struct VelocityTracker {
+    static constexpr int kSamples = 8;
+
+    void reset() {
+        count_ = 0;
+        head_ = 0;
+    }
+
+    void push(double pos, double timeMs) {
+        pos_[head_] = pos;
+        time_[head_] = timeMs;
+        head_ = (head_ + 1) % kSamples;
+        if (count_ < kSamples) ++count_;
+    }
+
+    // Units per second, measured from the oldest sample inside `windowMs`. A
+    // pause before lifting the finger reads as a slow release, which is what
+    // makes "drag and hold, then let go" settle to the nearest page instead of
+    // flinging.
+    double velocity(double nowMs, double windowMs = 100.0) const {
+        if (count_ < 2) return 0.0;
+        const int newest = (head_ + kSamples - 1) % kSamples;
+        // Lifted after sitting still: that is a placement, not a flick.
+        if (nowMs - time_[newest] > windowMs) return 0.0;
+        int oldest = newest;
+        for (int i = 1; i < count_; ++i) {
+            const int idx = (head_ + kSamples - 1 - i) % kSamples;
+            if (nowMs - time_[idx] > windowMs) break;
+            oldest = idx;
+        }
+        const double dt = nowMs - time_[oldest];
+        if (dt <= 1e-6) return 0.0;
+        return (pos_[newest] - pos_[oldest]) / dt * 1000.0;
+    }
+
+private:
+    double pos_[kSamples] = {};
+    double time_[kSamples] = {};
+    int count_ = 0;
+    int head_ = 0;
+};
+
+// The page a released flick settles on. A flick carries the page on for a
+// moment, so the target is where the drag is *heading* rounded to the nearest
+// page, clamped to the pages that exist -- which is how one short but fast
+// swipe turns a page while a long slow one can still snap back.
+inline int flickTarget(double page, double pagesPerSec, int pageCount,
+                       double projectionSec = 0.22) {
+    const int last = std::max(0, pageCount - 1);
+    const double projected = page + pagesPerSec * projectionSec;
+    const int target = static_cast<int>(std::lround(projected));
+    return target < 0 ? 0 : (target > last ? last : target);
+}
 
 // ------------------------------------------------ 1b. Vector & geometry springs
 //

@@ -290,7 +290,16 @@ private:
     // ---- event loop
     void loop();
     void renderFrameOnOutput();
-    void tickAnimations(double now);
+    // Steps every animation by one display frame. Called from the output's own
+    // frame event, so motion advances by exactly one refresh interval per
+    // presented frame instead of by whatever a free-running timer managed to be
+    // late by. Returns true while anything is still moving: that is what asks
+    // for the next frame, which is the display link. Never called off a frame.
+    bool tickAnimations(double now);
+    // The half of the old tick that is not motion: probes, deadlines and the
+    // long-press/dwell timers. Runs on the event-loop timer, whether or not a
+    // frame is being drawn, and marks the shell dirty when a reading changed.
+    void pollTimers(double now);
     // Eases every ambient value (hovers, selections, flyout opacity) one frame.
     void tickFluidMotion(double dtMs);
     void updateHoverStates(int px, int py);
@@ -1164,6 +1173,10 @@ private:
     int launchSwipeStartX = 0;
     int launchSwipeStartY = 0;
     double launchPageOffset = 0.0;   // absolute page position, in pages
+    // The Launchpad turns on the same physics as the home screen: rubber-banded
+    // past its end pages, released into a spring with the finger's velocity.
+    motion::Spring launchPageSpring;
+    motion::VelocityTracker launchPageDrag;
     // --- rearranging the Launchpad's tiles --------------------------------
     // A press on a tile is armed (launchPressArmed). When the pointer moves past
     // the slop *without* turning into a page swipe -- swipes still win for a
@@ -1205,10 +1218,16 @@ private:
     double taskViewAnim = 0.0;
     double altTabAnim = 0.0;
     int  taskViewHover = -1;
+    // The physics behind those two, and behind Control Centre and Settings:
+    // each overlay is driven by its own spring so a retarget mid-flight keeps
+    // the velocity it already had (see the spring lambda in tickAnimations).
+    motion::Spring taskViewSpring;
+    motion::Spring altTabSpring;
 
     // ---- Control Centre
     bool ccOpen = false;
     double ccAnim = 0.0;
+    motion::Spring ccSpring;
     Rect ccRect;                       // the frosted panel
     int ccAnchorX = 0;                 // zoom origin: the point under the clock
     int ccAnchorY = 0;
@@ -1224,6 +1243,7 @@ private:
     bool settingsOpen = false;       // the tablet's full-screen iOS sheet
     Client* settingsClient = nullptr;  // the desktop's managed Settings window
     double settingsAnim = 0.0;
+    motion::Spring settingsSpring;
     int settingsSection = 0;           // Appearance, Network, System, About
     int settingsHover = -1;            // row under the pointer, -1 for none
     int settingsNavHover = -1;         // sidebar / tab under the pointer
@@ -1274,8 +1294,9 @@ private:
     // The page settles on a spring, and a flick carries its own velocity into it,
     // so a half-turn never dead-stops or snaps.
     motion::Spring tabletPageSpring;
-    double tabletPageSwipeVel = 0.0;  // pages per second at the last motion
-    double tabletPageLastMs = 0.0;
+    // The finger's own velocity while the page is being dragged, so the release
+    // hands real momentum to the spring instead of a per-event delta.
+    motion::VelocityTracker tabletPageDrag;
     int tabletDragEdge = 0;        // which edge a lifted icon is held against
     Time tabletDragEdgeAt = 0;
     std::vector<Rect> tabletDockRects;
@@ -1296,9 +1317,8 @@ private:
     double tabletDrawerPullFrom = 0.0;
     double tabletDrawerPull = 0.0;
     double tabletDrawerPullVel = 0.0;
-    double tabletDrawerLastY = 0.0;
-    double tabletDrawerLastMs = 0.0;
     motion::Spring tabletDrawerSpring;
+    motion::VelocityTracker drawerPageDrag;
     double tabletDrawerOffset = 0.0;  // current page, in pages, for a half turn
     bool tabletDrawerSwipe = false;
     int tabletDrawerSwipeFrom = 0;
