@@ -22,6 +22,11 @@ namespace {
 constexpr int kGenieCols = 8;
 constexpr int kGenieRows = 48;
 
+// Interleaved batch vertex: pos(2), rect(4), color(4), color2(4), border(4),
+// shape params p0/p1/p2 (4 each). Six vertices per quad (two triangles).
+constexpr int kBatchFloatsPerVertex = 30;
+constexpr int kBatchVertsPerQuad = 6;
+
 const char* const kVertexSrc = R"GLSL(
 #version 100
 attribute vec2 aPos;
@@ -39,7 +44,47 @@ void main() {
 }
 )GLSL";
 
-const char* const kFragmentSrc = R"GLSL(
+// The batched vertex stream. GLSL ES 100 has no layout qualifiers, so the
+// attribute slots are bound before linking (see linkProgram).
+const char* const kBatchVertexSrc = R"GLSL(
+#version 100
+attribute vec2 aPos;
+attribute vec4 aRect;
+attribute vec4 aColor;
+attribute vec4 aColor2;
+attribute vec4 aBorder;
+attribute vec4 aP0;
+attribute vec4 aP1;
+attribute vec4 aP2;
+uniform mat4 uProj;
+uniform vec2 uPivot;
+uniform vec2 uRot;
+varying vec2 vQ;
+varying vec4 vRect;
+varying vec4 vColor;
+varying vec4 vColor2;
+varying vec4 vBorder;
+varying vec4 vP0;
+varying vec4 vP1;
+varying vec4 vP2;
+void main() {
+    vQ = aPos;
+    vRect = aRect;
+    vColor = aColor;
+    vColor2 = aColor2;
+    vBorder = aBorder;
+    vP0 = aP0;
+    vP1 = aP1;
+    vP2 = aP2;
+    vec2 p = aRect.xy + aPos * aRect.zw;
+    vec2 d = p - uPivot;
+    vec2 r = vec2(d.x * uRot.x - d.y * uRot.y, d.x * uRot.y + d.y * uRot.x);
+    gl_Position = uProj * vec4(uPivot + r, 0.0, 1.0);
+}
+)GLSL";
+
+// The uniform program: windows, child surfaces and the wallpaper bake.
+const char* const kFragUniformPrologue = R"GLSL(
 #version 100
 precision highp float;
 varying vec2 vQ;
@@ -73,7 +118,58 @@ uniform vec2  uArc;
 uniform float uThick;
 uniform sampler2D uTex;
 uniform sampler2D uBlur;
+)GLSL";
 
+// The batched program. Per-element state arrives as vertex attributes; the
+// window/child-surface branches stay uniform-driven but the shared body below
+// is compiled into both programs. Eight varyings and eight attributes is the
+// GLES2 floor, which is what this renderer must stay within.
+const char* const kFragBatchPrologue = R"GLSL(
+#version 100
+precision highp float;
+varying vec2 vQ;
+varying vec4 vRect;
+varying vec4 vColor;
+varying vec4 vColor2;
+varying vec4 vBorder;
+varying vec4 vP0;
+varying vec4 vP1;
+varying vec4 vP2;
+
+uniform vec4  uShadow;
+uniform vec4  uClose;
+uniform vec4  uFrame;
+uniform vec4  uContent;
+uniform float uCaptionH;
+uniform float uBtnW;
+uniform vec3  uHover;
+uniform vec3  uPress;
+uniform float uMaximized;
+uniform vec2  uScreen;
+uniform float uShadowPad;
+uniform float uGlass;
+uniform vec4  uTexRect;
+uniform sampler2D uTex;
+uniform sampler2D uBlur;
+
+#define uMode       int(vP0.x + 0.5)
+#define uRect       vRect
+#define uColor      vColor
+#define uColor2     vColor2
+#define uBorder     vBorder
+#define uRadius     vP0.y
+#define uOpacity    vP0.z
+#define uTintAmount vP0.w
+#define uSaturate   vP1.x
+#define uThick      vP1.y
+#define uArc        vP1.zw
+#define uClipTop    vP2.x
+#define uTexMix     vP2.y
+#define uKeepAlpha  vP2.z
+)GLSL";
+
+// One body for both programs, so the batched and uniform paths cannot drift.
+const char* const kFragHelpers = R"GLSL(
 float sdRound(vec2 p, vec2 b, float r) {
     r = max(0.0, min(r, min(b.x, b.y)));
     vec2 q = abs(p) - b + r;
@@ -116,7 +212,9 @@ vec3 micaTint(vec2 p, vec3 tint, float amount) {
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     return mix(vec3(l) * 0.30, tint, amount);
 }
+)GLSL";
 
+const char* const kFragMain = R"GLSL(
 void main() {
     vec2 p = uRect.xy + vQ * uRect.zw;
     vec2 c = uRect.xy + uRect.zw * 0.5;
@@ -375,7 +473,8 @@ bool compileShader(GLenum type, const char* src, GLuint* out, std::string* error
     return true;
 }
 
-bool linkProgram(const char* vsSrc, const char* fsSrc, GLuint* out, std::string* error) {
+bool linkProgram(const char* vsSrc, const char* fsSrc, GLuint* out, std::string* error,
+                 bool batched = false) {
     GLuint vs = 0, fs = 0;
     if (!compileShader(GL_VERTEX_SHADER, vsSrc, &vs, error)) return false;
     if (!compileShader(GL_FRAGMENT_SHADER, fsSrc, &fs, error)) {
@@ -385,7 +484,13 @@ bool linkProgram(const char* vsSrc, const char* fsSrc, GLuint* out, std::string*
     const GLuint prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
-    glBindAttribLocation(prog, 0, "aPos");
+    // GLSL ES 100 has no layout qualifiers, so the slots are fixed here. The
+    // batched stream owns 0..7; every other program only ever uses aPos.
+    static const char* const kBatchAttribs[] = {"aPos", "aRect",  "aColor", "aColor2",
+                                                "aBorder", "aP0", "aP1",  "aP2"};
+    const int attrCount = batched ? 8 : 1;
+    for (int i = 0; i < attrCount; ++i)
+        glBindAttribLocation(prog, GLuint(i), kBatchAttribs[i]);
     glLinkProgram(prog);
     glDeleteShader(vs);
     glDeleteShader(fs);
@@ -500,7 +605,91 @@ void Compositor::bindQuad() {
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
 }
 
+void Compositor::bindBatchAttribs() {
+    glBindBuffer(GL_ARRAY_BUFFER, batchVbo_);
+    const GLsizei stride = kBatchFloatsPerVertex * GLsizei(sizeof(float));
+    const auto attrib = [stride](GLuint loc, GLint size, int offsetFloats) {
+        glEnableVertexAttribArray(loc);
+        glVertexAttribPointer(loc, size, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<const void*>(size_t(offsetFloats) *
+                                                            sizeof(float)));
+    };
+    attrib(0, 2, 0);   // aPos
+    attrib(1, 4, 2);   // aRect
+    attrib(2, 4, 6);   // aColor
+    attrib(3, 4, 10);  // aColor2
+    attrib(4, 4, 14);  // aBorder
+    attrib(5, 4, 18);  // aP0
+    attrib(6, 4, 22);  // aP1
+    attrib(7, 4, 26);  // aP2
+}
+
+void Compositor::useBatchProgram() {
+    if (batchProgramBound_) return;
+    glUseProgram(batchProg_);
+    glUniformMatrix4fv(bProj_, 1, GL_FALSE, proj_);
+    glUniform2f(bScreen_, float(width_), float(height_));
+    glUniform1f(bShadowPad_, float(metrics::kShadowPad));
+    glUniform1f(bBtnW_, float(metrics::kBtnW));
+    glUniform1i(bTex_, 0);
+    glUniform1i(bBlur_, 1);
+    glUniform2f(bPivot_, 0.f, 0.f);
+    glUniform2f(bRot_, 1.f, 0.f);
+    bindBatchAttribs();
+    batchProgramBound_ = true;
+    mainProgramBound_ = false;
+}
+
+void Compositor::flushBatch() {
+    if (batchQuads_ == 0) return;
+    useBatchProgram();
+    glBindBuffer(GL_ARRAY_BUFFER, batchVbo_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(batchVerts_.size() * sizeof(float)),
+                 batchVerts_.data(), GL_STREAM_DRAW);
+    // Point the packed attributes at the storage that was just (re)allocated.
+    bindBatchAttribs();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, batchTex_);
+    if (batchTex_) {
+        // wlroots client textures have no mip levels; pin the filter or the
+        // incomplete texture samples as black.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(batchQuads_ * kBatchVertsPerQuad));
+    ++drawsThisFrame_;
+    batchQuads_ = 0;
+    batchVerts_.clear();
+    batchTex_ = 0;
+}
+
+void Compositor::pushQuad(float x, float y, float w, float h, int mode, float radius,
+                          float opacity, const Color& c, const Color& c2,
+                          const Color& border, float tintAmount, float saturate, float thick,
+                          float arc0, float arc1, float clipTop, float texMix,
+                          float keepAlpha) {
+    static const float kCorners[6][2] = {{0.f, 0.f}, {1.f, 0.f}, {0.f, 1.f},
+                                         {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+    batchVerts_.reserve(batchVerts_.size() + size_t(kBatchVertsPerQuad * kBatchFloatsPerVertex));
+    for (const auto& corner : kCorners) {
+        const float v[kBatchFloatsPerVertex] = {
+            corner[0], corner[1],
+            x, y, w, h,
+            c.r, c.g, c.b, c.a,
+            c2.r, c2.g, c2.b, c2.a,
+            border.r, border.g, border.b, border.a,
+            float(mode), radius, opacity, tintAmount,
+            saturate, thick, arc0, arc1,
+            clipTop, texMix, keepAlpha, 0.f};
+        batchVerts_.insert(batchVerts_.end(), v, v + kBatchFloatsPerVertex);
+    }
+    ++batchQuads_;
+    ++drawsByMode_[mode];
+}
+
 void Compositor::useMainProgram() {
+    // Everything queued so far belongs below this element.
+    flushBatch();
     if (mainProgramBound_) return;
     glUseProgram(prog_);
     glUniformMatrix4fv(uProj_, 1, GL_FALSE, proj_);
@@ -511,6 +700,7 @@ void Compositor::useMainProgram() {
     glUniform1i(uBlur_, 1);
     bindQuad();
     mainProgramBound_ = true;
+    batchProgramBound_ = false;
 }
 
 bool Compositor::buildGl(std::string* error) {
@@ -521,7 +711,15 @@ bool Compositor::buildGl(std::string* error) {
 }
 
 bool Compositor::buildShaders(std::string* error) {
-    if (!linkProgram(kVertexSrc, kFragmentSrc, &prog_, error)) return false;
+    // One fragment body, two prologues: uniforms for the immediate path, vertex
+    // attributes for the batched one.
+    const std::string fragUniform =
+        std::string(kFragUniformPrologue) + kFragHelpers + kFragMain;
+    const std::string fragBatch =
+        std::string(kFragBatchPrologue) + kFragHelpers + kFragMain;
+    if (!linkProgram(kVertexSrc, fragUniform.c_str(), &prog_, error)) return false;
+    if (!linkProgram(kBatchVertexSrc, fragBatch.c_str(), &batchProg_, error, true))
+        return false;
     if (!linkProgram(kVertexSrc, kBlurSrc, &blurProg_, error)) return false;
     if (!linkProgram(kVertexSrc, kWallpaperSrc, &wallProg_, error)) return false;
     if (!linkProgram(kGenieVertSrc, kGenieFragSrc, &genieProg_, error)) return false;
@@ -561,6 +759,15 @@ bool Compositor::buildShaders(std::string* error) {
     uRot_ = loc("uRot");
     uBlurDir_ = glGetUniformLocation(blurProg_, "uBlurDir");
     uWallRes_ = glGetUniformLocation(wallProg_, "uWallRes");
+    const auto bloc = [this](const char* n) { return glGetUniformLocation(batchProg_, n); };
+    bProj_ = bloc("uProj");
+    bScreen_ = bloc("uScreen");
+    bShadowPad_ = bloc("uShadowPad");
+    bBtnW_ = bloc("uBtnW");
+    bTex_ = bloc("uTex");
+    bBlur_ = bloc("uBlur");
+    bPivot_ = bloc("uPivot");
+    bRot_ = bloc("uRot");
 
     glUseProgram(prog_);
     glUniform2f(uPivot_, 0.f, 0.f);
@@ -584,6 +791,9 @@ bool Compositor::buildShaders(std::string* error) {
     glGenBuffers(1, &vbo_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
     glBufferData(GL_ARRAY_BUFFER, sizeof(kQuad), kQuad, GL_STATIC_DRAW);
+    // The batch stream is respecified at every flush; only the name has to
+    // exist here.
+    glGenBuffers(1, &batchVbo_);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     // The magic lamp's subdivided unit square. ES2 core has no uint indices, so
@@ -873,20 +1083,14 @@ void Compositor::beginFrame() {
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    glUseProgram(prog_);
-    glUniformMatrix4fv(uProj_, 1, GL_FALSE, proj_);
-    glUniform2f(uScreen_, float(width_), float(height_));
-    glUniform1f(uShadowPad_, float(metrics::kShadowPad));
-    glUniform1f(uBtnW_, float(metrics::kBtnW));
-    glUniform1i(uTex_, 0);
+    batchQuads_ = 0;
+    batchVerts_.clear();
+    batchTex_ = 0;
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, halfA_);
-    glUniform1i(uBlur_, 1);
     glActiveTexture(GL_TEXTURE0);
-    glUniform2f(uPivot_, 0.f, 0.f);
-    glUniform2f(uRot_, 1.f, 0.f);
-    bindQuad();
-    mainProgramBound_ = true;
+    batchProgramBound_ = false;
+    useBatchProgram();
 }
 
 void Compositor::drawWallpaper() {
@@ -897,24 +1101,16 @@ void Compositor::drawWallpaper() {
 void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opacity,
                           int clipTop) {
     if (r.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[0];
-    glUniform1i(uMode_, 0);
-    glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform1f(uClipTop_, clipTop == kNoClip ? -1.0e9f : float(clipTop));
-    glUniform4f(uColor_, c.r, c.g, c.b, c.a);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    pushQuad(float(r.x), float(r.y), float(r.w), float(r.h), 0, radius, opacity, c, Color{},
+             Color{}, 0.f, 0.f, 0.f, 0.f, 0.f,
+             clipTop == kNoClip ? -1.0e9f : float(clipTop), 0.f, 0.f);
 }
 
 void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, float radius,
                                  const Color& c, float opacity) {
     if (w <= 0 || h <= 0) return;
+    // Rotation is per-draw uniform state, so this element is painted alone.
     useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[0];
     glUniform1i(uMode_, 0);
     glUniform4f(uRect_, float(cx) - w * 0.5f, float(cy) - h * 0.5f, float(w), float(h));
     glUniform1f(uRadius_, radius);
@@ -925,21 +1121,15 @@ void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, floa
     glUniform2f(uRot_, std::cos(angle), std::sin(angle));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glUniform2f(uRot_, 1.f, 0.f);
+    ++drawsThisFrame_;
+    ++drawsByMode_[0];
 }
 
 void Compositor::drawGradient(const Rect& r, float radius, const Color& top,
                               const Color& bottom, float opacity) {
     if (r.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[4];
-    glUniform1i(uMode_, 4);
-    glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform4f(uColor_, top.r, top.g, top.b, top.a);
-    glUniform4f(uColor2_, bottom.r, bottom.g, bottom.b, bottom.a);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    pushQuad(float(r.x), float(r.y), float(r.w), float(r.h), 4, radius, opacity, top,
+             bottom, Color{}, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f, 0.f, 0.f);
 }
 
 void Compositor::drawArc(int cx, int cy, float radius, float thick, float a0, float a1,
@@ -947,59 +1137,29 @@ void Compositor::drawArc(int cx, int cy, float radius, float thick, float a0, fl
     if (thick <= 0.f || radius <= 0.f) return;
     const float reach = radius + thick * 0.5f + 1.f;
     const int side = int(std::ceil(reach * 2.f));
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[5];
-    glUniform1i(uMode_, 5);
-    glUniform4f(uRect_, float(cx) - side * 0.5f, float(cy) - side * 0.5f, float(side),
-                float(side));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uThick_, thick);
-    glUniform1f(uOpacity_, opacity);
-    glUniform4f(uColor_, c.r, c.g, c.b, c.a);
-    glUniform2f(uArc_, a0, a1);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // Keep the half-pixel centre: the arc shader antialiases from the exact
+    // float rect, so rounding this to an int would shift the stroke.
+    pushQuad(float(cx) - side * 0.5f, float(cy) - side * 0.5f, float(side), float(side),
+             5, radius, opacity, c, Color{}, Color{}, 0.f, 0.f, thick, a0, a1, -1.0e9f,
+             0.f, 0.f);
 }
 
 void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint,
                              float tintAmount, const Color& border, float opacity,
                              float saturation) {
     if (r.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[1];
-    glUniform1i(uMode_, 1);
-    glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform1f(uTintAmount_, tintAmount);
-    glUniform1f(uSaturate_, saturation);
-    glUniform4f(uColor_, tint.r, tint.g, tint.b, tint.a);
-    glUniform4f(uBorder_, border.r, border.g, border.b, border.a);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    pushQuad(float(r.x), float(r.y), float(r.w), float(r.h), 1, radius, opacity, tint,
+             Color{}, border, tintAmount, saturation, 0.f, 0.f, 0.f, -1.0e9f, 0.f, 0.f);
 }
 
 void Compositor::drawTex(GLuint tex, const Rect& dst, float radius, const Color& tint,
                          float opacity, bool textureColor, bool textureAlpha) {
     if (!tex || dst.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[3];
-    glUniform4f(uRect_, float(dst.x), float(dst.y), float(dst.w), float(dst.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform4f(uColor_, tint.r, tint.g, tint.b, tint.a);
-    glUniform1f(uTexMix_, textureColor ? 1.f : 0.f);
-    glUniform1f(uKeepAlpha_, textureAlpha ? 1.f : 0.f);
-    glUniform1i(uMode_, 3);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    // wlroots leaves the minification filter at GL's mipmapped default while
-    // its client textures have no mip levels. An incomplete texture samples as
-    // black, so every bind pins the filter to the one we can actually sample.
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (batchQuads_ > 0 && batchTex_ != tex) flushBatch();
+    if (batchQuads_ == 0) batchTex_ = tex;
+    pushQuad(float(dst.x), float(dst.y), float(dst.w), float(dst.h), 3, radius, opacity,
+             tint, Color{}, Color{}, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f,
+             textureColor ? 1.f : 0.f, textureAlpha ? 1.f : 0.f);
 }
 
 void Compositor::drawText(const TextTex& t, const Rect& dst, const Color& c, float opacity) {
@@ -1033,6 +1193,8 @@ void Compositor::drawWindowContent(const WindowTex& t, const Rect& dst, const Re
 
 void Compositor::drawWindow(const WindowSprite& s) {
     if (s.frame.empty()) return;
+    // The window paints over everything queued so far and owns its texture.
+    flushBatch();
     if (s.genie > 0.001f && s.tex.valid() && drawGenie(s)) return;
     const Rect quad = s.frame.inflated(metrics::kShadowPad);
     const int capH = s.captionH > 0 ? s.captionH : 0;
@@ -1100,6 +1262,7 @@ bool Compositor::drawGenie(const WindowSprite& s) {
     if (content.w < 2 || content.h < 2) return false;
 
     mainProgramBound_ = false;
+    batchProgramBound_ = false;
     glUseProgram(genieProg_);
     glUniformMatrix4fv(gProj_, 1, GL_FALSE, proj_);
     glUniform4f(gRect_, float(content.x), float(content.y), float(content.w), float(content.h));
@@ -1122,10 +1285,13 @@ bool Compositor::drawGenie(const WindowSprite& s) {
 }
 
 void Compositor::present() {
+    // Anything still queued is painted now.
+    flushBatch();
     cpuFrameMs_ = nowMs() - cpuFrameStart_;
     drawCalls_ += drawsThisFrame_;
     mainProgramBound_ = false;
-    glDisableVertexAttribArray(0);
+    batchProgramBound_ = false;
+    for (GLuint i = 0; i < 8; ++i) glDisableVertexAttribArray(i);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
 
@@ -1149,10 +1315,12 @@ void Compositor::present() {
 void Compositor::destroyGl() {
     if (!glReady_) return;
     if (prog_) glDeleteProgram(prog_);
+    if (batchProg_) glDeleteProgram(batchProg_);
     if (blurProg_) glDeleteProgram(blurProg_);
     if (wallProg_) glDeleteProgram(wallProg_);
     if (genieProg_) glDeleteProgram(genieProg_);
     if (vbo_) glDeleteBuffers(1, &vbo_);
+    if (batchVbo_) glDeleteBuffers(1, &batchVbo_);
     if (meshVbo_) glDeleteBuffers(1, &meshVbo_);
     if (meshIbo_) glDeleteBuffers(1, &meshIbo_);
     const auto delTex = [](GLuint& t) {
@@ -1169,7 +1337,8 @@ void Compositor::destroyGl() {
     delFbo(wallFbo_);
     delFbo(halfFboA_);
     delFbo(halfFboB_);
-    prog_ = blurProg_ = wallProg_ = genieProg_ = vbo_ = 0;
+    prog_ = batchProg_ = blurProg_ = wallProg_ = genieProg_ = vbo_ = 0;
+    batchVbo_ = 0;
     meshVbo_ = meshIbo_ = 0;
     glReady_ = false;
 }

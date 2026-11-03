@@ -75,8 +75,32 @@ public:
     // scalable directories. Pure filesystem work.
     std::string resolveSvg(const std::string& name, IconTheme theme = IconTheme::Hatter);
 
+    // One thing to warm: a desktop entry's Icon= name and the WM class that is
+    // tried when that name resolves to nothing, exactly as forApp() reads them.
+    struct IconRequest {
+        std::string icon;
+        std::string wmClass;
+    };
+
+    // Builds the name -> SVG indexes for the Reversal and Hatter checkouts up
+    // front. Pure filesystem work: no GL needed, safe to call before the first
+    // frame. Idempotent.
+    void warmIndexes();
+    // Decodes every request at every size now instead of on first paint, so the
+    // first Start menu or desktop repaint does not stall on a few hundred SVG
+    // rasterisations and theme-tree walks. Requires the GL context to be
+    // current. Sizes are rounded to the store's own buckets, so passing two
+    // sizes that land on the same rung decodes once. Returns how many textures
+    // were newly created.
+    size_t preload(const std::vector<IconRequest>& requests, const std::vector<int>& sizes,
+                   IconTheme theme = IconTheme::Hatter);
+
     size_t decodedCount() const { return cache_.size(); }
     size_t missingCount() const { return missing_.size(); }
+    // SVG rasters loaded from / written to the persistent cache on disk. Exposed
+    // so --preload-assets can report how much of a warm-up came off disk.
+    size_t diskHits() const { return diskHits_; }
+    size_t diskWrites() const { return diskWrites_; }
 
 private:
     std::string assetDir_;
@@ -97,6 +121,9 @@ private:
     // with the theme so the same name can mean two different glyphs.
     std::unordered_map<std::string, std::string> svgPath_;
     std::unordered_set<std::string> svgNone_;
+    size_t diskHits_ = 0;
+    size_t diskWrites_ = 0;
+    bool cachePruned_ = false;  // the one-time size cap ran
     void ensureSvgIndex();
     void ensureHatterIndex();
 };

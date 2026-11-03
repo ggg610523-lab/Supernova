@@ -21,6 +21,12 @@ constexpr float kQuad[8] = {0.f, 0.f, 1.f, 0.f, 0.f, 1.f, 1.f, 1.f};
 constexpr int kGenieCols = 8;
 constexpr int kGenieRows = 48;
 
+// Interleaved batch vertex: pos(2), rect(4), color(4), color2(4), border(4),
+// shape params p0/p1/p2 (4 each). Six vertices per quad (two triangles) so the
+// whole run is one GL_TRIANGLES draw.
+constexpr int kBatchFloatsPerVertex = 30;
+constexpr int kBatchVertsPerQuad = 6;
+
 const char* const kVertexSrc = R"GLSL(
 #version 330 core
 layout(location = 0) in vec2 aPos;
@@ -38,12 +44,58 @@ void main() {
 }
 )GLSL";
 
+// The batched path: one interleaved vertex carries the element's rect, colours
+// and packed shape parameters, so consecutive primitives share one draw. The
+// rotate pivot stays a uniform because rotated rects are rare and are flushed on
+// their own; see drawRectRotated().
+const char* const kBatchVertexSrc = R"GLSL(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec4 aRect;
+layout(location = 2) in vec4 aColor;
+layout(location = 3) in vec4 aColor2;
+layout(location = 4) in vec4 aBorder;
+layout(location = 5) in vec4 aP0;      // mode, radius, opacity, tint amount
+layout(location = 6) in vec4 aP1;      // saturate, stroke, arc start/end
+layout(location = 7) in vec4 aP2;      // clipTop, texMix, keepAlpha, reserved
+uniform mat4 uProj;
+uniform vec2 uPivot;
+uniform vec2 uRot;
+// Matches the varying set the fragment prologue declares; kept to eight vectors
+// so the same program still links under GLES2's minimum.
+out vec2 vQ;
+out vec4 vRect;
+out vec4 vColor;
+out vec4 vColor2;
+out vec4 vBorder;
+out vec4 vP0;
+out vec4 vP1;
+out vec4 vP2;
+void main() {
+    vQ = aPos;
+    vRect = aRect;
+    vColor = aColor;
+    vColor2 = aColor2;
+    vBorder = aBorder;
+    vP0 = aP0;
+    vP1 = aP1;
+    vP2 = aP2;
+    vec2 p = aRect.xy + aPos * aRect.zw;
+    vec2 d = p - uPivot;
+    vec2 r = vec2(d.x * uRot.x - d.y * uRot.y, d.x * uRot.y + d.y * uRot.x);
+    gl_Position = uProj * vec4(uPivot + r, 0.0, 1.0);
+}
+)GLSL";
+
 // The whole Windows 11 shell is one shader. Modes:
 //   0 = rounded solid fill        (buttons, pills, dividers)
 //   1 = acrylic surface           (taskbar, Start, flyouts)
 //   2 = window                    (shadow + Mica caption + border + content)
 //   3 = textured quad             (text, icons, thumbnails)
-const char* const kFragmentSrc = R"GLSL(
+// The uniform program: one element per draw, used by windows, the wallpaper bake
+// and the rotated rects. Kept alongside the batched program below so existing
+// callers keep their exact state.
+const char* const kFragUniformPrologue = R"GLSL(
 #version 330 core
 in vec2 vQ;
 out vec4 fragColor;
@@ -76,7 +128,63 @@ uniform vec2  uArc;       // annular arc: start/end angle (radians, 0 = 12 o'clo
 uniform float uThick;     // annular arc stroke width
 uniform sampler2D uTex;
 uniform sampler2D uBlur;
+)GLSL";
 
+// The batched program: the same fragment body, but the per-element state that
+// used to be uniforms now arrives as vertex attributes, so every run of
+// primitives between two texture changes is one draw call. Varyings and
+// attributes are deliberately packed to eight and eight: that is the GLES2
+// floor, and the Wayland renderer runs there too.
+const char* const kFragBatchPrologue = R"GLSL(
+#version 330 core
+in vec2 vQ;
+in vec4 vRect;
+in vec4 vColor;
+in vec4 vColor2;
+in vec4 vBorder;
+in vec4 vP0;
+in vec4 vP1;
+in vec4 vP2;
+out vec4 fragColor;
+
+// The window branches are never batched (one window is one texture and one
+// quad), so they stay uniform-driven. They still have to be declared: the
+// shared body below is compiled into this program verbatim.
+uniform vec4  uShadow;
+uniform vec4  uClose;
+uniform vec4  uFrame;
+uniform vec4  uContent;
+uniform float uCaptionH;
+uniform float uBtnW;
+uniform vec3  uHover;
+uniform vec3  uPress;
+uniform float uMaximized;
+uniform vec2  uScreen;
+uniform float uShadowPad;
+uniform float uGlass;
+uniform sampler2D uTex;
+uniform sampler2D uBlur;
+
+#define uMode       int(vP0.x + 0.5)
+#define uRect       vRect
+#define uColor      vColor
+#define uColor2     vColor2
+#define uBorder     vBorder
+#define uRadius     vP0.y
+#define uOpacity    vP0.z
+#define uTintAmount vP0.w
+#define uSaturate   vP1.x
+#define uThick      vP1.y
+#define uArc        vP1.zw
+#define uClipTop    vP2.x
+#define uTexMix     vP2.y
+#define uKeepAlpha  vP2.z
+)GLSL";
+
+// One body for both programs: everything below is expressed in the names the
+// uniform prologue declares and the batched prologue #defines onto attributes,
+// so the two can never drift apart.
+const char* const kFragHelpers = R"GLSL(
 // Signed distance to a rounded box, the basis of every Fluent shape here.
 float sdRound(vec2 p, vec2 b, float r) {
     r = max(0.0, min(r, min(b.x, b.y)));
@@ -126,7 +234,9 @@ vec3 micaTint(vec2 p, vec3 tint, float amount) {
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     return mix(vec3(l) * 0.30, tint, amount);
 }
+)GLSL";
 
+const char* const kFragMain = R"GLSL(
 void main() {
     vec2 p = uRect.xy + vQ * uRect.zw;   // this fragment's screen pixel
     vec2 c = uRect.xy + uRect.zw * 0.5;
@@ -472,11 +582,15 @@ void Compositor::shutdown() {
         // and aborts the process during shutdown.
         if (vao_) glDeleteVertexArrays(1, &vao_);
         if (vbo_) glDeleteBuffers(1, &vbo_);
+        if (batchVao_) glDeleteVertexArrays(1, &batchVao_);
+        if (batchVbo_) glDeleteBuffers(1, &batchVbo_);
         if (prog_) glDeleteProgram(prog_);
+        if (batchProg_) glDeleteProgram(batchProg_);
         if (blurProg_) glDeleteProgram(blurProg_);
         if (wallProg_) glDeleteProgram(wallProg_);
         if (genieProg_) glDeleteProgram(genieProg_);
-        prog_ = blurProg_ = wallProg_ = genieProg_ = 0;
+        prog_ = batchProg_ = blurProg_ = wallProg_ = genieProg_ = 0;
+        batchVao_ = batchVbo_ = 0;
         if (meshVao_) glDeleteVertexArrays(1, &meshVao_);
         if (meshVbo_) glDeleteBuffers(1, &meshVbo_);
         if (meshIbo_) glDeleteBuffers(1, &meshIbo_);
@@ -728,7 +842,14 @@ bool Compositor::createContext(std::string* error) {
 }
 
 bool Compositor::buildShaders(std::string* error) {
-    if (!linkProgram(kVertexSrc, kFragmentSrc, &prog_, error)) return false;
+    // The uniform and batched programs share one fragment body; only the
+    // prologue that declares (or #defines) the per-element state differs.
+    const std::string fragUniform =
+        std::string(kFragUniformPrologue) + kFragHelpers + kFragMain;
+    const std::string fragBatch =
+        std::string(kFragBatchPrologue) + kFragHelpers + kFragMain;
+    if (!linkProgram(kVertexSrc, fragUniform.c_str(), &prog_, error)) return false;
+    if (!linkProgram(kBatchVertexSrc, fragBatch.c_str(), &batchProg_, error)) return false;
     if (!linkProgram(kVertexSrc, kBlurSrc, &blurProg_, error)) return false;
     if (!linkProgram(kVertexSrc, kWallpaperSrc, &wallProg_, error)) return false;
     if (!linkProgram(kGenieVertSrc, kGenieFragSrc, &genieProg_, error)) return false;
@@ -767,6 +888,15 @@ bool Compositor::buildShaders(std::string* error) {
     uRot_ = loc("uRot");
     uBlurDir_ = glGetUniformLocation(blurProg_, "uBlurDir");
     uWallRes_ = glGetUniformLocation(wallProg_, "uWallRes");
+    const auto bloc = [this](const char* n) { return glGetUniformLocation(batchProg_, n); };
+    bProj_ = bloc("uProj");
+    bScreen_ = bloc("uScreen");
+    bShadowPad_ = bloc("uShadowPad");
+    bBtnW_ = bloc("uBtnW");
+    bTex_ = bloc("uTex");
+    bBlur_ = bloc("uBlur");
+    bPivot_ = bloc("uPivot");
+    bRot_ = bloc("uRot");
 
     // Every program shares the vertex shader, so each needs the rotation pivot
     // and angle initialised to the identity or its quads collapse to a point.
@@ -788,6 +918,30 @@ bool Compositor::buildShaders(std::string* error) {
     glBufferData(GL_ARRAY_BUFFER, sizeof(kQuad), kQuad, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    // The batch stream: an interleaved VBO whose attribute pointers are set
+    // once here and stay valid as the buffer is re-uploaded each flush.
+    glGenVertexArrays(1, &batchVao_);
+    glBindVertexArray(batchVao_);
+    glGenBuffers(1, &batchVbo_);
+    glBindBuffer(GL_ARRAY_BUFFER, batchVbo_);
+    const GLsizei stride = kBatchFloatsPerVertex * GLsizei(sizeof(float));
+    const auto attrib = [stride](GLuint loc, GLint size, int offsetFloats) {
+        glEnableVertexAttribArray(loc);
+        glVertexAttribPointer(loc, size, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<const void*>(size_t(offsetFloats) *
+                                                            sizeof(float)));
+    };
+    attrib(0, 2, 0);   // aPos
+    attrib(1, 4, 2);   // aRect
+    attrib(2, 4, 6);   // aColor
+    attrib(3, 4, 10);  // aColor2
+    attrib(4, 4, 14);  // aBorder
+    attrib(5, 4, 18);  // aP0
+    attrib(6, 4, 22);  // aP1
+    attrib(7, 4, 26);  // aP2
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
@@ -1004,13 +1158,77 @@ void Compositor::tfiRelease(GLuint tex) {
     }
 }
 
+void Compositor::useBatchProgram() {
+    if (batchProgramBound_) return;
+    glUseProgram(batchProg_);
+    glBindVertexArray(batchVao_);
+    // Frame constants. Set here rather than only in beginFrame() because a
+    // window, genie or rotated-rect draw may have borrowed the context since.
+    glUniformMatrix4fv(bProj_, 1, GL_FALSE, proj_);
+    glUniform2f(bScreen_, float(width_), float(height_));
+    glUniform1f(bShadowPad_, float(metrics::kShadowPad));
+    glUniform1f(bBtnW_, float(metrics::kBtnW));
+    glUniform1i(bTex_, 0);
+    glUniform1i(bBlur_, 1);
+    glUniform2f(bPivot_, 0.f, 0.f);
+    glUniform2f(bRot_, 1.f, 0.f);
+    batchProgramBound_ = true;
+    mainProgramBound_ = false;
+}
+
+// Paints everything queued since the last flush in one draw call. The batch is
+// strictly in submission order, and an instanced-less triangle list keeps the
+// painter's algorithm intact (same primitive order the per-element calls had).
+void Compositor::flushBatch() {
+    if (batchQuads_ == 0) return;
+    useBatchProgram();
+    glBindBuffer(GL_ARRAY_BUFFER, batchVbo_);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(batchVerts_.size() * sizeof(float)),
+                 batchVerts_.data(), GL_STREAM_DRAW);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, batchTex_);
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(batchQuads_ * kBatchVertsPerQuad));
+    ++drawsThisFrame_;
+    batchQuads_ = 0;
+    batchVerts_.clear();
+    batchTex_ = 0;
+}
+
+// Appends one quad with all of the per-element state the fragment shader used
+// to read from uniforms. Corner order matches the old triangle strip.
+void Compositor::pushQuad(float x, float y, float w, float h, int mode, float radius,
+                          float opacity, const Color& c, const Color& c2,
+                          const Color& border, float tintAmount, float saturate, float thick,
+                          float arc0, float arc1, float clipTop, float texMix,
+                          float keepAlpha) {
+    static const float kCorners[6][2] = {{0.f, 0.f}, {1.f, 0.f}, {0.f, 1.f},
+                                         {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+    batchVerts_.reserve(batchVerts_.size() + size_t(kBatchVertsPerQuad * kBatchFloatsPerVertex));
+    for (const auto& corner : kCorners) {
+        const float v[kBatchFloatsPerVertex] = {
+            corner[0], corner[1],
+            x, y, w, h,
+            c.r, c.g, c.b, c.a,
+            c2.r, c2.g, c2.b, c2.a,
+            border.r, border.g, border.b, border.a,
+            float(mode), radius, opacity, tintAmount,
+            saturate, thick, arc0, arc1,
+            clipTop, texMix, keepAlpha, 0.f};
+        batchVerts_.insert(batchVerts_.end(), v, v + kBatchFloatsPerVertex);
+    }
+    ++batchQuads_;
+    ++drawsByMode_[mode];
+}
+
 void Compositor::useMainProgram() {
-    // The main program and the quad VAO are bound for the whole frame by
-    // beginFrame(); re-binding them per draw call is pure driver overhead.
+    // Anything still queued belongs *under* this element, so it has to go out
+    // first; batching must never reorder the shell.
+    flushBatch();
     if (mainProgramBound_) return;
     glUseProgram(prog_);
     glBindVertexArray(vao_);
     mainProgramBound_ = true;
+    batchProgramBound_ = false;
 }
 
 GLuint Compositor::bindPixmap(Pixmap pixmap, VisualID visualId, int depth, int w, int h,
@@ -1129,20 +1347,16 @@ void Compositor::beginFrame() {
     glClearColor(0.f, 0.f, 0.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    glUseProgram(prog_);
-    glUniformMatrix4fv(uProj_, 1, GL_FALSE, proj_);
-    glUniform2f(uScreen_, float(width_), float(height_));
-    glUniform1f(uShadowPad_, float(metrics::kShadowPad));
-    glUniform1f(uBtnW_, float(metrics::kBtnW));
-    glUniform1i(uTex_, 0);
+    // A frame starts with an empty batch. The blurred wallpaper stays bound on
+    // unit 1 for every acrylic/Mica sample; unit 0 follows the flush.
+    batchQuads_ = 0;
+    batchVerts_.clear();
+    batchTex_ = 0;
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, halfA_);  // the blurred wallpaper
-    glUniform1i(uBlur_, 1);
     glActiveTexture(GL_TEXTURE0);
-    glUniform2f(uPivot_, 0.f, 0.f);
-    glUniform2f(uRot_, 1.f, 0.f);
-    glBindVertexArray(vao_);
-    mainProgramBound_ = true;
+    batchProgramBound_ = false;
+    useBatchProgram();
 
     if (timerQuery_ && !timerQueryPending_) {
         glBeginQuery(GL_TIME_ELAPSED, timerQuery_);
@@ -1158,24 +1372,18 @@ void Compositor::drawWallpaper() {
 void Compositor::drawRect(const Rect& r, float radius, const Color& c, float opacity,
                           int clipTop) {
     if (r.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[0];
-    glUniform1i(uMode_, 0);
-    glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform1f(uClipTop_, clipTop == kNoClip ? -1.0e9f : float(clipTop));
-    glUniform4f(uColor_, c.r, c.g, c.b, c.a);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    pushQuad(float(r.x), float(r.y), float(r.w), float(r.h), 0, radius, opacity, c, Color{},
+             Color{}, 0.f, 0.f, 0.f, 0.f, 0.f,
+             clipTop == kNoClip ? -1.0e9f : float(clipTop), 0.f, 0.f);
 }
 
 void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, float radius,
                                  const Color& c, float opacity) {
     if (w <= 0 || h <= 0) return;
+    // Rotation is per-draw state in the uniform program, so a rotated rect is
+    // painted on its own: everything queued first, then the element, then the
+    // identity pivot is restored for the next batch.
     useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[0];
     glUniform1i(uMode_, 0);
     glUniform4f(uRect_, float(cx) - w * 0.5f, float(cy) - h * 0.5f, float(w), float(h));
     glUniform1f(uRadius_, radius);
@@ -1186,21 +1394,15 @@ void Compositor::drawRectRotated(int cx, int cy, int w, int h, float angle, floa
     glUniform2f(uRot_, std::cos(angle), std::sin(angle));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glUniform2f(uRot_, 1.f, 0.f);  // leave the shared state axis-aligned
+    ++drawsThisFrame_;
+    ++drawsByMode_[0];
 }
 
 void Compositor::drawGradient(const Rect& r, float radius, const Color& top, const Color& bottom,
                               float opacity) {
     if (r.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[4];
-    glUniform1i(uMode_, 4);
-    glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform4f(uColor_, top.r, top.g, top.b, top.a);
-    glUniform4f(uColor2_, bottom.r, bottom.g, bottom.b, bottom.a);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    pushQuad(float(r.x), float(r.y), float(r.w), float(r.h), 4, radius, opacity, top,
+             bottom, Color{}, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f, 0.f, 0.f);
 }
 
 void Compositor::drawArc(int cx, int cy, float radius, float thick, float a0, float a1,
@@ -1208,57 +1410,41 @@ void Compositor::drawArc(int cx, int cy, float radius, float thick, float a0, fl
     if (thick <= 0.f || radius <= 0.f) return;
     const float reach = radius + thick * 0.5f + 1.f;
     const int side = int(std::ceil(reach * 2.f));
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[5];
-    glUniform1i(uMode_, 5);
-    glUniform4f(uRect_, float(cx) - side * 0.5f, float(cy) - side * 0.5f, float(side),
-                float(side));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uThick_, thick);
-    glUniform1f(uOpacity_, opacity);
-    glUniform4f(uColor_, c.r, c.g, c.b, c.a);
-    glUniform2f(uArc_, a0, a1);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // Keep the half-pixel centre: the arc shader antialiases from the exact
+    // float rect, so rounding this to an int would shift the stroke.
+    pushQuad(float(cx) - side * 0.5f, float(cy) - side * 0.5f, float(side), float(side),
+             5, radius, opacity, c, Color{}, Color{}, 0.f, 0.f, thick, a0, a1, -1.0e9f,
+             0.f, 0.f);
 }
 
 void Compositor::drawAcrylic(const Rect& r, float radius, const Color& tint, float tintAmount,
                              const Color& border, float opacity, float saturation) {
     if (r.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[1];
-    glUniform1i(uMode_, 1);
-    glUniform4f(uRect_, float(r.x), float(r.y), float(r.w), float(r.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform1f(uTintAmount_, tintAmount);
-    glUniform1f(uSaturate_, saturation);
-    glUniform4f(uColor_, tint.r, tint.g, tint.b, tint.a);
-    glUniform4f(uBorder_, border.r, border.g, border.b, border.a);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    pushQuad(float(r.x), float(r.y), float(r.w), float(r.h), 1, radius, opacity, tint,
+             Color{}, border, tintAmount, saturation, 0.f, 0.f, 0.f, -1.0e9f, 0.f, 0.f);
 }
 
 void Compositor::drawTex(GLuint tex, const Rect& dst, float radius, const Color& tint,
                          float opacity, bool textureColor, bool textureAlpha) {
     if (!tex || dst.empty()) return;
-    useMainProgram();
-    ++drawsThisFrame_;
-    ++drawsByMode_[3];
-    glUniform4f(uRect_, float(dst.x), float(dst.y), float(dst.w), float(dst.h));
-    glUniform1f(uRadius_, radius);
-    glUniform1f(uOpacity_, opacity);
-    glUniform4f(uColor_, tint.r, tint.g, tint.b, tint.a);
-    glUniform1f(uTexMix_, textureColor ? 1.f : 0.f);
-    glUniform1f(uKeepAlpha_, textureAlpha ? 1.f : 0.f);
-    // A texture_from_pixmap texture must be bound around the sampling.
+    // One texture at a time: a different texture (or a window, or the end of the
+    // frame) flushes the quads queued so far. Text and icons each own a texture,
+    // so they stay one draw apiece; the solid/acrylic/gradient/arc layers around
+    // them collapse into a handful of draws.
+    if (batchQuads_ > 0 && batchTex_ != tex) flushBatch();
+    if (batchQuads_ == 0) batchTex_ = tex;
+    // A texture_from_pixmap texture must be bound around the sampling, so this
+    // quad cannot share a batch with anything that follows: paint it now.
     const bool tfi = tfiBind(tex);
-    glUniform1i(uMode_, 3);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    if (tfi) tfiRelease(tex);
+    pushQuad(float(dst.x), float(dst.y), float(dst.w), float(dst.h), 3, radius, opacity,
+             tint, Color{}, Color{}, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f,
+             textureColor ? 1.f : 0.f, textureAlpha ? 1.f : 0.f);
+    if (tfi) {
+        flushBatch();
+        tfiRelease(tex);
+    }
 }
+
 
 void Compositor::drawText(const TextTex& t, const Rect& dst, const Color& c, float opacity) {
     if (!t.tex) return;
@@ -1270,6 +1456,9 @@ void Compositor::drawText(const TextTex& t, const Rect& dst, const Color& c, flo
 // resolved analytically from a rounded box distance in the fragment shader.
 void Compositor::drawWindow(const WindowSprite& s) {
     if (s.frame.empty()) return;
+    // The window paints over everything queued so far, and it has its own
+    // uniforms and client texture, so the batch cannot carry it.
+    flushBatch();
     // While a window is minimising or restoring, pour its content into (or out
     // of) the taskbar icon with the magic-lamp mesh instead of an ordinary frame.
     if (s.genie > 0.001f && s.tex.valid() && drawGenie(s)) return;
@@ -1346,6 +1535,7 @@ bool Compositor::drawGenie(const WindowSprite& s) {
     // the rebind, and rasterises with the genie shader and no VAO -- which is
     // why the taskbar vanished for the frame after a minimize.
     mainProgramBound_ = false;
+    batchProgramBound_ = false;
     glUseProgram(genieProg_);
     glBindVertexArray(meshVao_);
     glUniformMatrix4fv(gProj_, 1, GL_FALSE, proj_);
@@ -1365,12 +1555,15 @@ bool Compositor::drawGenie(const WindowSprite& s) {
 }
 
 void Compositor::present() {
+    // Anything still queued is painted now, inside the timer query.
+    flushBatch();
     if (timerQueryPending_) glEndQuery(GL_TIME_ELAPSED);
     cpuFrameMs_ = nowMs() - cpuFrameStart_;
     drawCalls_ += drawsThisFrame_;
 
     glBindVertexArray(0);
     mainProgramBound_ = false;
+    batchProgramBound_ = false;
     glUseProgram(0);
     const double before = nowMs();
     glXSwapBuffers(dpy_, glxWin_ ? glxWin_ : overlay_);

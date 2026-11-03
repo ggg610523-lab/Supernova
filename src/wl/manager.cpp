@@ -1567,6 +1567,9 @@ int Manager::run(const Options& options) {
 
     lastTick = nowMs();
     dirty = true;
+    // --preload-assets is serviced by render() on the first frame, once the GL
+    // context, icons and launcher lists are all in place.
+    preloadPending = options.preload;
     requestFrame();
     if (const char* path = std::getenv("WIN11WM_TEST_SCRIPT"))
         log("test script %s: %zu steps", path, testScript.size());

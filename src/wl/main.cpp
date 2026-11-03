@@ -50,6 +50,8 @@ void usage(const char* argv0) {
         "  --stats             draw the FPS/frame-time HUD\n"
         "  --perf              like --stats, plus PERF lines on stderr\n"
         "  --tablet            boot into the tablet/mobile home screen\n"
+        "  --preload-assets    decode every launcher icon at start-up, so the first\n"
+        "                      Start menu / desktop repaint never stalls (slower start)\n"
         "  -n, --frames N      render N frames then exit (self test)\n"
         "  --dump PATH         with --frames: write the last frame as a PPM\n"
         "  -e, --exec CMD      launch CMD once the compositor is up\n"
@@ -109,6 +111,10 @@ int main(int argc, char** argv) {
         }
         if (a == "--tablet" || a == "--mobile") {
             options.tablet = true;
+            continue;
+        }
+        if (a == "--preload-assets") {
+            options.preload = true;
             continue;
         }
         if (a == "--dump" && i + 1 < argc) {

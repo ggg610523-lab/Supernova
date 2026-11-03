@@ -157,8 +157,10 @@ public:
     double gpuFrameMs() const { return gpuFrameMs_; }
     long drawCalls() const { return drawCalls_; }
     long drawCallsLastFrame() const { return drawsThisFrame_; }
-    // Draw calls this frame split by shader mode, so a profile can show whether
-    // the cost is in solid fills (0), acrylic (1), windows (2) or textures (3).
+    // Elements submitted this frame split by shader mode, so a profile can show
+    // where the geometry is: solid fills (0), acrylic (1), windows (2) or
+    // textures (3). Batching means these are primitive counts, not draw calls;
+    // drawCallsLastFrame() is the real submission count.
     const long* drawsByMode() const { return drawsByMode_; }
     // Set once at init; false when the platform has no timer queries.
     bool hasTimerQuery() const { return timerQuery_ != 0; }
@@ -179,6 +181,18 @@ private:
     // Binds the main program + quad VAO once per frame; every primitive goes
     // through this instead of repeating glUseProgram/glBindVertexArray.
     void useMainProgram();
+    // ---- batched primitive pipeline
+    // Simple elements (solid, acrylic, gradient, arc, texture) collect into one
+    // interleaved vertex stream and leave as a single draw call per run. A
+    // window, a rotated rect, a texture change or the end of the frame flushes
+    // the batch first, so painter's order is unchanged.
+    void useBatchProgram();
+    void flushBatch();
+    // The rect is float because the arc's centre can sit on a half pixel.
+    void pushQuad(float x, float y, float w, float h, int mode, float radius, float opacity,
+                  const Color& c, const Color& c2, const Color& border, float tintAmount,
+                  float saturate, float thick, float arc0, float arc1, float clipTop,
+                  float texMix, float keepAlpha);
     // Binds/releases an XComposite pixmap texture around a draw (texture_from
     // _pixmap semantics: the server may not write the pixmap while it is bound).
     bool tfiBind(GLuint tex);
@@ -213,11 +227,20 @@ private:
     bool vsyncActive_ = false;
     int swapInterval_ = 0;
 
-    GLuint prog_ = 0;      // the main Fluent shader
-    GLuint blurProg_ = 0;  // separable blur used for acrylic / Mica
-    GLuint wallProg_ = 0;  // procedural Windows 11 wallpaper
+    GLuint prog_ = 0;       // the uniform Fluent shader (windows, rotated rects)
+    GLuint batchProg_ = 0;  // the same body driven by per-vertex attributes
+    GLuint blurProg_ = 0;   // separable blur used for acrylic / Mica
+    GLuint wallProg_ = 0;   // procedural Windows 11 wallpaper
     GLuint vao_ = 0;
     GLuint vbo_ = 0;
+    GLuint batchVao_ = 0;
+    GLuint batchVbo_ = 0;
+    std::vector<float> batchVerts_;  // interleaved, six vertices per quad
+    int batchQuads_ = 0;
+    GLuint batchTex_ = 0;            // texture the queued quads sample (0 = none)
+    bool batchProgramBound_ = false;
+    GLint bProj_ = -1, bScreen_ = -1, bShadowPad_ = -1, bBtnW_ = -1;
+    GLint bTex_ = -1, bBlur_ = -1, bPivot_ = -1, bRot_ = -1;
     // Uniform locations, resolved once at link time.
     GLint uProj_ = -1;
     GLint uRect_ = -1, uMode_ = -1, uColor_ = -1, uColor2_ = -1, uBorder_ = -1;

@@ -257,6 +257,11 @@ struct Options {
     // Write the last rendered frame to this path as a PPM, for tests and for
     // checking what clients actually put on screen.
     std::string dumpPath;
+    // Decode the launcher icons and build the icon indexes during startup, on
+    // the first frame, instead of lazily on first paint. Start-up is slower and
+    // the first Start menu / desktop repaint is instant: the opt-in trade for a
+    // cold cache that would otherwise stall the shell one icon at a time.
+    bool preload = false;
 };
 
 
@@ -448,6 +453,9 @@ private:
 
     // ---- shell drawing (draw.cpp)
     void render();
+    // --preload-assets: warm the icon store before the first frame is painted.
+    // Called from render(), where the GL context is current in both builds.
+    void preloadAssets();
     void drawDesktop();
     void drawClientSprite(Client* c);
     // Wayland clients may paint into child surfaces instead of (or as well as)
@@ -1494,6 +1502,8 @@ private:
     double lastTick = 0.0;
     bool running = true;
     bool dirty = true;
+    // --preload-assets is serviced on the first frame, when the context is live.
+    bool preloadPending = false;
     bool pendingRedrawFromDamage = false;
 };
 }  // namespace wm

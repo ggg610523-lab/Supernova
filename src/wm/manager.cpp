@@ -392,6 +392,9 @@ int Manager::run(const Options& options) {
 
     lastTick = nowMs();
     dirty = true;
+    // --preload-assets is serviced by render() on the first frame, once the GL
+    // context, icons and launcher lists are all in place.
+    preloadPending = options.preload;
     loop();
     // The desktop as the user arranged it: cards and icon cells, written on the
     // way out so the next session opens on the same wallpaper layout. Mutations

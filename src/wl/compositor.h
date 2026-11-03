@@ -140,7 +140,11 @@ public:
     double cpuFrameMs() const { return cpuFrameMs_; }
     double gpuFrameMs() const { return gpuFrameMs_; }
     long drawCalls() const { return drawCalls_; }
+    // Real GL submission count for the last frame; batched primitives collapse
+    // into one of these.
     long drawCallsLastFrame() const { return drawsThisFrame_; }
+    // Elements submitted this frame split by shader mode (0 fill, 1 acrylic,
+    // 2 window, 3 texture, 4 gradient, 5 arc). Primitive counts, not draws.
     const long* drawsByMode() const { return drawsByMode_; }
     bool hasTimerQuery() const { return false; }
     void setVerbosePerf(bool on) { verbose_ = on; }
@@ -152,6 +156,19 @@ private:
     void destroyGl();
     void useMainProgram();
     void bindQuad();
+    // ---- batched primitive pipeline
+    // Simple elements collect into one interleaved vertex stream and leave as a
+    // single draw per run; a window, a rotated rect, a texture change or the end
+    // of the frame flushes first, so painter's order is unchanged. GLES2 has no
+    // core VAOs, so the eight attribute pointers are re-set at each flush.
+    void useBatchProgram();
+    void bindBatchAttribs();
+    void flushBatch();
+    // The rect is float because the arc's centre can sit on a half pixel.
+    void pushQuad(float x, float y, float w, float h, int mode, float radius, float opacity,
+                  const Color& c, const Color& c2, const Color& border, float tintAmount,
+                  float saturate, float thick, float arc0, float arc1, float clipTop,
+                  float texMix, float keepAlpha);
     bool drawGenie(const WindowSprite& s);
 
     struct wlr_renderer* renderer_ = nullptr;
@@ -162,11 +179,19 @@ private:
     bool vsyncActive_ = false;
     int swapInterval_ = 1;
 
-    GLuint prog_ = 0;
+    GLuint prog_ = 0;       // uniform Fluent shader (windows, child surfaces)
+    GLuint batchProg_ = 0;  // the same body driven by per-vertex attributes
     GLuint blurProg_ = 0;
     GLuint wallProg_ = 0;
     GLuint genieProg_ = 0;
     GLuint vbo_ = 0;
+    GLuint batchVbo_ = 0;
+    std::vector<float> batchVerts_;  // interleaved, six vertices per quad
+    int batchQuads_ = 0;
+    GLuint batchTex_ = 0;            // texture the queued quads sample (0 = none)
+    bool batchProgramBound_ = false;
+    GLint bProj_ = -1, bScreen_ = -1, bShadowPad_ = -1, bBtnW_ = -1;
+    GLint bTex_ = -1, bBlur_ = -1, bPivot_ = -1, bRot_ = -1;
     GLuint meshVbo_ = 0, meshIbo_ = 0;
     GLint meshIndexCount_ = 0;
 

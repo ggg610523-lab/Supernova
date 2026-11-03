@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef WIN11WM_HAVE_RSVG
 #include <cairo.h>
@@ -152,38 +155,32 @@ std::string findSvgInTree(const std::string& themeDir, const std::string& name, 
     return {};
 }
 
+// The per-user cache root: $XDG_CACHE_HOME, else ~/.cache. Empty when neither
+// names an absolute path, which is the only case where nothing can be cached.
+std::string cacheBase() {
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME")) {
+        if (xdg[0] == '/') return xdg;
+    }
+    if (const char* home = std::getenv("HOME")) {
+        if (home[0] == '/') return std::string(home) + "/.cache";
+    }
+    return {};
+}
+
 // The Reversal checkout scripts/fetch-assets.sh keeps in the cache. Its SVGs are
 // the source the bundled PNGs were rasterised from, so reading them directly is
 // what lets an icon stay sharp at any size.
 std::string reversalRoot() {
-    std::string base;
-    if (const char* xdg = std::getenv("XDG_CACHE_HOME")) {
-        if (xdg[0] == '/') base = xdg;
-    }
-    if (base.empty()) {
-        if (const char* home = std::getenv("HOME")) {
-            if (home[0] == '/') base = std::string(home) + "/.cache";
-        }
-    }
-    if (base.empty()) return {};
-    return base + "/win11wm/reversal";
+    const std::string base = cacheBase();
+    return base.empty() ? std::string() : base + "/win11wm/reversal";
 }
 
 // The Hatter checkout scripts/fetch-assets.sh keeps in the cache. The theme's
 // default edition is the directory literally called "Hatter"; its scalable/apps
 // tree is the colourful rounded-square app icon set the shell shows by default.
 std::string hatterRoot() {
-    std::string base;
-    if (const char* xdg = std::getenv("XDG_CACHE_HOME")) {
-        if (xdg[0] == '/') base = xdg;
-    }
-    if (base.empty()) {
-        if (const char* home = std::getenv("HOME")) {
-            if (home[0] == '/') base = std::string(home) + "/.cache";
-        }
-    }
-    if (base.empty()) return {};
-    return base + "/win11wm/hatter/Hatter";
+    const std::string base = cacheBase();
+    return base.empty() ? std::string() : base + "/win11wm/hatter/Hatter";
 }
 
 // Scores a candidate SVG path: a scalable one beats a fixed-size one, the theme's
@@ -362,6 +359,152 @@ IconTex uploadIcon(const std::vector<unsigned char>& rgba, int w, int h, bool mi
     glBindTexture(GL_TEXTURE_2D, 0);
     return IconTex{tex, w, h};
 }
+
+#ifdef WIN11WM_HAVE_RSVG
+// ---------------------------------------------------------- persistent cache
+// Rasterising an SVG costs far more than the GL upload, and the same handful of
+// (source, size) pairs is decoded on every start. The rendered RGBA is therefore
+// kept in $XDG_CACHE_HOME/win11wm/iconcache, one flat file per source and bucket,
+// so a later run is a read plus glTexImage2D instead of a librsvg run. PNGs are
+// not cached: decoding one is already cheaper than reading its raw pixels back,
+// and a raw copy would be several times the size of the compressed original.
+constexpr uint32_t kIconCacheMagic = 0x31493157u;  // "W1I1", little endian
+constexpr uint32_t kIconCacheVersion = 1;          // bump when rasterising changes
+constexpr size_t kIconCacheHeaderWords = 5;        // magic, version, w, h, flags
+
+std::string iconCacheDir() {
+    const std::string base = cacheBase();
+    return base.empty() ? std::string() : base + "/win11wm/iconcache";
+}
+
+// The file name for one (source, bucket): FNV-1a over the absolute path, the
+// render size, the source's size/mtime and the format version. The path carries
+// the theme, so switching art never serves a stale file, and the size/mtime make
+// an updated icon miss instead of pinning the old pixels forever.
+std::string iconCacheKey(const std::string& source, int bucket) {
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](const std::string& s) {
+        for (unsigned char c : s) {
+            h ^= c;
+            h *= 1099511628211ull;
+        }
+        h ^= 0xffu;  // separator, so "ab"+"c" cannot collide with "a"+"bc"
+        h *= 1099511628211ull;
+    };
+    mix(source);
+    mix(std::to_string(bucket));
+    mix(std::to_string(kIconCacheVersion));
+    struct stat st {};
+    if (::stat(source.c_str(), &st) == 0) {
+        mix(std::to_string(st.st_size));
+        mix(std::to_string(st.st_mtime));
+    }
+    char out[17];
+    for (int i = 15; i >= 0; --i) {
+        out[i] = "0123456789abcdef"[h & 0xfu];
+        h >>= 4;
+    }
+    out[16] = '\0';
+    return std::string(out);
+}
+
+// mkdir -p: the cache is the only directory this process creates below
+// $XDG_CACHE_HOME, and none of its parents are guaranteed to exist yet.
+bool makeDirs(const std::string& path) {
+    std::string cur;
+    cur.reserve(path.size());
+    for (char c : path) {
+        cur.push_back(c);
+        if (c == '/') {
+            if (::mkdir(cur.c_str(), 0755) != 0 && errno != EEXIST) return false;
+        }
+    }
+    return ::mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+}
+
+void storeIconCache(const std::string& key, const std::vector<unsigned char>& rgba, int w,
+                    int h) {
+    const std::string dir = iconCacheDir();
+    if (dir.empty() || key.empty() || rgba.empty() || w <= 0 || h <= 0) return;
+    if (!makeDirs(dir)) return;
+    const uint32_t header[kIconCacheHeaderWords] = {
+        kIconCacheMagic, kIconCacheVersion, uint32_t(w), uint32_t(h), 0u};
+    const std::string path = dir + "/" + key + ".rgba";
+    // A sibling temp file plus rename, so a crash mid-write leaves the previous
+    // entry intact rather than a truncated one. The pid keeps two processes from
+    // sharing a temp name; rename() is atomic, so the last writer wins whole.
+    const std::string tmp = path + ".tmp." + std::to_string(::getpid());
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return;
+    bool ok = std::fwrite(header, sizeof header, 1, f) == 1;
+    ok = ok && std::fwrite(rgba.data(), 1, rgba.size(), f) == rgba.size();
+    ok = (std::fclose(f) == 0) && ok;
+    if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) std::remove(tmp.c_str());
+}
+
+// The cache earns its keep only while it stays small: a theme update changes the
+// key (the source's mtime is part of it), so the old rasters are never hit again
+// and would otherwise accumulate forever. Once per process, drop the least
+// recently written entries until the directory is back under a fixed budget.
+constexpr size_t kIconCacheBudget = 64u * 1024u * 1024u;
+
+void pruneIconCache() {
+    const std::string dir = iconCacheDir();
+    if (dir.empty()) return;
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    struct Entry {
+        std::string path;
+        size_t size = 0;
+        time_t mtime = 0;
+    };
+    std::vector<Entry> entries;
+    size_t total = 0;
+    while (dirent* ent = readdir(d)) {
+        if (ent->d_name[0] == '.') continue;
+        const std::string p = dir + "/" + ent->d_name;
+        struct stat st {};
+        if (::stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        entries.push_back(Entry{p, size_t(st.st_size), st.st_mtime});
+        total += size_t(st.st_size);
+    }
+    closedir(d);
+    if (total <= kIconCacheBudget) return;
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry& a, const Entry& b) { return a.mtime < b.mtime; });
+    for (const Entry& e : entries) {
+        if (total <= kIconCacheBudget) break;
+        if (std::remove(e.path.c_str()) == 0) total -= e.size;
+    }
+}
+
+bool loadIconCache(const std::string& key, std::vector<unsigned char>* rgba, int* outW,
+                   int* outH) {
+    const std::string dir = iconCacheDir();
+    if (dir.empty() || key.empty()) return false;
+    std::FILE* f = std::fopen((dir + "/" + key + ".rgba").c_str(), "rb");
+    if (!f) return false;
+    uint32_t header[kIconCacheHeaderWords] = {};
+    bool ok = std::fread(header, sizeof header, 1, f) == 1;
+    const int w = ok ? int(header[2]) : 0;
+    const int h = ok ? int(header[3]) : 0;
+    // Bound the dimensions before reserving: a corrupt or foreign file must not
+    // make us allocate gigabytes.
+    ok = ok && header[0] == kIconCacheMagic && header[1] == kIconCacheVersion &&
+         w > 0 && w <= 512 && h > 0 && h <= 512;
+    if (ok) {
+        std::vector<unsigned char> data(size_t(w) * size_t(h) * 4u);
+        ok = std::fread(data.data(), 1, data.size(), f) == data.size();
+        if (ok) {
+            *rgba = std::move(data);
+            if (outW) *outW = w;
+            if (outH) *outH = h;
+        }
+    }
+    std::fclose(f);
+    return ok;
+}
+#endif  // WIN11WM_HAVE_RSVG
 
 std::vector<std::string> readInherits(const std::string& themeDir) {
     std::vector<std::string> out;
@@ -561,6 +704,12 @@ void IconStore::ensureHatterIndex() {
 
 IconTex IconStore::get(const std::string& nameOrPath, int px, IconTheme theme) {
     if (nameOrPath.empty()) return {};
+#ifdef WIN11WM_HAVE_RSVG
+    if (!cachePruned_) {
+        cachePruned_ = true;
+        pruneIconCache();
+    }
+#endif
     const std::string base = lower(nameOrPath);
     // The theme is part of the memo key, so the same name can resolve to a
     // Hatter glyph in the shell and a Reversal one in the Control Centre.
@@ -587,14 +736,25 @@ IconTex IconStore::get(const std::string& nameOrPath, int px, IconTheme theme) {
         if (it != cache_.end()) return it->second;
         std::vector<unsigned char> rgba;
         int w = 0, h = 0;
-        if (renderSvg(svg->second, isReversalPath(svg->second), bucket, &rgba, &w, &h)) {
+        // The rasterised result is reusable across runs; only the GL upload has
+        // to be repeated. A miss is rendered once and written for the next run.
+        const std::string diskKey = iconCacheKey(svg->second, bucket);
+        if (loadIconCache(diskKey, &rgba, &w, &h)) {
+            ++diskHits_;
+        } else if (renderSvg(svg->second, isReversalPath(svg->second), bucket, &rgba, &w, &h)) {
+            storeIconCache(diskKey, rgba, w, h);
+            ++diskWrites_;
+        } else {
+            // A malformed SVG falls through to the raster path rather than failing.
+            rgba.clear();
+        }
+        if (!rgba.empty() && w > 0 && h > 0) {
             const IconTex t = uploadIcon(rgba, w, h, false);
             if (t.valid()) {
                 cache_[key] = t;
                 return t;
             }
         }
-        // A malformed SVG falls through to the raster path rather than failing.
     }
 #else
     (void)px;
@@ -629,6 +789,29 @@ IconTex IconStore::forApp(const std::string& iconName, const std::string& wmClas
         if (!t.valid()) t = get(lower(wmClass), px, theme);
     }
     return t;
+}
+
+void IconStore::warmIndexes() {
+    ensureSvgIndex();
+    ensureHatterIndex();
+}
+
+size_t IconStore::preload(const std::vector<IconRequest>& requests,
+                          const std::vector<int>& sizes, IconTheme theme) {
+    // The indexes are cheap next to the rasterisations, and every lookup below
+    // would otherwise build them on whichever name happens to ask first.
+    warmIndexes();
+    const size_t before = cache_.size();
+    for (const IconRequest& r : requests) {
+        if (r.icon.empty() && r.wmClass.empty()) continue;
+        for (int px : sizes) {
+            if (px <= 0) continue;
+            // forApp() memoises both the resolved path and the finished texture,
+            // so a size that rounds to a bucket already decoded costs a hash hit.
+            forApp(r.icon, r.wmClass, px, theme);
+        }
+    }
+    return cache_.size() - before;
 }
 
 }  // namespace wm

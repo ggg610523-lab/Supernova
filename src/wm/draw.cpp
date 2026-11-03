@@ -116,11 +116,69 @@ Color tileTint(const std::string& name) {
 
 }  // namespace
 
+// --preload-assets: decode the launcher art now instead of letting the first
+// surface that shows each icon pay for it. The sizes are the ones this screen's
+// layouts will actually ask for, mapped to the surface that asks:
+//
+//   Launchpad / Start    every launcher, the biggest first-paint bill
+//   desktop + tablet grid  every launcher again, at the cell size
+//   taskbar              pinned, recent and already-running apps
+//   ring menu            recents, plus the small file rows
+//
+// IconStore rounds each size up to its own bucket and ignores duplicates, so
+// layouts that land on the same rung cost one decode, not one per surface.
+void Manager::preloadAssets() {
+    const double startMs = nowMs();
+    icons.warmIndexes();
+
+    // The Launchpad's icon edge, computed exactly as layoutStartMenu() does.
+    const int cellW = std::max(1, screenW * 90 / 100 / metrics::kLaunchCols);
+    const int launchPx = std::clamp(std::min(cellW - 32, screenH / 8),
+                                    metrics::kLaunchIconMin, metrics::kLaunchIcon);
+    const int gridPx = metrics::homeIconEdge(screenW, screenH);
+    const int taskPx = metrics::taskIconSize();
+    // The dock's peak growth (Plank's 0.28), so a magnified bar icon is warm too.
+    const int taskZoomPx = int(std::lround(double(taskPx) * 1.28));
+
+    std::vector<IconStore::IconRequest> launchers;
+    launchers.reserve(apps.size());
+    for (const AppEntry& a : apps) launchers.push_back({a.icon, a.wmClass});
+    size_t decoded = icons.preload(launchers, {launchPx, gridPx}, IconTheme::Hatter);
+
+    std::vector<IconStore::IconRequest> bar;
+    for (const AppEntry& a : pinned) bar.push_back({a.icon, a.wmClass});
+    for (const AppEntry& a : recents) bar.push_back({a.icon, a.wmClass});
+    for (auto& cp : clients) bar.push_back({cp->appName, cp->appName});
+    decoded += icons.preload(bar, {taskPx, taskZoomPx, metrics::kRingIcon, 16},
+                             IconTheme::Hatter);
+
+    std::vector<IconStore::IconRequest> files;
+    for (const RecentFile& f : recentFiles) files.push_back({f.icon, std::string()});
+    for (const DesktopItem& d : desktopItems) files.push_back({d.icon, std::string()});
+    // The drawn fallback for an entry with no Icon= (or one that resolves to
+    // nothing), so the first cold desktop still lands on a warm texture.
+    files.push_back({"folder", std::string()});
+    files.push_back({"text-plain", std::string()});
+    decoded += icons.preload(files, {gridPx, 22}, IconTheme::Hatter);
+
+    log("preload: %zu launcher, %zu taskbar and %zu file icon source(s), %zu texture(s) "
+        "(%zu from the icon cache, %zu written) in %.0f ms",
+        launchers.size(), bar.size(), files.size(), decoded, icons.diskHits(),
+        icons.diskWrites(), nowMs() - startMs);
+}
+
 void Manager::render() {
     layoutTaskbar();
     if (startOpen) layoutStartMenu();
 
     comp.beginFrame();
+    // The first frame is the one point in both builds where the GL context is
+    // guaranteed to be current before anything is drawn, so the opt-in asset
+    // preload is serviced here.
+    if (preloadPending) {
+        preloadPending = false;
+        preloadAssets();
+    }
     // Benchmark hook (WIN11WM_LAYERS): a bitmask that skips whole layers, so a
     // headless run can attribute GPU time to a specific part of the shell.
     // Unset in normal use, where every layer is drawn.
@@ -148,12 +206,14 @@ void Manager::render() {
 
     if (on(kLayClients)) drawLaunches();
 
+#ifdef WIN11WM_WAYLAND
     // Menus and tooltips hang off a client but paint outside its frame and
-    // above every other normal window.
+    // above every other normal window. Only the Wayland build tracks them as
+    // child surfaces; on X11 a menu is an override-redirect window and is
+    // composited as a client of its own.
     if (on(kLayClients)) {
         for (auto& cp : clients) drawClientPopups(cp.get());
     }
-#ifdef WIN11WM_WAYLAND
     // A client drag-and-drop image follows the cursor above the windows.
     if (on(kLayClients)) drawDragIcon();
 #endif
@@ -1951,7 +2011,7 @@ void Manager::drawStats() {
     snprintf(line, sizeof line, "%ld draw call(s)/frame   %s", comp.drawCallsLastFrame(),
              comp.rendererName().c_str());
     drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 52);
-    snprintf(line, sizeof line, "draws fill=%ld acrylic=%ld win=%ld tex=%ld grad=%ld arc=%ld",
+    snprintf(line, sizeof line, "prims fill=%ld acrylic=%ld win=%ld tex=%ld grad=%ld arc=%ld",
              comp.drawsByMode()[0], comp.drawsByMode()[1], comp.drawsByMode()[2],
              comp.drawsByMode()[3], comp.drawsByMode()[4], comp.drawsByMode()[5]);
     drawTextAt(line, 11, Weight::Regular, theme::kTextMuted, box.x + 12, box.y + 72);
