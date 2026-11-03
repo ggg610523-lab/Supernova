@@ -12,6 +12,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
 
 #include "apps.h"
 #include "png.h"
@@ -19,7 +22,24 @@
 namespace wm {
 namespace {
 
+bool traceCommit() {
+    static const bool on = std::getenv("WIN11WM_COMMIT_TRACE") != nullptr;
+    return on;
+}
+
 Window nextWindowId = 1;
+
+// One listener pair per client wl_surface, so a commit of a subsurface or a
+// popup -- not just of the toplevel -- schedules a repaint. Clients that paint
+// video or their own decorations into child surfaces commit those surfaces on
+// their own, and without this the shell only picked the new content up on its
+// next idle tick.
+struct SurfaceCommitTracker {
+    Manager* manager = nullptr;
+    struct wlr_surface* surface = nullptr;
+    struct wl_listener commit{};
+    struct wl_listener destroy{};
+};
 
 // X11 modifier bits, so the shared shortcut table keeps its spelling.
 constexpr unsigned kShiftMask = 1u << 0;
@@ -134,7 +154,7 @@ void Manager::stop() {
 
 void Manager::requestFrame() {
     dirty = true;
-    if (!output) return;
+    if (!output || !output->enabled) return;
     // While the swapchain is starved there is no point asking for a frame: the
     // render pass would fail again. The tick timer retries once the backoff has
     // expired, so nothing is lost.
@@ -179,6 +199,60 @@ void Manager::setCursor(int which) {
     wlr_cursor_set_xcursor(cursor, cursorManager, names[which]);
 }
 
+void Manager::setupKeyboard(struct wlr_keyboard* kb) {
+    if (!kb) return;
+    struct xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    struct xkb_rule_names rules = {};
+    struct xkb_keymap* km =
+        xkb_keymap_new_from_names(ctx, &rules, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    if (km) {
+        wlr_keyboard_set_keymap(kb, km);
+        xkb_keymap_unref(km);
+    }
+    xkb_context_unref(ctx);
+    wlr_keyboard_set_repeat_info(kb, 25, 600);
+    keyboard = kb;
+    keyboardKey.notify = [](struct wl_listener* kl, void* kdata) {
+        Manager* m = wl_container_of(kl, m, keyboardKey);
+        auto* ke = static_cast<struct wlr_keyboard_key_event*>(kdata);
+        if (!m->keyboard) return;
+        m->keyMods = xModifiers(wlr_keyboard_get_modifiers(m->keyboard));
+        m->onKey(ke->keycode, m->keyMods, ke->state == WL_KEYBOARD_KEY_STATE_PRESSED);
+    };
+    wl_signal_add(&kb->events.key, &keyboardKey);
+    keyboardMods.notify = [](struct wl_listener* kl, void*) {
+        Manager* m = wl_container_of(kl, m, keyboardMods);
+        if (m->keyboard)
+            m->onKeyboardModifiers(xModifiers(wlr_keyboard_get_modifiers(m->keyboard)));
+    };
+    wl_signal_add(&kb->events.modifiers, &keyboardMods);
+    wlr_seat_set_keyboard(seat, kb);
+    refreshSeatCapabilities();
+}
+
+void Manager::refreshSeatCapabilities() {
+    if (!seat) return;
+    uint32_t caps = WL_SEAT_CAPABILITY_POINTER;
+    if (keyboard) caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+    if (hasTouch) caps |= WL_SEAT_CAPABILITY_TOUCH;
+    wlr_seat_set_capabilities(seat, caps);
+}
+
+void Manager::grabShellKeyboard() {
+    if (shellKeyboardGrabbed || !seat) return;
+    shellKeyboardGrabbed = true;
+    // A client popup's grab keeps keyboard focus on the popup; clearing focus
+    // here is a no-op through that grab, which is what we want.
+    wlr_seat_keyboard_clear_focus(seat);
+}
+
+void Manager::ungrabShellKeyboard() {
+    if (!shellKeyboardGrabbed) return;
+    shellKeyboardGrabbed = false;
+    if (seat && focused && focused->mapped && focused->surface)
+        wlr_seat_keyboard_notify_enter(seat, focused->surface, nullptr, 0, nullptr);
+}
+
 void Manager::grabPointer() {}
 void Manager::ungrabPointer() {}
 void Manager::updateFullscreenRedirection() {}
@@ -215,12 +289,19 @@ void Manager::syncClientGeometry(Client* c) {
 void Manager::ensurePixmap(Client* c) {
     if (!c || !c->surface) return;
     if (c->tex.valid() && c->pixW == c->tex.w && c->pixH == c->tex.h) return;
-    if (!c->surface->buffer) return;
+    if (!c->surface->buffer) {
+        if (traceCommit()) log("ensurePixmap %u: no surface buffer", c->id);
+        return;
+    }
     struct wlr_buffer* buffer = &c->surface->buffer->base;
     if (!comp.importBuffer(buffer, &c->tex)) {
+        if (traceCommit()) log("ensurePixmap %u: import failed", c->id);
         c->pixW = c->pixH = 0;
         return;
     }
+    if (traceCommit())
+        log("ensurePixmap %u: ok %dx%d tex=%u buffer=%p", c->id, c->tex.w, c->tex.h,
+            c->tex.tex, (void*)c->tex.buffer);
     c->pixW = c->tex.w;
     c->pixH = c->tex.h;
     c->bufferW = c->tex.w;
@@ -298,7 +379,9 @@ void Manager::focusClient(Client* c, bool raise) {
     focused = c;
     c->focused = true;
     if (c->toplevel) wlr_xdg_toplevel_set_activated(c->toplevel, true);
-    if (seat && c->surface) {
+    // While a shell flyout owns the keyboard the client stays keyboard-focused
+    // logically but does not get the seat's enter until ungrabShellKeyboard().
+    if (seat && c->surface && !shellKeyboardGrabbed) {
         wlr_seat_keyboard_notify_enter(seat, c->surface, nullptr, 0, nullptr);
     }
     dirty = true;
@@ -453,12 +536,25 @@ void Manager::onNewToplevel(struct wlr_xdg_toplevel* toplevel) {
     c->toplevelTitle.notify = [](struct wl_listener* l, void*) {
         Client* cl = wl_container_of(l, cl, toplevelTitle);
         if (cl && cl->toplevel && cl->toplevel->title) cl->title = cl->toplevel->title;
+        if (cl && cl->manager) {
+            cl->manager->dirty = true;
+            cl->manager->requestFrame();
+        }
     };
     wl_signal_add(&toplevel->events.set_title, &c->toplevelTitle);
 
     c->toplevelAppId.notify = [](struct wl_listener* l, void*) {
         Client* cl = wl_container_of(l, cl, toplevelAppId);
-        if (cl && cl->toplevel && cl->toplevel->app_id) cl->appId = cl->toplevel->app_id;
+        if (cl && cl->toplevel && cl->toplevel->app_id) {
+            cl->appId = cl->toplevel->app_id;
+            cl->appName = cl->appId;
+            std::transform(cl->appName.begin(), cl->appName.end(), cl->appName.begin(),
+                           [](unsigned char ch) { return char(std::tolower(ch)); });
+        }
+        if (cl && cl->manager) {
+            cl->manager->dirty = true;
+            cl->manager->requestFrame();
+        }
     };
     wl_signal_add(&toplevel->events.set_app_id, &c->toplevelAppId);
 
@@ -566,6 +662,12 @@ void Manager::onSurfaceCommit(Client* c) {
 
     // Re-import on every commit: the surface points at a new buffer, and the
     // one we were sampling is the client's to recycle.
+    if (traceCommit())
+        log("commit %u: mapped=%d buffer=%p tex.valid=%d tex.buffer=%p", c->id,
+            int(c->mapped),
+            c->surface->buffer ? (void*)&c->surface->buffer->base : nullptr,
+            int(c->tex.valid()),
+            (void*)c->tex.buffer);
     c->pixW = c->pixH = 0;
     ensurePixmap(c);
     if (!c->mapped) mapClient(c);
@@ -659,6 +761,19 @@ void Manager::drawClientPopups(Client* c) {
         pass.geoY = c->xdg->current.geometry.y;
     }
     wlr_xdg_surface_for_each_popup_surface(c->xdg, popupDrawIterator, &pass);
+}
+
+void Manager::drawDragIcon() {
+    if (!seat || !seat->drag || !seat->drag->icon) return;
+    struct wlr_surface* surface = seat->drag->icon->surface;
+    if (!surface || !surface->buffer) return;
+    if (surface->current.width <= 0 || surface->current.height <= 0) return;
+    WindowTex t;
+    if (!comp.importBuffer(&surface->buffer->base, &t)) return;
+    const Rect dst{int(cursor ? cursor->x : pointerX), int(cursor ? cursor->y : pointerY),
+                   surface->current.width, surface->current.height};
+    comp.drawTex(t.tex, dst, 0.f, Color{1.f, 1.f, 1.f, 1.f}, 1.0f, true, t.alpha);
+    comp.releaseWindowTex(&t);
 }
 
 void Manager::onToplevelDestroy(Client* c) {
@@ -777,19 +892,38 @@ void dumpFrameToFile(const std::string& path, int w, int h) {
     std::fclose(f);
     log("wrote %s (%dx%d)", path.c_str(), w, h);
 }
+void sendSurfaceFrameDone(struct wlr_surface* surface, int, int, void* data) {
+    if (surface)
+        wlr_surface_send_frame_done(surface, static_cast<struct timespec*>(data));
+}
 }  // namespace
 
+void Manager::syncOutputSize() {
+    if (!output) return;
+    const int w = output->width;
+    const int h = output->height;
+    if (w <= 1 || h <= 1 || (w == screenW && h == screenH)) return;
+    screenW = w;
+    screenH = h;
+    comp.resize(w, h);
+    // Hit testing and the paint order both depend on these rectangles, so they
+    // are rebuilt before the next event, not lazily inside render().
+    layoutTaskbar();
+    layoutDesktopIcons();
+    dirty = true;
+}
+
 void Manager::renderFrameOnOutput() {
-    static int dbgAttempts, dbgFails, dbgCommitFails; static double dbgLast;
-    ++dbgAttempts;
-    if (nowMs() - dbgLast > 1000.0) {
-        dbgLast = nowMs();
-        log("DBG frame attempts=%d fails=%d commitfail=%d swap=%p starve=%d backoff=%.0f",
-            dbgAttempts, dbgFails, dbgCommitFails, (void*)(output ? output->swapchain : nullptr),
-            frameStarveCount, frameBackoffUntil - nowMs());
-        dbgAttempts = 0; dbgFails = 0; dbgCommitFails = 0;
-    }
     if (!output || !output->enabled) return;
+    syncOutputSize();
+    // A commit asks the backend for another frame event once the buffer has been
+    // presented. Rendering unconditionally here therefore never goes idle: the
+    // compositor would rebuild and present the whole shell at the monitor's
+    // refresh rate even with nothing on screen changing. Only draw when an event
+    // or the animation tick actually marked the shell dirty (or a --frames self
+    // test asks for every frame); the tick calls requestFrame() otherwise.
+    if (!dirty && !(opts && opts->frames > 0)) return;
+
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     struct wlr_render_pass* pass = wlr_output_begin_render_pass(output, &state, nullptr, nullptr);
@@ -799,16 +933,20 @@ void Manager::renderFrameOnOutput() {
         // still compositing the previous one, or our window is not visible).
         // Back off for a frame, exponentially, so a starved swapchain costs a
         // handful of attempts instead of a flood of failed render passes.
-        ++dbgFails;
         ++frameStarveCount;
         const int shift = std::min(frameStarveCount, 4);
         frameBackoffUntil = nowMs() + double(16 << shift);
         return;
     }
     frameStarveCount = 0;
-    tickAnimations(nowMs());
     render();
     comp.present();
+    static bool loggedRenderer = false;
+    if (!loggedRenderer) {
+        loggedRenderer = true;
+        log("renderer: %s | %s | %s", comp.vendorName().c_str(),
+            comp.rendererName().c_str(), comp.glVersion().c_str());
+    }
     if (!opts->dumpPath.empty() && opts->frames > 0 && framesRendered + 1 >= opts->frames)
         dumpFrameToFile(opts->dumpPath, screenW, screenH);
     wlr_render_pass_submit(pass);
@@ -819,7 +957,6 @@ void Manager::renderFrameOnOutput() {
         }
     }
     if (!wlr_output_commit_state(output, &state)) {
-        ++dbgCommitFails;
         // Nothing was presented, so do not count it as a frame and let the
         // backoff throttle the retry.
         wlr_output_state_finish(&state);
@@ -830,11 +967,23 @@ void Manager::renderFrameOnOutput() {
 
     // A client only draws again once its frame callback has fired, so every
     // surface that was on screen this frame has to be told the frame is done.
+    // The whole tree matters: a subsurface or popup that only ever sees its
+    // parent's callbacks never draws again (video, tooltips, client-drawn
+    // decorations). wlr_xdg_surface_for_each_surface walks the toplevel, its
+    // subsurfaces and its popup tree.
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     for (auto& cp : clients) {
-        if (cp->mapped && cp->surface) wlr_surface_send_frame_done(cp->surface, &now);
+        if (!cp->mapped) continue;
+        if (cp->xdg)
+            wlr_xdg_surface_for_each_surface(cp->xdg, sendSurfaceFrameDone, &now);
+        else if (cp->surface)
+            wlr_surface_send_frame_done(cp->surface, &now);
     }
+    // A drag-and-drop image is a client surface too; it animates while it is
+    // carried around, not only when it is first attached.
+    if (seat && seat->drag && seat->drag->icon && seat->drag->icon->surface)
+        wlr_surface_send_frame_done(seat->drag->icon->surface, &now);
 
     ++framesRendered;
     dirty = false;
@@ -892,7 +1041,7 @@ int Manager::run(const Options& options) {
     }
     wlr_renderer_init_wl_display(renderer, wlDisplay);
 
-    wlr_compositor_create(wlDisplay, 6, renderer);
+    struct wlr_compositor* compositor = wlr_compositor_create(wlDisplay, 6, renderer);
     wlr_subcompositor_create(wlDisplay);
     wlr_data_device_manager_create(wlDisplay);
     wlr_primary_selection_v1_device_manager_create(wlDisplay);
@@ -902,7 +1051,41 @@ int Manager::run(const Options& options) {
     outputLayout = wlr_output_layout_create(wlDisplay);
     wlr_xdg_output_manager_v1_create(wlDisplay, outputLayout);
     seat = wlr_seat_create(wlDisplay, "seat0");
+    // The shell always has a cursor (a pointer, a touch translated to one, or a
+    // virtual pointer), so advertise a pointer even before a device arrives.
+    // Without this a client that connects before the first input device -- or on
+    // a backend that has none, such as headless -- never binds wl_pointer and so
+    // never receives any click we forward to it.
+    wlr_seat_set_capabilities(seat, WL_SEAT_CAPABILITY_POINTER);
     xdgShell = wlr_xdg_shell_create(wlDisplay, 3);
+
+    // Any committed client surface changes what is on screen: the toplevel is
+    // re-imported by onSurfaceCommit(), child surfaces are imported while the
+    // window is drawn. Mark the frame dirty for all of them.
+    if (compositor) {
+        newSurface.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, newSurface);
+            auto* surface = static_cast<struct wlr_surface*>(data);
+            if (!surface) return;
+            auto* tracker = new SurfaceCommitTracker{m, surface, {}, {}};
+            tracker->commit.notify = [](struct wl_listener* cl, void*) {
+                SurfaceCommitTracker* t = wl_container_of(cl, t, commit);
+                if (!t->manager) return;
+                t->manager->dirty = true;
+                t->manager->requestFrame();
+            };
+            wl_signal_add(&surface->events.commit, &tracker->commit);
+            tracker->destroy.notify = [](struct wl_listener* dl, void*) {
+                SurfaceCommitTracker* t = wl_container_of(dl, t, destroy);
+                wl_list_remove(&t->commit.link);
+                wl_list_init(&t->commit.link);
+                wl_list_init(&t->destroy.link);
+                delete t;
+            };
+            wl_signal_add(&surface->events.destroy, &tracker->destroy);
+        };
+        wl_signal_add(&compositor->events.new_surface, &newSurface);
+    }
 
     if (struct wlr_xdg_activation_v1* activation = wlr_xdg_activation_v1_create(wlDisplay)) {
         requestActivate.notify = [](struct wl_listener* l, void* data) {
@@ -1062,6 +1245,24 @@ int Manager::run(const Options& options) {
             mm->renderFrameOnOutput();
         };
         wl_signal_add(&o->events.frame, &m->outputFrame);
+        // The backend asks the compositor to apply a state when the host window
+        // is resized (nested) or the mode is changed. Without committing it the
+        // output keeps its old swapchain size and every later frame is stretched
+        // into, or clipped by, a buffer of the wrong dimensions.
+        m->outputRequestState.notify = [](struct wl_listener* l, void* data) {
+            Manager* mm = wl_container_of(l, mm, outputRequestState);
+            auto* ev = static_cast<struct wlr_output_event_request_state*>(data);
+            if (!ev || !ev->output || !ev->state) return;
+            if (!wlr_output_commit_state(ev->output, ev->state)) {
+                wlr_log(WLR_ERROR, "output request_state commit failed");
+                return;
+            }
+            // The new buffer has a new size; draw and present one frame at that
+            // size so the resize is visible immediately instead of on the next
+            // unrelated event.
+            mm->requestFrame();
+        };
+        wl_signal_add(&o->events.request_state, &m->outputRequestState);
         m->outputDestroy.notify = [](struct wl_listener* l, void*) {
             Manager* mm = wl_container_of(l, mm, outputDestroy);
             mm->output = nullptr;
@@ -1075,32 +1276,7 @@ int Manager::run(const Options& options) {
         Manager* m = wl_container_of(l, m, newInput);
         auto* dev = static_cast<struct wlr_input_device*>(data);
         if (dev->type == WLR_INPUT_DEVICE_KEYBOARD) {
-            struct wlr_keyboard* kb = wlr_keyboard_from_input_device(dev);
-            struct xkb_context* ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-            struct xkb_rule_names rules = {};
-            struct xkb_keymap* km =
-                xkb_keymap_new_from_names(ctx, &rules, XKB_KEYMAP_COMPILE_NO_FLAGS);
-            wlr_keyboard_set_keymap(kb, km);
-            xkb_keymap_unref(km);
-            xkb_context_unref(ctx);
-            wlr_keyboard_set_repeat_info(kb, 25, 600);
-            m->keyboard = kb;
-            m->keyboardKey.notify = [](struct wl_listener* kl, void* kdata) {
-                Manager* mm = wl_container_of(kl, mm, keyboardKey);
-                auto* ke = static_cast<struct wlr_keyboard_key_event*>(kdata);
-                if (!mm->keyboard) return;
-                mm->keyMods = xModifiers(wlr_keyboard_get_modifiers(mm->keyboard));
-                mm->onKey(ke->keycode, mm->keyMods,
-                          ke->state == WL_KEYBOARD_KEY_STATE_PRESSED);
-            };
-            wl_signal_add(&kb->events.key, &m->keyboardKey);
-            m->keyboardMods.notify = [](struct wl_listener* kl, void*) {
-                Manager* mm = wl_container_of(kl, mm, keyboardMods);
-                if (mm->keyboard)
-                    mm->onKeyboardModifiers(xModifiers(wlr_keyboard_get_modifiers(mm->keyboard)));
-            };
-            wl_signal_add(&kb->events.modifiers, &m->keyboardMods);
-            wlr_seat_set_keyboard(m->seat, kb);
+            m->setupKeyboard(wlr_keyboard_from_input_device(dev));
         }
         // Pointer, touch and tablet devices only reach the cursor once they are
         // attached to it; without this the shell never sees a motion or a button.
@@ -1109,10 +1285,7 @@ int Manager::run(const Options& options) {
             wlr_cursor_attach_input_device(m->cursor, dev);
         }
         if (dev->type == WLR_INPUT_DEVICE_TOUCH) m->hasTouch = true;
-        uint32_t caps = WL_SEAT_CAPABILITY_POINTER;
-        if (m->keyboard) caps |= WL_SEAT_CAPABILITY_KEYBOARD;
-        if (m->hasTouch) caps |= WL_SEAT_CAPABILITY_TOUCH;
-        wlr_seat_set_capabilities(m->seat, caps);
+        m->refreshSeatCapabilities();
     };
     wl_signal_add(&backend->events.new_input, &newInput);
 
@@ -1208,6 +1381,32 @@ int Manager::run(const Options& options) {
     };
     wl_signal_add(&cursor->events.touch_cancel, &cursorTouchCancel);
 
+    // Virtual input devices (zwlr-virtual-pointer / zwp-virtual-keyboard) are the
+    // compositor's own synthetic devices: they let tests and remote-control
+    // helpers drive the exact same cursor, seat and keymap paths as real ones.
+    virtualPointerManager = wlr_virtual_pointer_manager_v1_create(wlDisplay);
+    if (virtualPointerManager) {
+        newVirtualPointer.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, newVirtualPointer);
+            auto* ev = static_cast<struct wlr_virtual_pointer_v1_new_pointer_event*>(data);
+            if (!ev || !ev->new_pointer) return;
+            wlr_cursor_attach_input_device(m->cursor, &ev->new_pointer->pointer.base);
+            m->refreshSeatCapabilities();
+        };
+        wl_signal_add(&virtualPointerManager->events.new_virtual_pointer, &newVirtualPointer);
+    }
+    virtualKeyboardManager = wlr_virtual_keyboard_manager_v1_create(wlDisplay);
+    if (virtualKeyboardManager) {
+        newVirtualKeyboard.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, newVirtualKeyboard);
+            auto* vk = static_cast<struct wlr_virtual_keyboard_v1*>(data);
+            if (!vk) return;
+            m->setupKeyboard(&vk->keyboard);
+        };
+        wl_signal_add(&virtualKeyboardManager->events.new_virtual_keyboard,
+                      &newVirtualKeyboard);
+    }
+
     if (!wlr_backend_start(backend)) {
         log("the wlroots backend failed to start");
         return 1;
@@ -1292,6 +1491,17 @@ int Manager::run(const Options& options) {
     setenv("WAYLAND_DISPLAY", socket, 1);
     log("Wayland socket: %s (%s)", socket, nested ? "nested" : "headless");
 
+    // TEMPORARY input harness: WIN11WM_TEST_SCRIPT names a file whose lines are
+    // fed one per tick (move X Y / press / release / wheel N). Used to drive the
+    // headless backend while tracking down input routing bugs.
+    static std::vector<std::string> testScript;
+    if (const char* path = std::getenv("WIN11WM_TEST_SCRIPT")) {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) testScript.push_back(line);
+    }
+    static size_t testScriptPos = 0;
+
     // Animation tick: 60Hz while anything is moving, and a slower heartbeat for
     // the clock/battery widgets when the shell is idle.
     tickTimer = wl_event_loop_add_timer(
@@ -1299,14 +1509,44 @@ int Manager::run(const Options& options) {
         [](void* data) -> int {
             Manager* m = static_cast<Manager*>(data);
             const double now = nowMs();
-            // The clock and the battery cards want a repaint even when nothing
-            // is moving, the same heartbeat the X11 loop's poll timeout gave them.
-            if (now - m->lastIdleRefresh >= 250.0) {
-                m->lastIdleRefresh = now;
-                m->dirty = true;
-            }
             m->tickAnimations(now);
+            if (m->cursor && testScriptPos < testScript.size()) {
+                const std::string& step = testScript[testScriptPos++];
+                int a = 0, b = 0, c = 0;
+                if (std::sscanf(step.c_str(), "move %d %d", &a, &b) == 2) {
+                    wlr_cursor_warp(m->cursor, nullptr, double(a), double(b));
+                    m->onPointerMotion(0.0, 0.0);
+                    for (auto& cp : m->clients)
+                        log("test: client %u \"%s\" mapped=%d frame=%d,%d %dx%d content=%d,%d "
+                            "%dx%d pix=%dx%d tex=%u",
+                            cp->id, cp->title.c_str(), int(cp->mapped), cp->frame.x, cp->frame.y,
+                            cp->frame.w, cp->frame.h, m->clientRect(cp.get()).x,
+                            m->clientRect(cp.get()).y, m->clientRect(cp.get()).w,
+                            m->clientRect(cp.get()).h, cp->pixW, cp->pixH, cp->tex.tex);
+                } else if (step == "press") {
+                    m->onPointerButton(BTN_LEFT, true, uint32_t(now));
+                } else if (step == "release") {
+                    m->onPointerButton(BTN_LEFT, false, uint32_t(now));
+                } else if (step == "right") {
+                    m->onPointerButton(BTN_RIGHT, true, uint32_t(now));
+                } else if (step == "rightrelease") {
+                    m->onPointerButton(BTN_RIGHT, false, uint32_t(now));
+                } else if (std::sscanf(step.c_str(), "wheel %d", &a) == 1) {
+                    m->onPointerAxis(double(a));
+                } else if (m->keyboard && std::sscanf(step.c_str(), "key %d %d", &a, &b) == 2) {
+                    xkb_state_update_key(m->keyboard->xkb_state,
+                                         xkb_keycode_t(a + 8),
+                                         b ? XKB_KEY_DOWN : XKB_KEY_UP);
+                    m->onKey(uint32_t(a), 0, b != 0);
+                }
+                m->requestFrame();
+            }
             if (m->dirty || (m->opts && m->opts->frames > 0)) m->requestFrame();
+            // libwayland does not re-arm a timer from the callback's return
+            // value: without this explicit update the tick fires once at start
+            // up and never again, so hover, drags, animations and every other
+            // timer-driven piece of input stops working.
+            if (m->tickTimer) wl_event_source_timer_update(m->tickTimer, 16);
             return 16;
         },
         this);
@@ -1315,9 +1555,9 @@ int Manager::run(const Options& options) {
     lastTick = nowMs();
     dirty = true;
     requestFrame();
+    if (const char* path = std::getenv("WIN11WM_TEST_SCRIPT"))
+        log("test script %s: %zu steps", path, testScript.size());
 
-    log("%s | %s | %s", comp.vendorName().c_str(), comp.rendererName().c_str(),
-        comp.glVersion().c_str());
     log("canvas %dx%d", screenW, screenH);
 
     loop();
@@ -2267,9 +2507,10 @@ void Manager::setFullscreen(Client* c, bool on) {
         c->frame = Rect{0, 0, screenW, screenH};
     } else {
         c->fullscreen = false;
-        // A client that asked to stay frameless keeps its own title bar when
-        // it comes back out of fullscreen too.
-        c->captionH = c->frameless ? 0 : metrics::kCaptionH;
+        // Only a client that negotiated server-side decorations gets the Fluent
+        // caption back. A client-drawn title bar must not suddenly grow a second
+        // one when it leaves fullscreen.
+        c->captionH = (c->serverDecorated && !c->frameless) ? metrics::kCaptionH : 0;
         c->frame = clampRect(c->restore, Rect{0, 0, screenW, screenH});
     }
     if (c->toplevel) wlr_xdg_toplevel_set_fullscreen(c->toplevel, on);

@@ -475,6 +475,18 @@ void Compositor::shutdown() {
     ready_ = false;
 }
 
+void Compositor::resize(int width, int height) {
+    if (width <= 1 || height <= 1) return;
+    if (width == width_ && height == height_) return;
+    width_ = width;
+    height_ = height;
+    orthoMatrix(proj_, width_, height_);
+    // The wallpaper cover-crop and the half-resolution blur chain are sized to
+    // the old output; rebuilding them is what keeps a resized nested window (or
+    // a new DRM mode) from sampling a stale, wrong-sized swapchain texture.
+    wallpaperPending_ = true;
+}
+
 bool Compositor::setWallpaper(const std::string& path, std::string* error) {
     wallpaperPath_ = path;
     wallpaperPending_ = true;

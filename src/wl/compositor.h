@@ -82,6 +82,11 @@ public:
     // the GL context and framebuffer state are valid.
     bool setWallpaper(const std::string& path, std::string* error);
 
+    // The output buffer was resized (the nested host window changed, or a DRM
+    // mode was set). Rebuilds the projection and queues a wallpaper/blur bake at
+    // the new size; the old textures and framebuffers are replaced next frame.
+    void resize(int width, int height);
+
     bool ready() const { return ready_; }
     int width() const { return width_; }
     int height() const { return height_; }

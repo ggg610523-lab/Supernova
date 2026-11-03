@@ -105,6 +105,10 @@ void Manager::render() {
     if (on(kLayClients)) {
         for (auto& cp : clients) drawClientPopups(cp.get());
     }
+#ifdef WIN11WM_WAYLAND
+    // A client drag-and-drop image follows the cursor above the windows.
+    if (on(kLayClients)) drawDragIcon();
+#endif
 
     if (on(kLaySnap)) drawSnapPreview();
     if (on(kLayTaskbar) && tabletAnim < 0.999) drawTaskbar();

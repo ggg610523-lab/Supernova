@@ -54,6 +54,8 @@ struct wlr_xdg_shell;
 struct wlr_xdg_surface;
 struct wlr_xdg_toplevel;
 struct wlr_xdg_toplevel_decoration_v1;
+struct wlr_virtual_keyboard_manager_v1;
+struct wlr_virtual_pointer_manager_v1;
 
 namespace wm {
 
@@ -294,8 +296,13 @@ private:
     void stepStartSpring(double dtSec, double now);
     // Keyboard/pointer grabs are implicit when you are the compositor: the shell
     // always sees the events, so the X11 grab calls become no-ops.
-    void grabShellKeyboard() {}
-    void ungrabShellKeyboard() {}
+    // The Wayland equivalent of the X11 build's XGrabKeyboard: while a shell
+    // flyout owns the keyboard the focused client gets a wl_keyboard.leave, and
+    // it gets the keyboard back (enter, with the current modifiers) when the
+    // last flyout closes. Key events were already filtered in onKey(); this
+    // makes clients see the same focus transitions the X11 build produced.
+    void grabShellKeyboard();
+    void ungrabShellKeyboard();
     void requestFrame();
 
     // ---- client bookkeeping (windows.cpp)
@@ -376,6 +383,10 @@ private:
     void onShellButtonRelease(int x, int y, unsigned button, Time time);
     void onShellMotion(int x, int y);
     Client* contentAt(int x, int y) const;
+    // The leaf surface of `c` at a screen point (a subsurface when the client
+    // paints into one), with the point in that surface's own coordinates.
+    struct wlr_surface* contentSurfaceAt(Client* c, int x, int y, double* sx,
+                                         double* sy) const;
     // The client and leaf surface under a point when that point is inside one
     // of the client's xdg popups. Coordinates are returned in the leaf surface's
     // own space, ready for wlr_seat_pointer_notify_*.
@@ -453,6 +464,10 @@ private:
     void drawClientPopups(Client* c);
     static void popupDrawIterator(struct wlr_surface* surface, int sx, int sy,
                                   void* data);
+    // The image a client attaches to an in-flight drag-and-drop session. It is
+    // not part of any window, so it is drawn at the cursor on top of everything
+    // and only exists while the seat has a drag.
+    void drawDragIcon();
     void drawTaskbar();
     void drawStartMenu();
     void drawAltTab();
@@ -817,7 +832,14 @@ private:
         cursorTouchDown{}, cursorTouchUp{}, cursorTouchMotion{}, cursorTouchCancel{},
         requestSetCursor{}, requestSetShape{}, requestSetSelection{},
         requestSetPrimarySelection{}, requestStartDrag{}, requestActivate{},
-        newInput{}, keyboardModifiers{};
+        newInput{}, keyboardModifiers{}, newSurface{}, newVirtualKeyboard{},
+        newVirtualPointer{};
+    struct wlr_virtual_keyboard_manager_v1* virtualKeyboardManager = nullptr;
+    struct wlr_virtual_pointer_manager_v1* virtualPointerManager = nullptr;
+    // A keyboard can arrive at any time (a USB keyboard, a virtual keyboard, the
+    // nested host): give it the shell keymap and start listening to it.
+    void setupKeyboard(struct wlr_keyboard* kb);
+    void refreshSeatCapabilities();
     bool nested = true;
     struct wlr_keyboard* keyboard = nullptr;
     struct wl_listener keyboardKey{};
@@ -830,6 +852,7 @@ private:
     struct wlr_surface* pointerSurface = nullptr;
     struct wl_listener pointerSurfaceDestroy{};
     bool pointerSentPress = false;
+    bool shellKeyboardGrabbed = false;
     bool hasTouch = false;
     bool touchDown = false;
     int32_t touchId = -1;
@@ -837,7 +860,10 @@ private:
     bool framesLimited = false;
     int framesTarget = 0;
     struct wl_event_source* tickTimer = nullptr;
-    struct wl_listener outputFrame{}, outputDestroy{};
+    struct wl_listener outputFrame{}, outputDestroy{}, outputRequestState{};
+    // Keeps the shell layout and the GL projection in step with an output whose
+    // size changed (nested host resize, DRM mode switch).
+    void syncOutputSize();
     struct wl_listener xdgMap{}, xdgUnmap{};
     struct wl_listener decorationNew{};
 

@@ -12,12 +12,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace wm {
 namespace {
 
-bool traceInput() { return false; }
+bool traceInput() {
+    static const bool on = std::getenv("WIN11WM_INPUT_TRACE") != nullptr;
+    return on;
+}
 
 const char* buttonName(unsigned b) {
     switch (b) {
@@ -43,6 +48,21 @@ Client* Manager::contentAt(int x, int y) const {
         if (clientRect(c).contains(x, y)) return c;
     }
     return nullptr;
+}
+
+// The leaf surface of a client's window at a screen point, plus the point in
+// that surface's own coordinates. The client buffer's origin is not the same as
+// its window geometry: a client-drawn title bar comes with a shadow-padded
+// buffer and names the real window with xdg_surface.set_window_geometry, so the
+// geometry offset has to be added before hit testing (exactly what the window
+// shader subtracts when it maps the content rect onto the texture).
+struct wlr_surface* Manager::contentSurfaceAt(Client* c, int x, int y, double* sx,
+                                              double* sy) const {
+    if (!c || !c->xdg) return nullptr;
+    const Rect r = clientRect(c);
+    const struct wlr_box g = c->xdg->current.geometry;
+    return wlr_xdg_surface_surface_at(c->xdg, double(x - r.x + g.x),
+                                      double(y - r.y + g.y), sx, sy);
 }
 
 Client* Manager::popupAt(int x, int y, struct wlr_surface** surface, double* sx,
@@ -121,11 +141,21 @@ void Manager::onPointerMotion(double dx, double dy) {
         wlr_seat_pointer_notify_motion(seat, nowMs32(), popupX, popupY);
     } else {
         Client* c = contentAt(x, y);
-        if (c && c->surface) {
+        struct wlr_surface* leaf = nullptr;
+        double sx = 0.0, sy = 0.0;
+        if (c) leaf = contentSurfaceAt(c, x, y, &sx, &sy);
+        if (!leaf && c && c->surface) {
+            // A point in the window that is outside its xdg input region still
+            // belongs to it as far as focus goes; deliver to the toplevel at the
+            // right buffer-local position.
             const Rect r = clientRect(c);
-            const double sx = double(x - r.x);
-            const double sy = double(y - r.y);
-            setPointerFocus(c->surface, sx, sy);
+            const struct wlr_box g = c->xdg ? c->xdg->current.geometry : wlr_box{0, 0, 0, 0};
+            leaf = c->surface;
+            sx = double(x - r.x + g.x);
+            sy = double(y - r.y + g.y);
+        }
+        if (leaf) {
+            setPointerFocus(leaf, sx, sy);
             wlr_seat_pointer_notify_motion(seat, nowMs32(), sx, sy);
         } else {
             setPointerFocus(nullptr, 0.0, 0.0);
@@ -133,14 +163,20 @@ void Manager::onPointerMotion(double dx, double dy) {
     }
 
     // Resize edges get the matching system cursor, the way the X11 build's
-    // cursor font did.
+    // cursor font did: horizontal, vertical, forward diagonal (top-left /
+    // bottom-right) and backward diagonal (top-right / bottom-left).
     Client* edgeClient = nullptr;
     const int edge = hitEdge(x, y, &edgeClient);
     if (edge == 1 || edge == 2) setCursor(2);
     else if (edge == 4 || edge == 8) setCursor(3);
-    else if (edge == 5 || edge == 4 + 1) setCursor(4);
-    else if (edge == 8 + 2 || edge == 4 + 2) setCursor(5);
+    else if (edge == 5 || edge == 10) setCursor(4);
+    else if (edge == 6 || edge == 9) setCursor(5);
     else setCursor(0);
+
+    // A motion that changed shell state (a drag, a hover, a resize) should be
+    // on screen at the next possible frame instead of waiting for the 16ms
+    // animation tick; wlroots coalesces the requests.
+    if (dirty) requestFrame();
 }
 
 void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
@@ -160,12 +196,33 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
         default: break;
     }
 
+    // A seat grab (an xdg popup menu, a drag-and-drop session) owns the pointer
+    // until it ends itself. Route the button through the seat so wlroots serves
+    // it to the grab: that is what dismisses a client's context menu when the
+    // user clicks outside it. Without this the click was consumed by the shell
+    // (or dropped on the desktop) and the menu stayed open.
+    if (seat && seat->pointer_state.grab &&
+        seat->pointer_state.grab != seat->pointer_state.default_grab) {
+        pointerSentPress = pressed;
+        wlr_seat_pointer_notify_button(seat, time, evdevButton,
+                                       pressed ? WL_POINTER_BUTTON_STATE_PRESSED
+                                               : WL_POINTER_BUTTON_STATE_RELEASED);
+        requestFrame();
+        return;
+    }
+
     if (!pressed) {
         if (pointerSentPress) {
             pointerSentPress = false;
             if (pointerSurface)
                 wlr_seat_pointer_notify_button(seat, time, evdevButton,
                                                WL_POINTER_BUTTON_STATE_RELEASED);
+            // A client starts its own move/resize from xdg_toplevel.move/resize
+            // *after* receiving this press. Nothing else ends that drag: the
+            // release is consumed by the press-forwarding branch, so without
+            // this the compositor stayed in drag mode forever and every later
+            // motion kept moving the window instead of reaching the client.
+            if (dragClient) endDrag(x, y);
             requestFrame();
             return;
         }
@@ -178,8 +235,15 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
     const bool overTaskbar = y >= screenH - metrics::taskbarH;
     Client* edgeClient = nullptr;
     const int edge = hitEdge(x, y, &edgeClient);
+    Client* chromeClient = chromeAt(x, y);
     const bool shell = overlayOpen() || settingsOpen || modeSwitching || modDrag ||
-                       overTaskbar || chromeAt(x, y) || edge != 0;
+                       overTaskbar || chromeClient || edge != 0;
+    if (traceInput()) {
+        log("press b%u at (%d,%d) screen=%dx%d taskbar=%d overlay=%d chrome=%p edge=%d "
+            "shell=%d",
+            button, x, y, screenW, screenH, metrics::taskbarH, int(overlayOpen()),
+            (void*)chromeClient, edge, int(shell));
+    }
 
     if (!shell) {
         struct wlr_surface* popupSurface = nullptr;
@@ -198,9 +262,17 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
 
     Client* c = contentAt(x, y);
     if (c && !shell) {
-        const Rect r = clientRect(c);
+        double sx = 0.0, sy = 0.0;
+        struct wlr_surface* leaf = contentSurfaceAt(c, x, y, &sx, &sy);
+        if (!leaf && c->surface) {
+            const Rect r = clientRect(c);
+            const struct wlr_box g = c->xdg ? c->xdg->current.geometry : wlr_box{0, 0, 0, 0};
+            leaf = c->surface;
+            sx = double(x - r.x + g.x);
+            sy = double(y - r.y + g.y);
+        }
         focusClient(c, true);
-        setPointerFocus(c->surface, double(x - r.x), double(y - r.y));
+        setPointerFocus(leaf, sx, sy);
         pointerSentPress = true;
         wlr_seat_pointer_notify_button(seat, time, evdevButton,
                                        WL_POINTER_BUTTON_STATE_PRESSED);
@@ -214,6 +286,15 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
 }
 
 void Manager::onPointerAxis(double delta) {
+    // Menus and drag sessions grabs own the pointer; send the scroll through the
+    // seat so the grab (a popup's scrollable menu, a drag source) receives it.
+    if (seat && seat->pointer_state.grab &&
+        seat->pointer_state.grab != seat->pointer_state.default_grab) {
+        wlr_seat_pointer_notify_axis(seat, nowMs32(), WL_POINTER_AXIS_VERTICAL_SCROLL,
+                                     delta, 0, WL_POINTER_AXIS_SOURCE_WHEEL,
+                                     WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+        return;
+    }
     if (pointerY >= screenH - metrics::taskbarH || overlayOpen()) {
         if (pointerY >= screenH - metrics::taskbarH) cycleTaskbar(delta > 0);
         return;
@@ -233,6 +314,20 @@ void Manager::onKey(uint32_t keycode, uint32_t modifiers, bool pressed) {
                                          sizeof buf - 1);
     std::string typed;
     if (n > 0) typed.assign(buf, size_t(n));
+
+    // Releasing Alt commits the Alt-Tab choice, exactly like the X11 build
+    // (which watches Alt's KeyRelease): the switcher is a hold-to-cycle UI, not
+    // something that waits for Return or a click.
+    if (!pressed && altTabOpen && (sym == XK_Alt_L || sym == XK_Alt_R)) {
+        if (altTabIndex >= 0 && altTabIndex < int(altTabOrder.size())) {
+            Client* target = altTabOrder[size_t(altTabIndex)];
+            focusClient(target, true);
+            restoreClient(target);
+        }
+        closeOverlays();
+        requestFrame();
+        return;
+    }
 
     // The shell keeps the keyboard while a flyout, search field, rename field or
     // the tablet home screen is up. The Win/Alt shortcuts work anywhere.
@@ -265,6 +360,7 @@ void Manager::beginInteractiveResize(Client* c, uint32_t edges) {
 
 // === PORTED INPUT ===
 void Manager::onShellButtonPress(int x, int y, unsigned button, Time time, unsigned state) {
+    if (traceInput()) log("shell press b%u at (%d,%d)", button, x, y);
 
     // The mode transition splash swallows input while it plays so a stray click
     // cannot land on a shell that is about to be replaced.
@@ -1310,6 +1406,7 @@ Client* Manager::chromeAt(int x, int y) const {
 // "the click reached the overlay" path and the "the click reached a client that
 // was sitting on top of our chrome" path funnel through here.
 bool Manager::handleChromePress(int x, int y, unsigned button, Time time) {
+    if (traceInput()) log("chrome press b%u at (%d,%d)", button, x, y);
     // The taskbar's edge is grabbed before anything else on the bar, because the
     // grip reaches above the bar as well as into it. It is checked ahead of the
     // taskbar strip below for the same reason.
@@ -1519,6 +1616,7 @@ int Manager::desktopItemAt(int x, int y) const {
 bool Manager::handleDesktopPress(int x, int y, Time time) {
     (void)time;
     const int index = desktopItemAt(x, y);
+    if (traceInput()) log("desktop press at (%d,%d) item=%d", x, y, index);
     if (index >= 0) {
         selectedDesktopIcon = index;
         hoverDesktopIcon = index;

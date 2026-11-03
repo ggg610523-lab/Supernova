@@ -1,0 +1,4 @@
+/home/mango/Desktop/mangoSigma/Supernova (Copy)/build-dbg/CMakeFiles/win11wm.dir
+/home/mango/Desktop/mangoSigma/Supernova (Copy)/build-dbg/CMakeFiles/win11wm-wl.dir
+/home/mango/Desktop/mangoSigma/Supernova (Copy)/build-dbg/CMakeFiles/edit_cache.dir
+/home/mango/Desktop/mangoSigma/Supernova (Copy)/build-dbg/CMakeFiles/rebuild_cache.dir

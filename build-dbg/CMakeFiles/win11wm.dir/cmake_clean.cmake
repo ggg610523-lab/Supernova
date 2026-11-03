@@ -1,0 +1,40 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/win11wm.dir/link.d"
+  "CMakeFiles/win11wm.dir/src/main.cpp.o"
+  "CMakeFiles/win11wm.dir/src/main.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/apps.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/apps.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/compositor.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/compositor.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/controlcenter.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/controlcenter.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/draw.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/draw.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/icons.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/icons.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/input.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/input.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/manager.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/manager.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/png.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/png.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/settings.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/settings.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/sysctl.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/sysctl.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/tablet.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/tablet.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/text.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/text.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/widgets.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/widgets.cpp.o.d"
+  "CMakeFiles/win11wm.dir/src/wm/windows.cpp.o"
+  "CMakeFiles/win11wm.dir/src/wm/windows.cpp.o.d"
+  "win11wm"
+  "win11wm.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/win11wm.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()
