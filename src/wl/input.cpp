@@ -24,6 +24,14 @@ bool traceInput() {
     return on;
 }
 
+// How the screen edge gives way under a window gesture. A mouse never leaves the
+// screen, so the give has to start *before* the border: within kEdgeKnee pixels
+// of it the frame trails the pointer by up to kEdgeGive. Past the border the
+// iOS overscroll curve takes over, so however far the pointer is pushed the
+// frame never leaves by more than ~half a knee.
+constexpr double kEdgeKnee = 140.0;
+constexpr double kEdgeGive = 26.0;
+
 const char* buttonName(unsigned b) {
     switch (b) {
         case Button1: return "Button1";
@@ -107,7 +115,7 @@ void Manager::setPointerFocus(struct wlr_surface* surface, double sx, double sy)
 
 bool Manager::shellHasKeyboard() const {
     if (settingsOpen || startOpen || ccOpen || altTabOpen || taskViewOpen || contextOpen) return true;
-    if (confirmDeleteOpen || desktopRenameItem >= 0) return true;
+    if (confirmDeleteOpen || desktopRenameItem >= 0 || smartRenameWidget >= 0) return true;
     if (settingsClient && settingsClient->internalSettings) return true;
     if (tabletMode) return true;
     return false;
@@ -388,7 +396,7 @@ void Manager::onShellButtonPress(int x, int y, unsigned button, Time time, unsig
     // The desktop's folder dialogs are modal and outrank everything below: they
     // hold the pointer and the keyboard, so not even an Alt+drag can move a window
     // out from under the question the user is being asked.
-    if (confirmDeleteOpen || desktopRenameItem >= 0) {
+    if (confirmDeleteOpen || desktopRenameItem >= 0 || smartRenameWidget >= 0) {
         handleOverlayPress(x, y, button, time);
         return;
     }
@@ -969,6 +977,42 @@ void Manager::onKeyPressWithText(uint32_t sym, unsigned mods, const std::string&
         }
         return;
     }
+    // Naming a Smart Apps folder: the same in-place field, over the card's own
+    // title band rather than an icon label.
+    if (smartRenameWidget >= 0) {
+        if (sym == XK_Escape) {
+            cancelSmartRename();
+            return;
+        }
+        if (sym == XK_Return || sym == XK_KP_Enter) {
+            commitSmartRename();
+            return;
+        }
+        if (sym == XK_BackSpace) {
+            if (!smartRenameText.empty()) {
+                smartRenameText.pop_back();
+                dirty = true;
+            }
+            return;
+        }
+        const char* field = typed.c_str();
+        const int n = int(typed.size());
+        bool printable = n > 0;
+        for (int i = 0; i < n && printable; ++i) {
+            const unsigned char ch = static_cast<unsigned char>(field[i]);
+            if (ch < 0x20 || ch == 0x7F) printable = false;
+        }
+        if (printable && smartRenameText.size() < 40)
+            smartRenameText.append(field, size_t(n));
+        dirty = true;
+        return;
+    }
+    // Escape closes a folder's edit mode; nothing behind it needs the key.
+    if (smartEdit >= 0 && sym == XK_Escape) {
+        smartEdit = -1;
+        dirty = true;
+        return;
+    }
 
     // Escape abandons a launcher reorder and puts the pins back as they were,
     // which is also what a lost button release leaves behind.
@@ -1135,6 +1179,19 @@ void Manager::applyContextAction(int index) {
     if (!contextClient) {
         int row = 0;
         if (contextWidget >= 0) {
+            // A Smart Apps folder can offer to take the app it was opened on out
+            // of the grid, and a name of its own, before the remove row.
+            if (contextWidget < int(widgets.size()) &&
+                widgets[size_t(contextWidget)].kind == WidgetKind::SmartApps) {
+                if (contextSmartApp >= 0 && index == row++) {
+                    smartAppsRemove(contextWidget, contextSmartApp);
+                    return;
+                }
+                if (index == row++) {
+                    beginSmartRename(contextWidget);
+                    return;
+                }
+            }
             if (index == row++) {
                 removeWidget(contextWidget);
                 saveDesktopLayout();
@@ -1168,6 +1225,7 @@ void Manager::applyContextAction(int index) {
         else if (index == row++) addWidget(WidgetKind::Calendar);
         else if (index == row++) addWidget(WidgetKind::Weather);
         else if (index == row++) addWidget(WidgetKind::DigitalClock);
+        else if (index == row++) addWidget(WidgetKind::SmartApps);
         else if (index == row++) toggleDesktopNoOverlap();
         saveDesktopLayout();
         return;
@@ -1501,6 +1559,12 @@ void Manager::handleOverlayPress(int x, int y, unsigned button, Time time) {
         if (!desktopRenameRect().contains(x, y)) cancelDesktopRename();
         return;
     }
+    if (smartRenameWidget >= 0) {
+        if (button != Button1) return;
+        // The same rule the desktop's own folder field follows: typing, or away.
+        if (!smartRenameRect().contains(x, y)) cancelSmartRename();
+        return;
+    }
     // Control Centre stays open when a control is used, exactly as iOS does;
     // only a press outside the panel dismisses it.
     if (ccOpen) {
@@ -1714,6 +1778,26 @@ void Manager::updateDesktopIconDrag(int x, int y) {
 void Manager::endDesktopIconDrag(int x, int y, unsigned button) {
     const int index = dragDesktopIcon;
     const bool dragged = desktopIconDragging;
+    // Dropping a launcher -- or a whole folder -- on a Smart Apps card hands it
+    // over: it leaves the desktop and from then on is reachable through that card
+    // alone. Its icon flies into the cell it took, which is the animation that
+    // marks the hand-over.
+    if (dragged && index >= 0 && index < int(desktopItems.size())) {
+        const int target = smartAppsDropTarget(x, y);
+        if (target >= 0) {
+            const DesktopItem taken = desktopItems[size_t(index)];
+            const Rect cell = index < int(desktopIconDraw.size())
+                                  ? desktopIconDraw[size_t(index)]
+                                  : desktopIconRects[size_t(index)];
+            const Rect fromIcon{cell.x + (cell.w - 48) / 2, cell.y + 8, 48, 48};
+            dragDesktopIcon = -1;
+            desktopIconDragging = false;
+            ungrabPointer();
+            smartAppsTake(target, taken, fromIcon);
+            dirty = true;
+            return;
+        }
+    }
     // A real drop carries the pointer's speed into the springs: the icon coasts a
     // little past where it was let go, then the spring reels it back, which is
     // what makes a flick feel weighted rather than dead-stopped.
@@ -1940,11 +2024,12 @@ void Manager::beginMove(Client* c, int x, int y) {
     dragEdge = 0;
     dragGrab = Point{x - c->frame.x, y - c->frame.y};
     dragFrameStart = c->frame;
-    // Start a fresh velocity estimate: the flick speed only means something
-    // relative to when the pointer was last seen.
-    dragLastX = x;
-    dragLastY = y;
-    dragLastMs = nowMs();
+    // Start a fresh velocity estimate: the release speed is read from a window
+    // of the pointer's own samples, so it starts with the press itself.
+    dragTrackerX.reset();
+    dragTrackerY.reset();
+    dragTrackerX.push(double(x), nowMs());
+    dragTrackerY.push(double(y), nowMs());
     dragVelX = dragVelY = 0.0;
     snapZonePreview = kSnapNone;
     raiseClient(c);
@@ -1963,41 +2048,71 @@ void Manager::beginResize(Client* c, int edge, int x, int y) {
     dragIsMove = false;
     dragEdge = edge;
     dragFrameStart = c->frame;
+    dragTrackerX.reset();
+    dragTrackerY.reset();
+    dragTrackerX.push(double(x), nowMs());
+    dragTrackerY.push(double(y), nowMs());
+    dragVelX = dragVelY = 0.0;
     raiseClient(c);
     dirty = true;
+}
+
+// The frame a resize drag produces for the pointer at (x, y). `stretch` (0..1)
+// lets the dragged edge fall behind the pointer in the last stretch before a
+// screen border -- the elastic a mouse can actually reach, because the pointer
+// itself never leaves the screen -- and zero puts the edge back exactly under
+// the pointer, which is what the release settles to.
+Rect Manager::dragResizeFrame(const Client* c, int edge, int x, int y, double stretch) const {
+    const double give = kEdgeGive * stretch;
+    const double px = motion::elasticEdge(double(x), 0.0, double(screenW), kEdgeKnee, give);
+    const double py = motion::elasticEdge(double(y), 0.0, double(screenH), kEdgeKnee, give);
+    int x1 = dragFrameStart.x, y1 = dragFrameStart.y;
+    int x2 = dragFrameStart.right(), y2 = dragFrameStart.bottom();
+    if (edge & 1) x1 = int(std::lround(px));
+    if (edge & 2) x2 = int(std::lround(px));
+    if (edge & 4) y1 = int(std::lround(py));
+    if (edge & 8) y2 = int(std::lround(py));
+    // Respect the client's own minimum size.
+    const int minW = c->minW + 2 * metrics::kBorder;
+    const int minH = c->minH + c->captionH + metrics::kBorder;
+    if (x2 - x1 < minW) {
+        if (edge & 1) x1 = x2 - minW;
+        else x2 = x1 + minW;
+    }
+    if (y2 - y1 < minH) {
+        if (edge & 4) y1 = y2 - minH;
+        else y2 = y1 + minH;
+    }
+    return Rect{x1, y1, x2 - x1, y2 - y1};
 }
 
 void Manager::updateDrag(int x, int y) {
     Client* c = dragClient;
     if (!c || !c->alive) return;
 
+    // One release-velocity tracker for the gesture, whatever it is doing: the
+    // pointer's own samples, which become the inertia handed to the springs.
+    const double now = nowMs();
+    dragTrackerX.push(double(x), now);
+    dragTrackerY.push(double(y), now);
+
     if (dragIsMove) {
         // Pure translation: the frame moves, the client size never changes, so
         // this costs one XMoveWindow and a re-draw. Nothing else.
         const double rawX = double(x - dragGrab.x);
         const double rawY = double(y - dragGrab.y);
-        // The frame may be pulled a little past the screen edge, with growing
-        // resistance (motion::rubberBand), and springs back on release. The
-        // bounds keep a strip of the caption reachable, like Windows does.
-        const double w = double(c->frame.w);
+        // The frame's rest span is the screen minus its own size. Within the
+        // last stretch before a border it starts to trail the pointer, and past
+        // the border it is rubber-banded, so the screen edge is pressed into
+        // rather than hit; the release springs all of it away.
+        const double w = double(c->frame.w), h = double(c->frame.h);
+        double loX, hiX, loY, hiY;
+        motion::boxBounds(double(screenW), w, &loX, &hiX);
+        motion::boxBounds(double(screenH), h, &loY, &hiY);
         c->frame.x = int(std::lround(
-            motion::rubberBand(rawX, 90.0 - w, double(screenW) - 90.0, w)));
+            motion::elasticEdge(rawX, loX, hiX, kEdgeKnee, kEdgeGive)));
         c->frame.y = int(std::lround(
-            motion::rubberBand(rawY, 0.0, double(screenH), double(c->frame.h))));
-        // Estimate the pointer's speed so the release can carry it into the
-        // springs. A short exponential average keeps one jittery motion event
-        // from flinging the window across the screen.
-        const double now = nowMs();
-        const double dts = (now - dragLastMs) / 1000.0;
-        if (dts > 1e-3 && dts < 0.2) {
-            dragVelX = 0.65 * dragVelX + 0.35 * double(x - dragLastX) / dts;
-            dragVelY = 0.65 * dragVelY + 0.35 * double(y - dragLastY) / dts;
-        } else if (dts >= 0.2) {
-            dragVelX = dragVelY = 0.0;
-        }
-        dragLastMs = now;
-        dragLastX = x;
-        dragLastY = y;
+            motion::elasticEdge(rawY, loY, hiY, kEdgeKnee, kEdgeGive)));
         // While the window is held it tracks the pointer exactly: settle the
         // springs rather than integrating them, so there is no lag.
         settleGeometry(c);
@@ -2008,24 +2123,11 @@ void Manager::updateDrag(int x, int y) {
             dirty = true;
         }
     } else {
-        int x1 = dragFrameStart.x, y1 = dragFrameStart.y;
-        int x2 = dragFrameStart.right(), y2 = dragFrameStart.bottom();
-        if (dragEdge & 1) x1 = x;
-        if (dragEdge & 2) x2 = x;
-        if (dragEdge & 4) y1 = y;
-        if (dragEdge & 8) y2 = y;
-        // Respect the client's own minimum size.
-        const int minW = c->minW + 2 * metrics::kBorder;
-        const int minH = c->minH + c->captionH + metrics::kBorder;
-        if (x2 - x1 < minW) {
-            if (dragEdge & 1) x1 = x2 - minW;
-            else x2 = x1 + minW;
-        }
-        if (y2 - y1 < minH) {
-            if (dragEdge & 4) y1 = y2 - minH;
-            else y2 = y1 + minH;
-        }
-        c->frame = Rect{x1, y1, x2 - x1, y2 - y1};
+        // The edge gives ground as it nears a screen border: it keeps following
+        // the pointer, but each pixel of remaining travel buys less, so the
+        // border is pressed into rather than hit. The release springs the last
+        // of that give away.
+        c->frame = dragResizeFrame(c, dragEdge, x, y, 1.0);
         // syncClientGeometry sees a size change and invalidates the pixmap; the
         // next frame re-binds it, so a resize costs one pixmap per frame rather
         // than one per motion event.
@@ -2049,6 +2151,7 @@ void Manager::endDrag(int x, int y) {
     Client* c = dragClient;
     if (!c) return;
     const bool wasMove = dragIsMove;
+    const int edge = dragEdge;  // kept: the release needs to know which edges moved
     dragClient = nullptr;
     dragIsMove = false;
     dragEdge = 0;
@@ -2058,6 +2161,13 @@ void Manager::endDrag(int x, int y) {
         snapZonePreview = kSnapNone;
         return;
     }
+    // The gesture's speed at the moment of release, before any of it is used.
+    const double now = nowMs();
+    dragVelX = dragTrackerX.velocity(now);
+    dragVelY = dragTrackerY.velocity(now);
+    constexpr double kMaxFlick = 1400.0;  // px/s
+    const double flickX = motion::clamp(dragVelX, -kMaxFlick, kMaxFlick);
+    const double flickY = motion::clamp(dragVelY, -kMaxFlick, kMaxFlick);
 
     if (wasMove) {
         const int zone = snapZoneFor(x, y);
@@ -2066,20 +2176,57 @@ void Manager::endDrag(int x, int y) {
             snapClient(c, zone);
             return;
         }
-        // Rubber-band settles back into the work area, carrying the release
-        // speed into the springs (inertia) so a flick glides to rest instead of
-        // stopping dead. The drag left the springs settled at the (possibly
-        // stretched) position, so they already hold the "from" and the clamped
-        // frame is the target.
-        c->frame = clampRect(c->frame, Rect{0, 0, screenW, screenH});
+        // The drag may have banded the frame past the screen edge and may be
+        // trailing the pointer by the edge give. The release hands the springs
+        // the *rest* position -- flush inside the screen -- plus the pointer's
+        // own speed, so the frame closes the give and settles instead of being
+        // placed by a clamp.
+        const double rawX = double(x - dragGrab.x);
+        const double rawY = double(y - dragGrab.y);
+        double loX, hiX, loY, hiY;
+        motion::boxBounds(double(screenW), double(c->frame.w), &loX, &hiX);
+        motion::boxBounds(double(screenH), double(c->frame.h), &loY, &hiY);
+        c->frame.x = int(std::lround(motion::clamp(rawX, loX, hiX)));
+        c->frame.y = int(std::lround(motion::clamp(rawY, loY, hiY)));
+        // A flick still pushing into the wall is absorbed by it; the rest of the
+        // release speed goes into the springs, so the window glides.
+        const double vx = motion::releaseVelocity(flickX, rawX, loX, hiX);
+        const double vy = motion::releaseVelocity(flickY, rawY, loY, hiY);
         if (!c->geoLive) settleGeometry(c);
-        constexpr double kMaxFlick = 1400.0;  // px/s
-        c->geo.setVelocity(motion::clamp(dragVelX, -kMaxFlick, kMaxFlick),
-                           motion::clamp(dragVelY, -kMaxFlick, kMaxFlick), 0.0, 0.0);
+        c->geo.setVelocity(vx, vy, 0.0, 0.0);
         applyFrame(c, true);
         syncClientGeometry(c);
         updateStateAtoms(c);
     } else {
+        // Where the edge *would* be without the drag's elasticity: the pointer's
+        // own position. The frame is left where the drag had it, so the spring
+        // closes the stretched last stretch on the way there, carrying the
+        // pointer's speed into the size channels -- a dragged left edge moves the
+        // origin, a dragged right edge only the width.
+        Rect target = dragResizeFrame(c, edge, x, y, 0.0);
+        if (target.x < 0) {
+            target.w += target.x;
+            target.x = 0;
+        }
+        if (target.y < 0) {
+            target.h += target.y;
+            target.y = 0;
+        }
+        if (target.right() > screenW) target.w = screenW - target.x;
+        if (target.bottom() > screenH) target.h = screenH - target.y;
+        target.w = std::max(target.w, c->minW + 2 * metrics::kBorder);
+        target.h = std::max(target.h, c->minH + c->captionH + metrics::kBorder);
+        c->frame = target;
+        // Same rule at the border: an edge still being pushed into it stops
+        // there, and a release away from it carries the speed into the springs.
+        const double ax = motion::releaseVelocity(flickX, double(x), 0.0, double(screenW));
+        const double ay = motion::releaseVelocity(flickY, double(y), 0.0, double(screenH));
+        const double vw = (edge & 2 ? ax : 0.0) - (edge & 1 ? ax : 0.0);
+        const double vh = (edge & 8 ? ay : 0.0) - (edge & 4 ? ay : 0.0);
+        if (!c->geoLive) settleGeometry(c);
+        c->geo.setVelocity(edge & 1 ? ax : 0.0, edge & 4 ? ay : 0.0, vw, vh);
+        applyFrame(c, true);
+        syncClientGeometry(c);
         // Bind the pixmap for the final size.
         c->pixW = c->pixH = 0;
         ensurePixmap(c);

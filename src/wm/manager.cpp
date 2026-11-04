@@ -462,6 +462,9 @@ void Manager::tickAnimations(double now) {
 
     // The home screen's long press is a timer, not an event, so it is serviced here.
     if (tabletAnim > 0.5) updateTabletLongPress();
+    // The Smart Apps folder keeps its own clock: the dwell that opens edit mode,
+    // the board's jiggle and the springs that glide a resize.
+    tickSmartApps(now, dtMs);
 
     // The open folder eases in and out, and the sheet is laid out as it moves so
     // its cells are always where they are painted.
@@ -2532,8 +2535,19 @@ void Manager::openDesktopMenu(int x, int y) {
     contextDesktop = desktopItemAt(x, y);
     contextPin = -1;
     contextApp = -1;
+    contextSmartApp = -1;
     contextItems.clear();
-    if (contextWidget >= 0) contextItems.push_back("Remove Widget");
+    if (contextWidget >= 0) {
+        // A Smart Apps folder is renamed where it sits; the others have no name.
+        if (contextWidget < int(widgets.size()) &&
+            widgets[size_t(contextWidget)].kind == WidgetKind::SmartApps) {
+            // Opened on an app, the menu can take that one out of the folder.
+            contextSmartApp = smartAppsAppAt(contextWidget, x, y);
+            if (contextSmartApp >= 0) contextItems.push_back("Remove App");
+            contextItems.push_back("Rename Widget");
+        }
+        contextItems.push_back("Remove Widget");
+    }
     // Only a folder can be renamed or deleted as a folder. A plain file is the
     // user's, and this menu does not manage files.
     if (contextDesktop >= 0 && contextDesktop < int(desktopItems.size()) &&
@@ -2547,6 +2561,7 @@ void Manager::openDesktopMenu(int x, int y) {
     contextItems.push_back("Add Calendar Widget");
     contextItems.push_back("Add Weather Widget");
     contextItems.push_back("Add Digital Clock Widget");
+    contextItems.push_back("Add Smart Apps Widget");
     // The desktop no-overlap guard, shown as the state it is in so the row both
     // reports and flips it.
     contextItems.push_back(desktopNoOverlap ? "Prevent Overlap: On" : "Prevent Overlap: Off");

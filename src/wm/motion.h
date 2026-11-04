@@ -588,6 +588,59 @@ inline double rubberBand(double x, double lo, double hi, double dim, double c = 
     return x;
 }
 
+// The elastic map a resize drags its edge through. A mouse never leaves the
+// screen, so a frame edge driven straight from the pointer meets the border as a
+// hard wall: there is no overshoot left to band. Instead the last `knee` pixels
+// of pointer travel are spent stretching -- the edge falls behind the pointer by
+// up to `lag` as it reaches the border -- and the release lets the spring close
+// that gap, so the edge arrives at the screen with momentum instead of stopping
+// dead. Past the border the ordinary overscroll band takes over, for a pointer
+// that can leave the output.
+inline double elasticEdge(double x, double lo, double hi, double knee, double lag) {
+    if (x < lo) return lo - rubberBand(lo - x, knee);
+    if (x > hi) return hi + rubberBand(x - hi, knee);
+    if (lag <= 0.0) return x;
+    const double toHi = hi - x;
+    const double toLo = x - lo;
+    double back = 0.0;  // how far the edge is behind the pointer
+    bool nearHi = false;
+    if (toHi < knee) {
+        const double u = toHi / knee;  // 0 at the border, 1 where the knee starts
+        back = lag * (1.0 - u) * (1.0 - u);
+        nearHi = true;
+    }
+    if (toLo < knee) {
+        const double u = toLo / knee;
+        const double below = lag * (1.0 - u) * (1.0 - u);
+        if (below > back) {
+            back = below;
+            nearHi = false;
+        }
+    }
+    return nearHi ? x - back : x + back;
+}
+
+// The span a box of `size` may rest in on a `screen`-sized axis: flush inside the
+// edges when it fits, and anywhere that still shows part of it when it does not.
+// A move drag bands past these bounds and springs back onto them, so the screen
+// edge is a wall with give rather than a clamp.
+inline void boxBounds(double screen, double size, double* lo, double* hi) {
+    const double slack = screen - size;
+    *lo = std::min(0.0, slack);
+    *hi = std::max(0.0, slack);
+}
+
+// A frame pushed against a wall must not be flung *through* it: the band's job is
+// to bring it back, so a release only keeps the velocity that is not absorbed by
+// the wall. `raw` is the position the unbanded gesture asks for, `v` its speed.
+// In the free area between the bounds nothing is dropped, which is what lets a
+// released window glide.
+inline double releaseVelocity(double v, double raw, double lo, double hi) {
+    if (raw <= lo && v < 0.0) return 0.0;
+    if (raw >= hi && v > 0.0) return 0.0;
+    return v;
+}
+
 // ==================================================== 8. Velocity-dependent blur
 //
 //   B = B0 + alpha |v|

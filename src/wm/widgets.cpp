@@ -234,7 +234,10 @@ void gradientPanel(Compositor& comp, const Rect& r, float radius, const Color& t
 }  // namespace
 
 Rect Manager::widgetGripRect(const Widget& w) const {
-    const int g = std::min(metrics::kWidgetGrip, std::min(w.rect.w, w.rect.h) / 2);
+    // A folder's grip is a touch larger: it resizes in whole cells, so the handle
+    // has to be easy to catch without accidentally grabbing an app icon.
+    const int base = w.kind == WidgetKind::SmartApps ? metrics::kSmartGrip : metrics::kWidgetGrip;
+    const int g = std::min(base, std::min(w.rect.w, w.rect.h) / 2);
     return Rect{w.rect.right() - g, w.rect.bottom() - g, g, g};
 }
 
@@ -445,6 +448,9 @@ void Manager::addWidget(WidgetKind kind) {
                 w = wide;
                 h = std::clamp(wide, 180, 340);
                 break;
+            case WidgetKind::SmartApps:
+                w = h = metrics::kSmartMin * metrics::kSmartCell;
+                break;
             default:
                 w = wide;
                 h = medH;
@@ -468,6 +474,12 @@ void Manager::addWidget(WidgetKind kind) {
             case WidgetKind::DigitalClock:
                 w = metrics::kWidgetDigitalW;
                 h = metrics::kWidgetDigitalH;
+                break;
+            case WidgetKind::SmartApps:
+                // A new folder opens at the Android launcher's default: two cells
+                // by two. The grip grows it up to 4x4 from there.
+                w = metrics::kSmartMin * metrics::kSmartCell;
+                h = metrics::kSmartMin * metrics::kSmartCell;
                 break;
         }
     }
@@ -506,6 +518,25 @@ void Manager::addWidget(WidgetKind kind) {
     x = std::clamp(x, metrics::kWidgetPad, std::max(metrics::kWidgetPad, screenW - w - metrics::kWidgetPad));
     y = std::clamp(y, top, std::max(top, bottom - h - metrics::kWidgetPad));
     widgets.push_back(Widget{kind, Rect{x, y, w, h}, page});
+    if (kind == WidgetKind::SmartApps) {
+        // A folder is empty on the first day only. It starts with the apps the
+        // user already keeps closest -- the taskbar pins, then the recent list --
+        // so the card is a working launcher the moment it appears rather than a
+        // blank sheet. Anything dropped on it from the desktop adds to them.
+        Widget& sw = widgets.back();
+        sw.name = "Smart Apps";
+        sw.cols = metrics::kSmartMin;
+        sw.rows = metrics::kSmartMin;
+        const auto add = [&sw](const AppEntry& a) {
+            if (sw.apps.size() >= 8) return;
+            for (const WidgetApp& e : sw.apps)
+                if (e.exec == a.exec && e.name == a.name) return;
+            if (a.exec.empty()) return;
+            sw.apps.push_back(WidgetApp{a.name, a.exec, std::string(), a.icon, a.wmClass});
+        };
+        for (const AppEntry& a : pinned) add(a);
+        for (const AppEntry& a : recents) add(a);
+    }
     if (kind == WidgetKind::Battery) refreshBattery(true);
     else if (kind == WidgetKind::Weather) refreshWeather(true);
     if (tabletMode) layoutTabletHome();
@@ -515,8 +546,22 @@ void Manager::addWidget(WidgetKind kind) {
 
 void Manager::removeWidget(int index) {
     if (index < 0 || index >= int(widgets.size())) return;
+    // Removing a Smart Apps folder puts everything it took off the desktop back:
+    // the card is a place to keep apps, not a place that swallows them.
+    if (widgets[size_t(index)].kind == WidgetKind::SmartApps) {
+        bool restored = false;
+        for (const WidgetApp& a : widgets[size_t(index)].apps)
+            if (!a.stash.empty()) restored |= restoreStashedEntry(a.stash);
+        if (restored) refreshDesktop();
+    }
     widgets.erase(widgets.begin() + index);
     if (dragWidget == index) dragWidget = -1;
+    if (smartEdit == index) smartEdit = -1;
+    else if (smartEdit > index) --smartEdit;
+    if (smartRenameWidget == index) cancelSmartRename();
+    else if (smartRenameWidget > index) --smartRenameWidget;
+    if (smartPanelWidget == index) smartPanelWidget = -1;
+    else if (smartPanelWidget > index) --smartPanelWidget;
     hoverWidget = -1;
     if (tabletMode) layoutTabletHome();
     else layoutDesktopIcons();
@@ -525,10 +570,23 @@ void Manager::removeWidget(int index) {
 
 bool Manager::handleWidgetPress(int x, int y, Time time) {
     const int i = widgetAt(x, y);
-    if (i < 0) return false;
+    if (i < 0) {
+        // A press on the bare wallpaper closes an open folder's edit mode.
+        if (smartEdit >= 0) {
+            smartEdit = -1;
+            dirty = true;
+        }
+        return false;
+    }
+    // Dropping the pointer on the grip always resizes, even on a folder whose
+    // icons fill the whole card: the handle wins over the app underneath it.
     const bool resize = widgetGripRect(widgets[i]).contains(x, y);
-    beginWidgetDrag(i, x, y, resize);
     selectedDesktopIcon = -1;
+    if (widgets[i].kind == WidgetKind::SmartApps) {
+        beginSmartPress(i, x, y, resize);
+        return true;
+    }
+    beginWidgetDrag(i, x, y, resize);
     return true;
 }
 
@@ -560,6 +618,9 @@ void Manager::beginWidgetDrag(int index, int x, int y, bool resize) {
 
 void Manager::updateWidgetDrag(int x, int y) {
     if (dragWidget < 0 || dragWidget >= int(widgets.size())) return;
+    // A Smart Apps card owns its resize and reorder gestures; anything else is an
+    // ordinary move, which falls through to the generic path below.
+    if (widgets[size_t(dragWidget)].kind == WidgetKind::SmartApps && smartAppsDrag(x, y)) return;
     Widget& w = widgets[dragWidget];
     const int bottom = tabletMode ? (tabletDockRect.empty() ? screenH - 46 : tabletDockRect.y - 6)
                                   : screenH - metrics::taskbarH;
@@ -613,6 +674,11 @@ void Manager::updateWidgetDrag(int x, int y) {
 
 void Manager::endWidgetDrag() {
     if (dragWidget < 0) return;
+    if (dragWidget < int(widgets.size()) &&
+        widgets[size_t(dragWidget)].kind == WidgetKind::SmartApps) {
+        smartAppsRelease();
+        return;
+    }
     // Tablet cards stay on their one home page; the desktop has no pages. The
     // grid is laid out again so the icons settle into their final cells with the
     // same spring the desktop uses.
@@ -689,6 +755,7 @@ void Manager::drawWidgets() {
             case WidgetKind::Calendar: drawCalendarWidget(w); break;
             case WidgetKind::Weather: drawWeatherWidget(w); break;
             case WidgetKind::DigitalClock: drawDigitalClock(w); break;
+            case WidgetKind::SmartApps: drawSmartApps(w, int(i)); break;
         }
         if (hot) {  // diagonal resize grip
             const Rect g = widgetGripRect(w);
@@ -698,6 +765,8 @@ void Manager::drawWidgets() {
             }
         }
     }
+    // The carried icon and the rename field float above every card.
+    drawSmartOverlay();
 }
 
 void Manager::drawClockWidget(const Widget& w) {

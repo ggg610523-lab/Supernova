@@ -355,6 +355,9 @@ private:
     void beginResize(Client* c, int edge, int x, int y);
     void updateDrag(int x, int y);
     void endDrag(int x, int y);
+    // The frame a resize drag produces for the pointer at (x, y); `stretch`
+    // is how much of the border's elasticity the drag is carrying.
+    Rect dragResizeFrame(const Client* c, int edge, int x, int y, double stretch) const;
     // Abort a drag without applying a snap: the window keeps the geometry the
     // drag last pushed, instead of being snapped to whatever (0,0) means.
     void cancelDrag();
@@ -596,6 +599,44 @@ private:
     void endWidgetDrag();
     void addWidget(WidgetKind kind);
     void removeWidget(int index);
+
+    // ---- Smart Apps folder widget (smartapps.cpp)
+    // One card holding a grid of live app icons: single click launches, long
+    // press enters an edit mode that reorders and removes, the corner grip snaps
+    // the card to whole 2..4 x 2..4 cells, and the header can be renamed.
+    void drawSmartApps(const Widget& w, int index);
+    void drawSmartOverlay();       // the carried icon and the rename field
+    void beginSmartPress(int index, int x, int y, bool resize);
+    // True when the gesture was the folder's own (a quantised resize or a
+    // reorder); false means it is an ordinary move of the whole card.
+    bool smartAppsDrag(int x, int y);
+    void smartAppsRelease();
+    void tickSmartApps(double now, double dtMs);
+    // The card a desktop icon dropped at (x,y) would land in, or -1. Used by the
+    // desktop icon drag on release so an icon can be dropped into a folder.
+    int smartAppsDropTarget(int x, int y) const;
+    // Takes a desktop entry -- a launcher or a whole folder -- into the card: the
+    // entry leaves the desktop for the shell's store, its apps join the grid, and
+    // its icon flies into the cell it landed in. `fromIcon` is the desktop cell it
+    // was let go from, which is where the animation starts.
+    bool smartAppsTake(int index, const DesktopItem& item, const Rect& fromIcon);
+    // Takes one app out of the folder, putting a stored launcher back on the
+    // desktop. Used by the edit-mode badge and the card's context menu.
+    bool smartAppsRemove(int index, int appIndex);
+    // The app a point lands on inside a card, or -1 (the context menu's test).
+    int smartAppsAppAt(int index, int x, int y) const;
+    // The rectangle the card is drawn at: the resting rect, or the animating one
+    // while it grows or shrinks. Painting, hit-testing and the carried icon all
+    // read this, which is what keeps the sheet and its apps moving as one.
+    Rect smartDrawnRect(const Widget& w, int index) const;
+    void seedSmartPanel(int index, const Rect& from);
+    // Renaming the folder in place, with the keyboard held -- the same field the
+    // desktop uses for its own folders, sized over the card's title band.
+    void beginSmartRename(int index);
+    void commitSmartRename();
+    void cancelSmartRename();
+    void drawSmartRename();
+    Rect smartRenameRect() const;   // the field, for the painter and the press test
     // Both halves of the desktop's arrangement -- the cards and the cells the
     // icons were dragged into -- written out together. Called whenever either
     // changes and again on the way out, so the desktop comes back as it was left.
@@ -774,12 +815,12 @@ private:
     Point dragGrab;         // pointer offset inside the frame when the drag began
     Rect dragFrameStart;
     bool dragWasMaximized = false;
-    // Pointer velocity while a move drag is live, in screen pixels per second.
-    // Smoothed across the last few motion events so a release carries a stable
-    // flick speed into the geometry springs (inertia).
+    // Release velocity of the gesture, in px/s, from the same tracker the page
+    // swipes use: displacement over the last ~100 ms, not one motion event. A
+    // drag-and-hold reads as zero, so it places instead of flinging.
     double dragVelX = 0.0, dragVelY = 0.0;
-    double dragLastMs = 0.0;
-    int dragLastX = 0, dragLastY = 0;
+    motion::VelocityTracker dragTrackerX;
+    motion::VelocityTracker dragTrackerY;
     int snapZonePreview = kSnapNone;
     int hoverEdge = 0;
     Client* hoverResizeClient = nullptr;
@@ -793,6 +834,7 @@ private:
     bool contextOpen = false;
     Client* contextClient = nullptr;   // null = the desktop (widget) menu
     int contextWidget = -1;            // widget the menu was opened on, or -1
+    int contextSmartApp = -1;          // app cell inside a Smart Apps card, or -1
     int contextPin = -1;               // pinned button the menu was opened on, or -1
     int contextApp = -1;               // index into apps (Launchpad tile), or -1
     Rect contextRect;
@@ -995,6 +1037,41 @@ private:
     int dragWidget = -1;          // widget being moved/resized, -1 when none
     bool widgetResizing = false;
     Point widgetGrab;             // pointer offset inside the widget at grab
+
+    // ---- Smart Apps folder widget (smartapps.cpp)
+    int smartEdit = -1;           // card open for editing, -1 when none
+    int smartPressWidget = -1;    // card the live press came down on
+    int smartPressSlot = -1;      // its cell (-2 = consumed by a badge)
+    Point smartPressPos;          // where the press landed (slop test)
+    double smartPressAt = 0.0;    // when, for the long press
+    bool smartPressMoved = false;
+    bool smartLongFired = false;
+    bool smartEditEntered = false;  // the dwell fired, so release must not launch
+    int smartDragFrom = -1;       // app index carried within the folder
+    int smartDragSlot = -1;       // cell it would drop into
+    bool smartDragMoving = false;
+    int smartDragW = 0, smartDragH = 0;
+    Point smartDragPos;           // the carried icon's top-left
+    int smartRenameWidget = -1;   // the card whose name is being typed
+    std::string smartRenameText;
+    // One animated rectangle per card, so a resize glides and the whole sheet --
+    // panel, cells, icons -- scales together. Only one card animates at a time.
+    motion::Spring2 smartPanelPos;
+    motion::Spring2 smartPanelSize;
+    int smartPanelWidget = -1;
+    // A launcher flying from the desktop into a folder: the accommodation
+    // animation that marks the add. Drawn above every card while it runs.
+    struct SmartFly {
+        Rect from, to;
+        std::string icon, wmClass, name;
+        int widget = -1;    // the card it is flying into
+        int appIndex = -1;  // the cell it is about to occupy, drawn once it lands
+        double start = 0.0, ms = 340.0;
+    };
+    std::vector<SmartFly> smartFlies;
+    int smartAcceptWidget = -1;   // card that just took something
+    double smartAcceptAt = 0.0;   // when, for its settle pulse
+
     int batteryPercent = -1;      // -1 = no battery present
     bool batteryCharging = false;
     bool batteryFull = false;

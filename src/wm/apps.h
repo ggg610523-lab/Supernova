@@ -153,6 +153,11 @@ bool ensureTabletFolder();
 // scraped.
 std::vector<DesktopItem> scanTabletFolder();
 
+// The .desktop launchers directly inside `dir`, in name order. This is what a
+// desktop folder hands over when it is dropped on a Smart Apps card: its apps
+// become the ones the card shows. Non-launchers and hidden files are ignored.
+std::vector<DesktopItem> scanDesktopFolder(const std::string& dir);
+
 // Whether a name may be used for a desktop entry. Empty is not a name, neither are
 // "." and "..", and a name holding a path separator would put the entry somewhere
 // else entirely. A leading dot is refused because scanDesktop() skips hidden files,
@@ -174,6 +179,21 @@ bool renameDesktopEntry(const std::string& path, const std::string& name);
 // inside it. This is the one call here that is not undoable, so the shell only
 // reaches it after the user has confirmed.
 bool deleteDesktopEntry(const std::string& path);
+
+// The Smart Apps store: launchers taken off the desktop by a Smart Apps folder
+// are moved here rather than deleted, so the desktop shows them only through
+// that folder and taking them out of it puts them back. Empty when no config
+// directory can be resolved.
+std::string smartStoreDir();
+
+// Moves one desktop entry -- a launcher file or a whole folder -- into the store.
+// Returns the new path, or "" when it could not be moved (in which case the
+// desktop is untouched). The entry disappears from the desktop at once.
+std::string stashDesktopEntry(const std::string& path);
+
+// Moves a stored entry back onto the desktop under a free name. False when the
+// entry is gone or the desktop directory cannot be written.
+bool restoreStashedEntry(const std::string& storedPath);
 
 // fork + setsid + sh -c: fully detached, so a crashed app never takes the WM
 // with it and the WM never has to reap anything it does not want to.

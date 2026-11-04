@@ -49,6 +49,7 @@ add_executable(win11wm
   src/wm/icons.cpp
   src/wm/png.cpp
   src/wm/widgets.cpp
+  src/wm/smartapps.cpp
   src/wm/tablet.cpp
   src/wm/settings.cpp
 )
@@ -108,6 +109,7 @@ if(WIN11WM_BUILD_WAYLAND)
     src/wm/draw.cpp
     src/wm/tablet.cpp
     src/wm/widgets.cpp
+    src/wm/smartapps.cpp
     src/wm/controlcenter.cpp
     src/wm/settings.cpp
     src/wm/apps.cpp

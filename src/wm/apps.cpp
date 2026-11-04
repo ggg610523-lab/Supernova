@@ -20,6 +20,10 @@
 namespace wm {
 namespace {
 
+// Defined further down, beside the other config-path helpers; the Smart Apps
+// store needs it before then.
+std::string configFile(const char* leaf);
+
 std::string lower(const std::string& s) {
     std::string out = s;
     for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -273,9 +277,10 @@ bool ensureTabletFolder() {
     return ::mkdir(dir.c_str(), 0755) == 0;
 }
 
-std::vector<DesktopItem> scanTabletFolder() {
+std::vector<DesktopItem> scanTabletFolder() { return scanDesktopFolder(tabletFolderDir()); }
+
+std::vector<DesktopItem> scanDesktopFolder(const std::string& dir) {
     std::vector<DesktopItem> items;
-    const std::string dir = tabletFolderDir();
     if (dir.empty()) return items;
     DIR* d = opendir(dir.c_str());
     if (!d) return items;
@@ -381,6 +386,87 @@ bool renameDesktopEntry(const std::string& path, const std::string& name) {
 bool deleteDesktopEntry(const std::string& path) {
     if (path.empty()) return false;
     return removeTree(path);
+}
+
+namespace {
+
+// "term.desktop" -> {"term", ".desktop"}: split so a freed name keeps its suffix.
+void splitExtension(const std::string& base, std::string* stem, std::string* ext) {
+    *stem = base;
+    *ext = ".desktop";
+    if (base.size() > 8 && base.compare(base.size() - 8, 8, ".desktop") == 0)
+        *stem = base.substr(0, base.size() - 8);
+    else
+        *ext = std::string();
+}
+
+std::string joinUnique(const std::string& dir, const std::string& stem, const std::string& ext) {
+    for (int n = 1; n < 1000; ++n) {
+        const std::string name = n == 1 ? stem + ext : stem + " " + std::to_string(n) + ext;
+        struct stat st {};
+        if (::stat((dir + "/" + name).c_str(), &st) != 0) return dir + "/" + name;
+    }
+    return {};
+}
+
+}  // namespace
+
+// The store lives beside the shell's other settings; keeping the launchers there
+// means the desktop can hand one over without deleting it.
+std::string smartStoreDir() {
+    const std::string leaf = configFile("smart-store");
+    if (leaf.empty()) return {};
+    // configFile() names the file; the directory above it has to exist before a
+    // rename can land in it.
+    const std::string win11wm = leaf.substr(0, leaf.rfind('/'));
+    if (!win11wm.empty()) {
+        const std::string config = win11wm.substr(0, win11wm.rfind('/'));
+        if (!config.empty()) ::mkdir(config.c_str(), 0700);
+        ::mkdir(win11wm.c_str(), 0700);
+    }
+    ::mkdir(leaf.c_str(), 0700);
+    return leaf;
+}
+
+std::string stashDesktopEntry(const std::string& path) {
+    const std::string dir = smartStoreDir();
+    if (dir.empty() || path.empty()) return {};
+    const size_t slash = path.rfind('/');
+    const std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (base.empty()) return {};
+    std::string stem, ext;
+    splitExtension(base, &stem, &ext);
+    // A folder has no launcher suffix to protect; its whole name is the stem.
+    struct stat st {};
+    if (::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        stem = base;
+        ext.clear();
+    }
+    const std::string dest = joinUnique(dir, stem, ext);
+    if (dest.empty()) return {};
+    if (::rename(path.c_str(), dest.c_str()) != 0) {
+        log("cannot move %s into the Smart Apps store: %s", path.c_str(), std::strerror(errno));
+        return {};
+    }
+    return dest;
+}
+
+bool restoreStashedEntry(const std::string& storedPath) {
+    const std::string dir = desktopDir();
+    if (dir.empty() || storedPath.empty()) return false;
+    struct stat st {};
+    if (::stat(storedPath.c_str(), &st) != 0) return false;
+    const size_t slash = storedPath.rfind('/');
+    const std::string base = slash == std::string::npos ? storedPath : storedPath.substr(slash + 1);
+    std::string stem, ext;
+    splitExtension(base, &stem, &ext);
+    if (S_ISDIR(st.st_mode)) {
+        stem = base;
+        ext.clear();
+    }
+    const std::string dest = joinUnique(dir, stem, ext);
+    if (dest.empty()) return false;
+    return ::rename(storedPath.c_str(), dest.c_str()) == 0;
 }
 
 std::vector<AppEntry> scanApps() {
@@ -969,6 +1055,7 @@ const char* widgetKindWord(WidgetKind k) {
         case WidgetKind::Calendar: return "calendar";
         case WidgetKind::Weather: return "weather";
         case WidgetKind::DigitalClock: return "digital";
+        case WidgetKind::SmartApps: return "smart";
     }
     return "clock";
 }
@@ -979,6 +1066,7 @@ bool widgetKindFromWord(const std::string& s, WidgetKind* out) {
     else if (s == "calendar") *out = WidgetKind::Calendar;
     else if (s == "weather") *out = WidgetKind::Weather;
     else if (s == "digital") *out = WidgetKind::DigitalClock;
+    else if (s == "smart") *out = WidgetKind::SmartApps;
     else return false;
     return true;
 }
@@ -1006,11 +1094,37 @@ std::optional<std::vector<Widget>> loadWidgetsNamed(const char* leaf) {
     if (!in) return std::nullopt;
 
     std::vector<Widget> out;
+    // A Smart Apps card is a header followed by its apps, so each one is read into
+    // `pending` and flushed when the next header (or the end of the file) turns up.
+    // The other kinds are a single line and are pushed straight through.
+    Widget pending;
+    bool inSmart = false;
+    auto flush = [&] {
+        if (!inSmart) return;
+        out.push_back(pending);
+        pending = Widget{};
+        inSmart = false;
+    };
+
     std::string line;
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty() || line[0] == '#') continue;
         const std::vector<std::string> f = splitFields(line);
+        if (inSmart && f[0] == "in" && f.size() >= 6) {
+            WidgetApp app;
+            app.name = f[1];
+            app.exec = f[2];
+            app.path = f[3];
+            app.icon = f[4];
+            app.wmClass = f[5];
+            if (f.size() > 6) app.stash = f[6];
+            // The same rule the desktop and Start menu live by: an entry with
+            // neither a command nor a path is not something that can be opened.
+            if (!app.exec.empty() || !app.path.empty()) pending.apps.push_back(std::move(app));
+            continue;
+        }
+        flush();
         if (f.size() < 6) continue;
         WidgetKind kind;
         int x = 0, y = 0, w = 0, h = 0, page = 0;
@@ -1023,8 +1137,23 @@ std::optional<std::vector<Widget>> loadWidgetsNamed(const char* leaf) {
         widget.kind = kind;
         widget.rect = Rect{x, y, w, h};
         widget.page = (fileInt(f[5], &page) && page > 0) ? page : 0;
+        if (kind == WidgetKind::SmartApps) {
+            // The grid travels with the card, so a resized folder comes back at the
+            // size it was left. A file hand-edited out of range is clamped rather
+            // than dropped: the card is still perfectly usable at 2x2.
+            int cols = 2, rows = 2;
+            if (f.size() > 6) fileInt(f[6], &cols);
+            if (f.size() > 7) fileInt(f[7], &rows);
+            widget.cols = std::clamp(cols, metrics::kSmartMin, metrics::kSmartMax);
+            widget.rows = std::clamp(rows, metrics::kSmartMin, metrics::kSmartMaxRows);
+            if (f.size() > 8) widget.name = f[8];
+            pending = std::move(widget);
+            inSmart = true;
+            continue;
+        }
         out.push_back(widget);
     }
+    flush();
     // A file that holds no recognisable card reads as no file at all: the default
     // set is a better desktop than an empty one, and a missing file is how the
     // very first session reads anyway.
@@ -1039,10 +1168,22 @@ bool saveWidgetsNamed(const char* leaf, const std::vector<Widget>& widgets) {
         return false;
     }
     std::ostringstream text;
-    text << "# win11wm widgets: kind, x, y, w, h, page\n";
+    text << "# win11wm widgets: kind, x, y, w, h, page[, cols, rows, name]\n";
     for (const Widget& w : widgets) {
         text << widgetKindWord(w.kind) << '\t' << w.rect.x << '\t' << w.rect.y << '\t'
-             << w.rect.w << '\t' << w.rect.h << '\t' << w.page << '\n';
+             << w.rect.w << '\t' << w.rect.h << '\t' << w.page;
+        if (w.kind == WidgetKind::SmartApps) {
+            text << '\t' << w.cols << '\t' << w.rows << '\t' << layoutField(w.name);
+        }
+        text << '\n';
+        // A Smart Apps card's contents follow it as "in" records, the same shape
+        // the tablet's own folders use: one app per line, a full snapshot of it.
+        if (w.kind != WidgetKind::SmartApps) continue;
+        for (const WidgetApp& a : w.apps) {
+            text << "in\t" << layoutField(a.name) << '\t' << layoutField(a.exec) << '\t'
+                 << layoutField(a.path) << '\t' << layoutField(a.icon) << '\t'
+                 << layoutField(a.wmClass) << '\t' << layoutField(a.stash) << '\n';
+        }
     }
     if (!writeFileAtomicImpl(path, text.str())) {
         log("cannot write the widgets to %s", path.c_str());

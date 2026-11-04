@@ -394,6 +394,26 @@ inline constexpr Color kWidgetGreen = rgb(0x30D158);          // iOS systemGreen
 inline constexpr Color kWidgetYellow = rgb(0xFFD60A);         // iOS systemYellow
 inline constexpr Color kWidgetRed = rgb(0xFF453A);            // iOS systemRed
 
+// The Smart Apps folder is the one widget that has to track the shell's mode:
+// it is a sheet of glass over the wallpaper with app icons sitting on it, so in
+// light mode it turns pale and its type darkens, while in dark mode it is the
+// near-black frosted panel the ColorOS and HarmonyOS folders use. These are
+// constexpr and picked by theme::isLight() at paint time, because applyMode()
+// only re-points the Fluent tokens.
+inline constexpr Color kSmartGlassDark = rgb(0x121216, 0.55f);
+inline constexpr Color kSmartGlassLight = rgb(0xF6F6FA, 0.64f);
+inline constexpr Color kSmartBorderDark = rgb(0xFFFFFF, 0.11f);
+inline constexpr Color kSmartBorderLight = rgb(0x000000, 0.09f);
+inline constexpr Color kSmartInkDark = rgb(0xFFFFFF, 0.97f);
+inline constexpr Color kSmartInkLight = rgb(0x16161A, 0.94f);
+inline constexpr Color kSmartSubDark = rgb(0xFFFFFF, 0.58f);
+inline constexpr Color kSmartSubLight = rgb(0x16161A, 0.52f);
+inline constexpr Color kSmartTileDark = rgb(0xFFFFFF, 0.10f);
+inline constexpr Color kSmartTileLight = rgb(0x000000, 0.06f);
+inline constexpr Color kSmartHotDark = rgb(0xFFFFFF, 0.12f);
+inline constexpr Color kSmartHotLight = rgb(0x000000, 0.07f);
+inline constexpr Color kSmartBadge = rgb(0x0C0C0F, 0.72f);
+
 // --- ring menu power discs -------------------------------------------------
 // The ring menu's power glyphs sit on dark grey discs, so a light panel (the
 // taskbar acrylic is the menu's own glass, light or dark) still shows the glyph
@@ -609,6 +629,17 @@ constexpr int kWidgetWeatherH = 168;
 constexpr int kWidgetDigitalW = 344;   // wide enough for a huge HH:MM
 constexpr int kWidgetDigitalH = 168;
 constexpr int kWidgetPad = 16;         // widget origin inset
+
+// --- Smart Apps folder widget ---------------------------------------------
+// One card is a grid of whole cells, so a resize always lands on the same
+// spacing. 104 is deliberately small: a 2x2 folder should read as a compact
+// tile, not take over the desktop, and the grip grows it to whatever the apps
+// inside actually need.
+constexpr int kSmartCell = 104;
+constexpr int kSmartMin = 1;           // a single cell is allowed: one app, one tile
+constexpr int kSmartMax = 6;           // most columns
+constexpr int kSmartMaxRows = 12;      // rows are free to grow tall; one grid, no pages
+constexpr int kSmartGrip = 22;         // the resize handle
 
 }  // namespace metrics
 
