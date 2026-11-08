@@ -491,7 +491,12 @@ void Manager::addWidget(WidgetKind kind) {
     // on the screen, and the icons reflow below the stack. The desktop still uses
     // its free desktop cascade, because a monitor has room to spread them out.
     const int page = 0;
-    int x = tabletMode ? (screenW - w) / 2 : screenW - w - metrics::kWidgetPad;
+    // A Smart Apps folder belongs with the desktop's icons, so it opens on the
+    // left rather than in the right-hand widget column; the other cards keep the
+    // monitor-sized cascade on the right, where they have always been.
+    const bool smart = kind == WidgetKind::SmartApps;
+    int x = tabletMode ? (screenW - w) / 2
+                       : (smart ? metrics::kWidgetPad : screenW - w - metrics::kWidgetPad);
     int y = top;
     if (tabletMode) {
         for (const Widget& o : widgets)
@@ -629,6 +634,8 @@ void Manager::updateWidgetDrag(int x, int y) {
     // the card stays on the home screen it was picked up from and the icons on
     // that page reflow around it as it moves.
     if (!widgetResizing) {
+        // The card follows the pointer exactly, clamped to the screen: it may
+        // pass over another card or over icons without shoving either aside.
         w.rect.x = std::clamp(x - widgetGrab.x, 0, std::max(0, screenW - w.rect.w));
         w.rect.y = std::clamp(y - widgetGrab.y, 0, std::max(0, bottom - w.rect.h));
         // With no-overlap on, a card is not allowed to sit on another card: the
@@ -664,9 +671,9 @@ void Manager::updateWidgetDrag(int x, int y) {
         w.rect.w = std::clamp(x - w.rect.x, metrics::kWidgetMin, std::max(metrics::kWidgetMin, screenW - w.rect.x));
         w.rect.h = std::clamp(y - w.rect.y, metrics::kWidgetMin, std::max(metrics::kWidgetMin, bottom - w.rect.y));
     }
-    // Recompute the icon grid on every motion step so the icons slide out of the
-    // widget's way live. The tablet uses its own page grid and springs, which is
-    // what gives it the same reflow animation as the desktop.
+    // The grid no longer depends on where the cards are, so a moving card leaves
+    // the icons (and the other cards) exactly where they were. The tablet's home
+    // layout is still refreshed -- it carries the dock and page state.
     if (tabletMode) layoutTabletHome();
     else layoutDesktopIcons();
     dirty = true;

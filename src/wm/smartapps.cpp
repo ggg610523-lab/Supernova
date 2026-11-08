@@ -77,7 +77,10 @@ SmartGrid smartGridIn(const Widget& w, const Rect& rect) {
 
     g.labelPx = (cellH >= 62 && cellW >= 50) ? 10 : 0;
     const int labelH = g.labelPx ? g.labelPx + 6 : 0;
-    g.icon = std::clamp(std::min(cellW - 8, cellH - labelH - 6), 16, 64);
+    // The icons fill their cells: a folder should read as a dense grid of apps,
+    // not a few small glyphs floating in glass. The ceiling keeps a single app in
+    // a big card from becoming a billboard.
+    g.icon = std::clamp(std::min(cellW - 8, cellH - labelH - 6), 18, 88);
     return g;
 }
 
@@ -448,6 +451,19 @@ void Manager::smartAppsRelease() {
     Widget& w = widgets[size_t(index)];
     const SmartGrid g = smartGridIn(w, smartDrawnRect(w, index));
     bool changed = false;
+    // A resize changes the saved grid even though no app moved, so it has to be
+    // written out on release just as a reorder is.
+    const bool resized = widgetResizing;
+    // A move is a layout change too: the cell the card now sits in is saved with
+    // it, exactly as for the other cards.
+    const bool moved = smartPressMoved && !smartDragMoving;
+    // Releasing close to the left edge parks the card there, flush with the
+    // desktop's own margin. Small cards belong to the column of apps, not to a
+    // floating spot in the middle of the wallpaper.
+    if (moved && w.rect.x <= 32) {
+        w.rect.x = metrics::kWidgetPad;
+        seedSmartPanel(index, smartDrawnRect(w, index));
+    }
 
     if (!widgetResizing && !smartPressMoved && !smartEditEntered) {
         if (smartPressSlot >= 0 && smartPressSlot < int(w.apps.size()) &&
@@ -511,7 +527,7 @@ void Manager::smartAppsRelease() {
     tabletDragEdge = 0;
     ungrabPointer();
     layoutDesktopIcons();
-    if (changed) saveDesktopLayout();
+    if (changed || resized || moved) saveDesktopLayout();
     dirty = true;
 }
 

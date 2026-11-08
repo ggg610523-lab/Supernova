@@ -2527,8 +2527,8 @@ void Manager::showContextMenu(Client* c, int x, int y) {
 
 // The desktop's own context menu, reusing the client menu plumbing. Its shape
 // follows what it was opened on: a card offers to be removed, a folder offers to
-// be renamed or deleted, and the create, widget and no-overlap entries are
-// always there. applyContextAction() walks the rows in this same order.
+// be renamed or deleted, and the create and widget entries are always there.
+// applyContextAction() walks the rows in this same order.
 void Manager::openDesktopMenu(int x, int y) {
     contextClient = nullptr;
     contextWidget = widgetAt(x, y);

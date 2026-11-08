@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "theme.h"
 
@@ -253,10 +254,12 @@ void Manager::layoutDesktopIcons() {
         log("grid: %zu item(s), %zu widget(s)", desktopItems.size(), widgets.size());
     desktopIconRects.assign(desktopItems.size(), Rect{});
     // Match the tablet home screen's icon edge and cell proportions, so an app
-    // does not change size when the same desktop is shown in tablet mode.
+    // does not change size when the same desktop is shown in tablet mode. The
+    // cell is only as wide as the icon plus its label: an oversized cell is what
+    // left a wide dead gutter between columns while the rows sat close together.
     const int edge = metrics::homeIconEdge(screenW, screenH);
-    const int cellW = edge + edge / 2 + 24, cellH = edge + 34;
-    const int gapX = 4, gapY = 2;
+    const int cellW = edge + 48, cellH = edge + 32;
+    const int gapX = 10, gapY = 10;
     const int marginX = 12, marginY = 8;
     const int usableH = screenH - metrics::taskbarH - marginY;
     const int rows = std::max(1, (usableH + gapY) / (cellH + gapY));
@@ -284,6 +287,7 @@ void Manager::layoutDesktopIcons() {
     // The grid slot nearest a point, so a nudged icon starts its search where the
     // user dropped it rather than back in the top-left corner.
     const int maxCol = std::max(0, (std::max(0, screenW - marginX) - cellW + gapX) / (cellW + gapX));
+    const int totalCells = std::max(1, (maxCol + 1) * rows);
     const auto cellIndexNear = [&](int px, int py) {
         const int col = std::clamp((px - marginX + (cellW + gapX) / 2) / (cellW + gapX), 0, maxCol);
         const int row = std::clamp((py - marginY + (cellH + gapY) / 2) / (cellH + gapY), 0, rows - 1);
@@ -327,21 +331,18 @@ void Manager::layoutDesktopIcons() {
     // starts the scan at its own slot rather than after the previous icon's, which
     // is what keeps the rest of the grid still: dragging one icon away frees its
     // slot without tugging every icon behind it across the desktop.
-    std::vector<bool> cellUsed;
+    std::vector<bool> cellUsed(size_t(totalCells), false);
     for (size_t i = 0; i < desktopItems.size(); ++i) {
         if (isPlaced[i]) continue;
-        int n = int(i);
-        Rect cell = cellAt(n);
-        for (int guard = 0; guard < 4096; ++guard) {
-            cell = cellAt(n);
-            if (size_t(n) >= cellUsed.size()) cellUsed.resize(size_t(n) + 1, false);
+        const int start = int(i) % totalCells;
+        int chosen = -1;
+        for (int step = 0; step < totalCells; ++step) {
+            const int n = (start + step) % totalCells;
+            const Rect cell = cellAt(n);
             bool blocked = cellUsed[size_t(n)];
             if (!blocked)
                 for (const Widget& w : widgets)
                     if (cell.inflated(8).intersects(w.rect)) {
-                        if (std::getenv("WIN11WM_DEBUG_GRID"))
-                            log("grid: item %zu cell %d,%d blocked by widget %d,%d %dx%d", i,
-                                cell.x, cell.y, w.rect.x, w.rect.y, w.rect.w, w.rect.h);
                         blocked = true;
                         break;
                     }
@@ -352,12 +353,12 @@ void Manager::layoutDesktopIcons() {
                         break;
                     }
             if (!blocked) {
+                chosen = n;
                 cellUsed[size_t(n)] = true;
                 break;
             }
-            ++n;
         }
-        desktopIconRects[i] = cell;
+        desktopIconRects[i] = cellAt(chosen >= 0 ? chosen : start);
     }
     // Keep the *shown* cells in step with the targets we just computed. Icons
     // that already existed keep their current on-screen position (they are eased
@@ -369,6 +370,23 @@ void Manager::layoutDesktopIcons() {
         desktopIconDraw.resize(desktopIconRects.size());
         for (size_t i = keep; i < desktopIconDraw.size(); ++i)
             desktopIconDraw[i] = desktopIconRects[i];
+    }
+    // Ellipsizing is a binary-search-ish sequence of FreeType measurements, so
+    // do it only when the names or the cell width change -- not on every layout
+    // pass while a widget is being dragged.
+    std::string labelKey = std::to_string(cellW);
+    for (const DesktopItem& item : desktopItems) {
+        labelKey.push_back('\x1f');
+        labelKey += item.name;
+    }
+    if (labelKey != desktopIconLabelKey) {
+        desktopIconLabelKey = std::move(labelKey);
+        desktopIconLabels.resize(desktopIconRects.size());
+        for (size_t i = 0; i < desktopIconRects.size() && i < desktopItems.size(); ++i)
+            desktopIconLabels[i] = ellipsize(text, desktopItems[i].name, 12,
+                                             desktopIconRects[i].w - 8);
+    } else {
+        desktopIconLabels.resize(desktopIconRects.size());
     }
 }
 
@@ -523,6 +541,13 @@ void Manager::drawDesktopIcons() {
     if (const char* v = std::getenv("WIN11WM_ICON_LABELS_N")) labelLimit = std::atoi(v);
     int labelsDrawn = 0;
 
+    // All desktop labels share one atlas texture. Without this each label costs
+    // two texture binds (shadow + text), and on the GLES2 Wayland renderer those
+    // per-texture flushes were the largest single frame-time cost. The strings
+    // themselves are cached by layoutDesktopIcons(), not measured here.
+    const TextAtlas* labelAtlas =
+        drawLabels ? &text.getAtlas(desktopIconLabels, 12, Weight::Regular) : nullptr;
+
     const auto drawOne = [&](size_t i, bool lifted) {
         const DesktopItem& item = desktopItems[i];
         // Draw the eased cell, not the target: this is what makes the icons
@@ -570,30 +595,46 @@ void Manager::drawDesktopIcons() {
                 drawAppTile(icon, item.name, iconRadius, tileTint(item.name), hovered);
             }
         }
-        if (!drawLabels) return;
-        if (labelLimit >= 0 && labelsDrawn >= labelLimit) return;
-        ++labelsDrawn;
-        const std::string label = ellipsize(text, item.name, 12, cell.w - 8);
-        if (label.empty()) return;
-        const TextTex t = text.get(label, 12, Weight::Regular);
-        if (!t.tex) return;
-        const int lx = cell.x + (cell.w - t.w) / 2;
-        const int ly = icon.bottom() + 6;
-        // The same 12px label and one-pixel shadow the tablet home screen uses,
-        // so labels read at the same weight in both modes.
-        comp.drawText(t, Rect{lx, ly + 1, t.w, t.h}, Color{0.f, 0.f, 0.f, 0.72f}, 1.0f);
-        comp.drawText(t, Rect{lx, ly, t.w, t.h}, theme::kDesktopLabel, 1.0f);
     };
 
-    // Draw everything but the carried icon first, then the carried icon on top of
-    // the stack so it is never clipped by a neighbour it passes over.
+    const auto drawLabel = [&](size_t i, bool lifted) {
+        if (!drawLabels || !labelAtlas || !labelAtlas->tex.tex) return;
+        if (labelLimit >= 0 && labelsDrawn >= labelLimit) return;
+        ++labelsDrawn;
+        if (i >= labelAtlas->entries.size()) return;
+        const TextAtlasEntry& e = labelAtlas->entries[i];
+        if (e.w <= 0 || e.h <= 0) return;
+        const Rect cell = desktopIconDraw[i];
+        const double lg = lifted ? lift : 0.0;
+        const int edge = metrics::homeIconEdge(screenW, screenH);
+        const int grow = int(std::lround(double(edge) * 0.10 * lg));
+        const int iconBottom = cell.y - grow / 2 + edge + grow;
+        const int lx = cell.x + (cell.w - e.w) / 2;
+        const int ly = iconBottom + 6;
+        // The same 12px label and one-pixel shadow the tablet home screen uses,
+        // so labels read at the same weight in both modes.
+        comp.drawTexUV(labelAtlas->tex.tex, Rect{lx, ly + 1, e.w, e.h}, e.u0, e.v0, e.u1,
+                       e.v1, 0.f, Color{0.f, 0.f, 0.f, 0.72f}, 1.0f, false, true);
+        comp.drawTexUV(labelAtlas->tex.tex, Rect{lx, ly, e.w, e.h}, e.u0, e.v0, e.u1, e.v1,
+                       0.f, theme::kDesktopLabel, 1.0f, false, true);
+    };
+
+    // Draw everything but the carried icon first, then all labels, then the
+    // carried icon on top of the stack. Grouping the labels lets every one of
+    // them share the atlas texture and collapse into a single batched draw.
     for (size_t i = 0; i < desktopItems.size() && i < desktopIconDraw.size(); ++i) {
         if (int(i) == dragDesktopIcon) continue;
         drawOne(i, false);
     }
+    for (size_t i = 0; i < desktopItems.size() && i < desktopIconDraw.size(); ++i) {
+        if (int(i) == dragDesktopIcon) continue;
+        drawLabel(i, false);
+    }
     if (dragDesktopIcon >= 0 && size_t(dragDesktopIcon) < desktopIconDraw.size() &&
-        size_t(dragDesktopIcon) < desktopItems.size())
+        size_t(dragDesktopIcon) < desktopItems.size()) {
+        drawLabel(size_t(dragDesktopIcon), true);
         drawOne(size_t(dragDesktopIcon), true);
+    }
 }
 
 // ---------------------------------------------------------------------------

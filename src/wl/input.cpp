@@ -24,6 +24,18 @@ bool traceInput() {
     return on;
 }
 
+// wl_pointer requires a frame event to close every enter/motion/button/axis
+// group. Without it clients receive the events but only process them when the
+// next unrelated event happens, which reads as input lag (especially during a
+// drag). The guard closes the group on every return path, including the ones
+// that hand focus back to the shell.
+struct PointerFrame {
+    struct wlr_seat* seat;
+    ~PointerFrame() {
+        if (seat) wlr_seat_pointer_notify_frame(seat);
+    }
+};
+
 // How the screen edge gives way under a window gesture. A mouse never leaves the
 // screen, so the give has to start *before* the border: within kEdgeKnee pixels
 // of it the frame trails the pointer by up to kEdgeGive. Past the border the
@@ -31,17 +43,6 @@ bool traceInput() {
 // frame never leaves by more than ~half a knee.
 constexpr double kEdgeKnee = 140.0;
 constexpr double kEdgeGive = 26.0;
-
-const char* buttonName(unsigned b) {
-    switch (b) {
-        case Button1: return "Button1";
-        case Button2: return "Button2";
-        case Button3: return "Button3";
-        case Button4: return "Button4";
-        case Button5: return "Button5";
-        default: return "Button?";
-    }
-}
 
 uint32_t nowMs32() { return uint32_t(nowMs()); }
 
@@ -124,6 +125,7 @@ bool Manager::shellHasKeyboard() const {
 void Manager::onPointerMotion(double dx, double dy) {
     (void)dx;
     (void)dy;
+    PointerFrame pointerFrame{seat};
     const int x = int(cursor ? cursor->x : 0);
     const int y = int(cursor ? cursor->y : 0);
     pointerX = x;
@@ -188,6 +190,7 @@ void Manager::onPointerMotion(double dx, double dy) {
 }
 
 void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
+    PointerFrame pointerFrame{seat};
     const int x = pointerX;
     const int y = pointerY;
 
@@ -294,6 +297,7 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
 }
 
 void Manager::onPointerAxis(double delta) {
+    PointerFrame pointerFrame{seat};
     // Menus and drag sessions grabs own the pointer; send the scroll through the
     // seat so the grab (a popup's scrollable menu, a drag source) receives it.
     if (seat && seat->pointer_state.grab &&
@@ -305,6 +309,7 @@ void Manager::onPointerAxis(double delta) {
     }
     if (pointerY >= screenH - metrics::taskbarH || overlayOpen()) {
         if (pointerY >= screenH - metrics::taskbarH) cycleTaskbar(delta > 0);
+        if (dirty) requestFrame();
         return;
     }
     if (pointerSurface) {
@@ -348,7 +353,11 @@ void Manager::onKey(uint32_t keycode, uint32_t modifiers, bool pressed) {
                                      pressed ? WL_KEYBOARD_KEY_STATE_PRESSED
                                              : WL_KEYBOARD_KEY_STATE_RELEASED);
     }
-    requestFrame();
+    // A keystroke typed into a client changes nothing the shell paints. Asking
+    // for a full-shell frame here made every key wait behind a redraw of the
+    // desktop, taskbar and every window shadow, which is the other half of the
+    // typing lag. Shell shortcuts still need their frame.
+    if (shell) requestFrame();
 }
 
 void Manager::onKeyboardModifiers(uint32_t modifiers) {

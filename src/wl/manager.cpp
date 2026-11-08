@@ -253,7 +253,8 @@ void Manager::ungrabShellKeyboard() {
     if (!shellKeyboardGrabbed) return;
     shellKeyboardGrabbed = false;
     if (seat && focused && focused->mapped && focused->surface)
-        wlr_seat_keyboard_notify_enter(seat, focused->surface, nullptr, 0, nullptr);
+        wlr_seat_keyboard_notify_enter(seat, focused->surface, nullptr, 0,
+                                       keyboard ? &keyboard->modifiers : nullptr);
 }
 
 void Manager::grabPointer() {}
@@ -390,7 +391,12 @@ void Manager::focusClient(Client* c, bool raise) {
     // While a shell flyout owns the keyboard the client stays keyboard-focused
     // logically but does not get the seat's enter until ungrabShellKeyboard().
     if (seat && c->surface && !shellKeyboardGrabbed) {
-        wlr_seat_keyboard_notify_enter(seat, c->surface, nullptr, 0, nullptr);
+        // Pass the live modifier state: enter with a null modifier pointer tells
+        // the client all modifiers are released, so a focus change while Alt or
+        // Ctrl is held left the client acting on the wrong modifier state until
+        // the next modifier event.
+        wlr_seat_keyboard_notify_enter(seat, c->surface, nullptr, 0,
+                                       keyboard ? &keyboard->modifiers : nullptr);
     }
     dirty = true;
     requestFrame();
@@ -938,7 +944,13 @@ void Manager::renderFrameOnOutput() {
     // long this one took to draw. A backend that schedules relative to the
     // request (headless) shows the difference directly; a vblank-locked one
     // (DRM, nested Wayland) targets the same scanout either way.
-    if (moved) wlr_output_schedule_frame(output);
+    // A nested Wayland output already gets a frame event from the host at the
+    // next vblank after every commit. Scheduling another frame from inside that
+    // callback makes wlroots send one immediately, so we render ahead of the
+    // host and eventually starve the swapchain ("No free output buffer slot"),
+    // which shows up as dropped frames and sluggish animation. Headless and DRM
+    // outputs have no host callback to pace them, so they still need the request.
+    if (moved && !nested) wlr_output_schedule_frame(output);
     // A commit asks the backend for another frame event once the buffer has been
     // presented. Rendering unconditionally here therefore never goes idle: the
     // compositor would rebuild and present the whole shell at the monitor's
@@ -3295,8 +3307,8 @@ void Manager::showContextMenu(Client* c, int x, int y) {
 
 // The desktop's own context menu, reusing the client menu plumbing. Its shape
 // follows what it was opened on: a card offers to be removed, a folder offers to
-// be renamed or deleted, and the create, widget and no-overlap entries are
-// always there. applyContextAction() walks the rows in this same order.
+// be renamed or deleted, and the create and widget entries are always there.
+// applyContextAction() walks the rows in this same order.
 void Manager::openDesktopMenu(int x, int y) {
     contextClient = nullptr;
     contextWidget = widgetAt(x, y);

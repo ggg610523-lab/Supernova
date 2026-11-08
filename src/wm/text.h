@@ -12,6 +12,7 @@
 #include <deque>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace wm {
 
@@ -19,6 +20,19 @@ struct TextTex {
     unsigned int tex = 0;
     int w = 0;
     int h = 0;
+};
+
+// One string inside a shared text texture. The UV rect is normalised; `w`/`h`
+// are the pixels the string occupied in the atlas.
+struct TextAtlasEntry {
+    float u0 = 0.f, v0 = 0.f, u1 = 0.f, v1 = 0.f;
+    int w = 0;
+    int h = 0;
+};
+
+struct TextAtlas {
+    TextTex tex;
+    std::vector<TextAtlasEntry> entries;
 };
 
 enum class Weight { Regular, Medium, Bold };
@@ -46,6 +60,11 @@ public:
 
     // Rasterise `utf8` at `px` pixels and return its GL texture (cached).
     TextTex get(const std::string& utf8, int px, Weight w = Weight::Regular);
+    // Pack several strings into one texture so their quads can share a draw
+    // call. The atlas is cached for the last request; callers that need stable
+    // UVs across frames should use the same list until it changes.
+    const TextAtlas& getAtlas(const std::vector<std::string>& strings, int px,
+                              Weight w = Weight::Regular);
     // Width in pixels without touching GL. `outH` receives the line height.
     int measure(const std::string& utf8, int px, Weight w = Weight::Regular,
                 int* outH = nullptr);
@@ -75,6 +94,8 @@ private:
     void* faceFor(int px, Weight w);          // FT_Face (size already set)
     void layout(const std::string& utf8, void* face, int* outW, int* outH);
     void rasterise(const std::string& utf8, void* face, TextTex* out, int width, int height);
+    void drawIntoBuffer(const std::string& utf8, void* face, std::vector<unsigned char>& buf,
+                        int bufW, int bufH, int ox, int oy);
     void evictLocked();
 
     void* lib_ = nullptr;
@@ -93,6 +114,8 @@ private:
     bool attempted_ = false;
     std::unordered_map<Key, Entry, KeyHash> cache_;
     std::deque<Key> order_;
+    std::string atlasKey_;
+    TextAtlas atlas_;
 };
 
 // UTF-8 helper: number of bytes in the codepoint starting at `i`.

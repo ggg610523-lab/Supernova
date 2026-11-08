@@ -364,8 +364,11 @@ void main() {
     }
 
     // Mode 3: textured quad (text, icons, thumbnails, the wallpaper itself).
+    // uBorder carries a normalised UV sub-rect for atlas text; zero means the
+    // whole texture.
     float d = sdRound(p - c, uRect.zw * 0.5, uRadius);
-    vec4 t = texture(uTex, vQ);
+    vec2 uv = uBorder.zw == vec2(0.0) ? vQ : uBorder.xy + vQ * uBorder.zw;
+    vec4 t = texture(uTex, uv);
     vec3 rgb = mix(uColor.rgb, t.rgb * uColor.rgb, uTexMix);
     float a = cover(d) * uOpacity * mix(uColor.a, t.a, uKeepAlpha);
     fragColor = vec4(rgb * a, a);
@@ -1227,6 +1230,16 @@ void Compositor::useMainProgram() {
     if (mainProgramBound_) return;
     glUseProgram(prog_);
     glBindVertexArray(vao_);
+    // Frame constants. Set here rather than only in beginFrame() because a
+    // window, genie or rotated-rect draw may have borrowed the context since.
+    glUniformMatrix4fv(uProj_, 1, GL_FALSE, proj_);
+    glUniform2f(uScreen_, float(width_), float(height_));
+    glUniform1f(uShadowPad_, float(metrics::kShadowPad));
+    glUniform1f(uBtnW_, float(metrics::kBtnW));
+    glUniform1i(uTex_, 0);
+    glUniform1i(uBlur_, 1);
+    glUniform2f(uPivot_, 0.f, 0.f);
+    glUniform2f(uRot_, 1.f, 0.f);
     mainProgramBound_ = true;
     batchProgramBound_ = false;
 }
@@ -1437,14 +1450,33 @@ void Compositor::drawTex(GLuint tex, const Rect& dst, float radius, const Color&
     // quad cannot share a batch with anything that follows: paint it now.
     const bool tfi = tfiBind(tex);
     pushQuad(float(dst.x), float(dst.y), float(dst.w), float(dst.h), 3, radius, opacity,
-             tint, Color{}, Color{}, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f,
-             textureColor ? 1.f : 0.f, textureAlpha ? 1.f : 0.f);
+             tint, Color{}, Color{0.f, 0.f, 0.f, 0.f}, 0.f, 0.f, 0.f, 0.f, 0.f,
+             -1.0e9f, textureColor ? 1.f : 0.f, textureAlpha ? 1.f : 0.f);
     if (tfi) {
         flushBatch();
         tfiRelease(tex);
     }
 }
 
+
+void Compositor::drawTexUV(GLuint tex, const Rect& dst, float u0, float v0, float u1,
+                           float v1, float radius, const Color& tint, float opacity,
+                           bool textureColor, bool textureAlpha) {
+    if (!tex || dst.empty()) return;
+    if (batchQuads_ > 0 && batchTex_ != tex) flushBatch();
+    if (batchQuads_ == 0) batchTex_ = tex;
+    // Mode 3 does not use uBorder for anything else, so it carries the UV
+    // sub-rect. That keeps the per-quad UV state in the existing batch vertex.
+    const Color uv{u0, v0, u1 - u0, v1 - v0};
+    const bool tfi = tfiBind(tex);
+    pushQuad(float(dst.x), float(dst.y), float(dst.w), float(dst.h), 3, radius, opacity,
+             tint, Color{}, uv, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f,
+             textureColor ? 1.f : 0.f, textureAlpha ? 1.f : 0.f);
+    if (tfi) {
+        flushBatch();
+        tfiRelease(tex);
+    }
+}
 
 void Compositor::drawText(const TextTex& t, const Rect& dst, const Color& c, float opacity) {
     if (!t.tex) return;

@@ -142,6 +142,11 @@ public:
                      const Color& border, float opacity = 1.0f, float saturation = 1.45f);
     void drawTex(GLuint tex, const Rect& dst, float radius, const Color& tint,
                  float opacity, bool textureColor, bool textureAlpha);
+    // Same as drawTex(), but samples a sub-rect of the texture. The UVs are
+    // normalised; this is what lets every desktop label share one atlas draw.
+    void drawTexUV(GLuint tex, const Rect& dst, float u0, float v0, float u1, float v1,
+                   float radius, const Color& tint, float opacity, bool textureColor,
+                   bool textureAlpha);
     void drawText(const TextTex& t, const Rect& dst, const Color& c, float opacity = 1.0f);
     void present();
 

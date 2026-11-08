@@ -1114,6 +1114,8 @@ private:
     std::vector<DesktopItem> desktopItems;
     std::vector<Rect> desktopIconRects;  // target cells computed by layoutDesktopIcons()
     std::vector<Rect> desktopIconDraw;   // shown cells, eased toward the targets
+    std::vector<std::string> desktopIconLabels;  // ellipsized once per layout
+    std::string desktopIconLabelKey;             // names + cell width used above
     int hoverDesktopIcon = -1;
     int selectedDesktopIcon = -1;
     // Icons the user has dragged have their cell remembered here, keyed by path

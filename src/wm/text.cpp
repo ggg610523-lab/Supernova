@@ -340,6 +340,12 @@ void Text::shutdown() {
     }
     cache_.clear();
     order_.clear();
+    if (atlas_.tex.tex) {
+        GLuint t = static_cast<GLuint>(atlas_.tex.tex);
+        glDeleteTextures(1, &t);
+    }
+    atlas_ = TextAtlas{};
+    atlasKey_.clear();
     synthBold_ = false;
     for (void*& f : faces_) {
         if (f) FT_Done_Face(static_cast<FT_Face>(f));
@@ -409,13 +415,13 @@ void Text::layout(const std::string& s, void* facePtr, int* outW, int* outH) {
 }
 
 
-// Render `s` into a tightly packed RGBA bitmap (white + coverage in alpha) and
-// hand it to GL. One texture per cached string, alpha-blended by the shader.
-void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int width, int height) {
-    if (std::getenv("WIN11WM_GLTIMING"))
-        std::fprintf(stderr, "[text] rasterise \"%s\" %dx%d\n", s.c_str(), width, height);
+// Draw `s` into an existing RGBA coverage buffer at (ox, oy). Shared by the
+// one-string textures and the packed label atlas so both use identical hinting
+// and glyph placement.
+void Text::drawIntoBuffer(const std::string& s, void* facePtr,
+                          std::vector<unsigned char>& buf, int bufW, int bufH, int ox,
+                          int oy) {
     FT_Face face = static_cast<FT_Face>(facePtr);
-    std::vector<unsigned char> buf(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
     const int baseline = static_cast<int>(face->size->metrics.ascender >> 6);
     int pen = 0;
 
@@ -425,14 +431,14 @@ void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int widt
         // Match layout(): synthesize the missing Bold from the static face.
         if (synthBold_ && facePtr == faces_[2]) FT_GlyphSlot_Embolden(face->glyph);
         const FT_Bitmap& bm = face->glyph->bitmap;
-        const int gx = pen + face->glyph->bitmap_left;
-        const int gy = baseline - face->glyph->bitmap_top;
+        const int gx = ox + pen + face->glyph->bitmap_left;
+        const int gy = oy + baseline - face->glyph->bitmap_top;
         const int rows = static_cast<int>(bm.rows);
         const int cols = static_cast<int>(bm.width);
 
         for (int row = 0; row < rows; ++row) {
             const int py = gy + row;
-            if (py < 0 || py >= height) continue;
+            if (py < 0 || py >= bufH) continue;
             const unsigned char* src = bm.buffer + static_cast<ptrdiff_t>(row) * bm.pitch;
             for (int col = 0; col < cols; ++col) {
                 unsigned char cov = 0;
@@ -445,8 +451,8 @@ void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int widt
                 }
                 if (!cov) continue;
                 const int px = gx + col;
-                if (px < 0 || px >= width) continue;
-                const size_t o = (static_cast<size_t>(py) * static_cast<size_t>(width) +
+                if (px < 0 || px >= bufW) continue;
+                const size_t o = (static_cast<size_t>(py) * static_cast<size_t>(bufW) +
                                   static_cast<size_t>(px)) * 4u;
                 buf[o + 0] = 255;
                 buf[o + 1] = 255;
@@ -457,6 +463,15 @@ void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int widt
         }
         pen += static_cast<int>(face->glyph->advance.x >> 6);
     }
+}
+
+// Render `s` into a tightly packed RGBA bitmap (white + coverage in alpha) and
+// hand it to GL. One texture per cached string, alpha-blended by the shader.
+void Text::rasterise(const std::string& s, void* facePtr, TextTex* out, int width, int height) {
+    if (std::getenv("WIN11WM_GLTIMING"))
+        std::fprintf(stderr, "[text] rasterise \"%s\" %dx%d\n", s.c_str(), width, height);
+    std::vector<unsigned char> buf(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u, 0);
+    drawIntoBuffer(s, facePtr, buf, width, height, 0, 0);
 
     GLuint tex = 0;
     glGenTextures(1, &tex);
@@ -510,6 +525,84 @@ TextTex Text::get(const std::string& s, int px, Weight w) {
     cache_.emplace(key, Entry{out, key});
     order_.push_back(key);
     return out;
+}
+
+const TextAtlas& Text::getAtlas(const std::vector<std::string>& strings, int px, Weight w) {
+    std::string key = std::to_string(px) + ":" + std::to_string(static_cast<int>(w));
+    key.push_back('\x1f');
+    for (const std::string& s : strings) {
+        key += std::to_string(s.size());
+        key.push_back(':');
+        key += s;
+        key.push_back('\x1f');
+    }
+    if (key == atlasKey_) return atlas_;
+
+    if (atlas_.tex.tex) {
+        GLuint old = static_cast<GLuint>(atlas_.tex.tex);
+        glDeleteTextures(1, &old);
+    }
+    atlas_ = TextAtlas{};
+    atlas_.entries.resize(strings.size());
+    atlasKey_ = std::move(key);
+
+    void* face = px > 0 ? faceFor(px, w) : nullptr;
+    if (!face) return atlas_;
+
+    struct Slot {
+        int x = 0, y = 0, w = 0, h = 0;
+    };
+    std::vector<Slot> slots(strings.size());
+    constexpr int kMaxAtlasW = 2048;
+    int x = 1, y = 1, rowH = 0, maxRight = 1;
+    for (size_t i = 0; i < strings.size(); ++i) {
+        int ww = 0, hh = 0;
+        if (!strings[i].empty()) layout(strings[i], face, &ww, &hh);
+        if (ww <= 0 || hh <= 0) continue;
+        if (x > 1 && x + ww + 1 > kMaxAtlasW) {
+            x = 1;
+            y += rowH + 1;
+            rowH = 0;
+        }
+        slots[i] = Slot{x, y, ww, hh};
+        x += ww + 1;
+        rowH = std::max(rowH, hh);
+        maxRight = std::max(maxRight, x);
+    }
+    if (maxRight <= 1 || rowH <= 0) return atlas_;
+
+    const int atlasW = maxRight;
+    const int atlasH = y + rowH + 1;
+    std::vector<unsigned char> buf(static_cast<size_t>(atlasW) *
+                                       static_cast<size_t>(atlasH) * 4u,
+                                   0);
+    for (size_t i = 0; i < strings.size(); ++i) {
+        const Slot& s = slots[i];
+        if (s.w <= 0 || s.h <= 0) continue;
+        drawIntoBuffer(strings[i], face, buf, atlasW, atlasH, s.x, s.y);
+        TextAtlasEntry& e = atlas_.entries[i];
+        e.u0 = float(s.x) / float(atlasW);
+        e.v0 = float(s.y) / float(atlasH);
+        e.u1 = float(s.x + s.w) / float(atlasW);
+        e.v1 = float(s.y + s.h) / float(atlasH);
+        e.w = s.w;
+        e.h = s.h;
+    }
+
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    if (!tex) return atlas_;
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, atlasW, atlasH, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 buf.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    atlas_.tex = TextTex{tex, atlasW, atlasH};
+    return atlas_;
 }
 
 int Text::measure(const std::string& s, int px, Weight w, int* outH) {

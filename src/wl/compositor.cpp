@@ -351,7 +351,8 @@ void main() {
     }
 
     float d = sdRound(p - c, uRect.zw * 0.5, uRadius);
-    vec4 t = texture2D(uTex, vQ);
+    vec2 uv = uBorder.zw == vec2(0.0) ? vQ : uBorder.xy + vQ * uBorder.zw;
+    vec4 t = texture2D(uTex, uv);
     vec3 rgb = mix(uColor.rgb, t.rgb * uColor.rgb, uTexMix);
     float a = cover(d) * uOpacity * mix(uColor.a, t.a, uKeepAlpha);
     gl_FragColor = vec4(rgb * a, a);
@@ -1162,7 +1163,21 @@ void Compositor::drawTex(GLuint tex, const Rect& dst, float radius, const Color&
     if (batchQuads_ > 0 && batchTex_ != tex) flushBatch();
     if (batchQuads_ == 0) batchTex_ = tex;
     pushQuad(float(dst.x), float(dst.y), float(dst.w), float(dst.h), 3, radius, opacity,
-             tint, Color{}, Color{}, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f,
+             tint, Color{}, Color{0.f, 0.f, 0.f, 0.f}, 0.f, 0.f, 0.f, 0.f, 0.f,
+             -1.0e9f, textureColor ? 1.f : 0.f, textureAlpha ? 1.f : 0.f);
+}
+
+void Compositor::drawTexUV(GLuint tex, const Rect& dst, float u0, float v0, float u1,
+                           float v1, float radius, const Color& tint, float opacity,
+                           bool textureColor, bool textureAlpha) {
+    if (!tex || dst.empty()) return;
+    if (batchQuads_ > 0 && batchTex_ != tex) flushBatch();
+    if (batchQuads_ == 0) batchTex_ = tex;
+    // Mode 3 does not use uBorder for anything else, so it carries the UV
+    // sub-rect. That keeps the per-quad UV state in the existing batch vertex.
+    const Color uv{u0, v0, u1 - u0, v1 - v0};
+    pushQuad(float(dst.x), float(dst.y), float(dst.w), float(dst.h), 3, radius, opacity,
+             tint, Color{}, uv, 0.f, 0.f, 0.f, 0.f, 0.f, -1.0e9f,
              textureColor ? 1.f : 0.f, textureAlpha ? 1.f : 0.f);
 }
 
