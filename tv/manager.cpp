@@ -55,7 +55,7 @@ void detachClientListeners(Client* c, struct wl_listener* skip) {
     for (struct wl_listener* l : {&c->surfaceCommit, &c->surfaceMap, &c->surfaceUnmap,
                                   &c->surfaceDestroy, &c->toplevelDestroy,
                                   &c->toplevelTitle, &c->toplevelAppId,
-                                  &c->requestFullscreen, &c->requestClose}) {
+                                  &c->requestFullscreen}) {
         if (l != skip) wl_list_remove(&l->link);
         wl_list_init(&l->link);
     }
@@ -172,8 +172,11 @@ bool Manager::initWayland() {
         if (!wlr_headless_add_output(backend_, opts_.width, opts_.height))
             std::fprintf(stderr, "[tvshell] cannot add a headless output\n");
     } else if (nested_) {
-        if (!wlr_wl_output_create(backend_))
+        struct wlr_output* out = wlr_wl_output_create(backend_);
+        if (!out)
             std::fprintf(stderr, "[tvshell] cannot create a nested output\n");
+        else
+            wlr_wl_output_set_title(out, "TV Shell");
     }
 
     const char* socket = nullptr;
@@ -212,24 +215,17 @@ bool Manager::initShell() {
     text_.init(assetDir_ + "/fonts");
     icons_.init(assetDir_ + "/icons", assetDir_ + "/icons-hatter");
 
-    apps_ = wm::scanApps();
-    apps_.erase(std::remove_if(apps_.begin(), apps_.end(),
-                               [](const wm::AppEntry& a) {
-                                   return a.name.empty() || a.exec.empty() ||
-                                          a.exec == wm::kSettingsExec || a.terminal;
-                               }),
-                apps_.end());
-    layoutApps();
+    section_ = Section::Home;
+    zone_ = Zone::Rail;
+    railFocus_ = int(Section::Home);
+    reloadApps();
 
     homeSpring_.configureIOS(0.32, 0.90);
     homeSpring_.value = 1.0;
     homeTarget_ = 1.0;
 
-    tileScale_.resize(apps_.size());
-    for (auto& s : tileScale_) {
-        s.configureIOS(0.22, 0.80);
-        s.value = 1.0;
-    }
+    focusScale_.configureIOS(0.22, 0.80);
+    focusScale_.value = 1.0;
 
     controllers_.init(evloop_, [this](const PadEvent& event) { onController(event); });
     if (controllers_.count() == 0)
@@ -275,10 +271,16 @@ void Manager::shutdown() {
     text_.shutdown();
     icons_.clear();
     compositor_.shutdown();
-    wl_display_destroy_clients(display_);
-    wl_display_destroy(display_);
+
+    // Detach the display before destroying it. Tearing the display down emits
+    // the output's `destroy` signal, whose handler calls stop(); calling
+    // wl_display_terminate() on a display that is already being destroyed
+    // aborts inside libwayland.
+    struct wl_display* display = display_;
     display_ = nullptr;
     evloop_ = nullptr;
+    wl_display_destroy_clients(display);
+    wl_display_destroy(display);
 }
 
 void Manager::loop() {
@@ -304,9 +306,12 @@ void Manager::onNewOutput(struct wlr_output* output) {
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
+    // A nested output already carries the size its host window gave it. Asking
+    // for a custom mode there is rejected and leaves the output's swapchain
+    // unable to pass its test, which is why the nested window never mapped.
     if (output->current_mode) {
         wlr_output_state_set_mode(&state, output->current_mode);
-    } else {
+    } else if (output->width <= 0 || output->height <= 0) {
         wlr_output_state_set_custom_mode(&state, opts_.width, opts_.height, 60000);
     }
     if (!wlr_output_commit_state(output, &state))
@@ -342,6 +347,11 @@ void Manager::onNewOutput(struct wlr_output* output) {
     syncOutputSize();
     std::fprintf(stderr, "[tvshell] output %s: %dx%d\n", output->name, output->width,
                  output->height);
+    // A nested output's window is only mapped once its surface has a buffer,
+    // so the first frame has to be committed explicitly here; no input or
+    // timer event is guaranteed to arrive and ask for one.
+    dirty_ = true;
+    requestFrame();
 }
 
 void Manager::onOutputFrame() { renderFrameOnOutput(); }
@@ -365,7 +375,7 @@ void Manager::syncOutputSize() {
     } else {
         compositor_.resize(w, h);
     }
-    layoutApps();
+    rebuildRows();
     dirty_ = true;
 }
 
@@ -430,7 +440,7 @@ void Manager::renderFrameOnOutput() {
         wlr_output_schedule_frame(output_);
 }
 
-void Manager::tick(double now) {
+bool Manager::tick(double now) {
     double dt = (now - lastTick_) / 1000.0;
     lastTick_ = now;
     if (dt <= 0.0 || dt > 0.1) dt = 1.0 / 60.0;
@@ -443,16 +453,39 @@ void Manager::tick(double now) {
         homeSpring_.value = homeTarget_;
     }
 
-    for (size_t i = 0; i < tileScale_.size(); ++i) {
-        const double target = (home_ && int(i) == focus_) ? 1.07 : 1.0;
-        if (!tileScale_[i].settled(target, 0.001)) {
-            tileScale_[i].step(target, dt);
+    // Only the card strip the controller is standing on grows; leaving the
+    // content column (or the launcher) lets every card settle back to its rest
+    // size. One spring is enough because at most one card is focused.
+    const double scaleTarget = (home_ && zone_ == Zone::Content) ? 1.0 : 0.0;
+    if (!focusScale_.settled(scaleTarget, 0.001)) {
+        focusScale_.step(scaleTarget, dt);
+        moved = true;
+    } else {
+        focusScale_.value = scaleTarget;
+    }
+
+    // Each row keeps its focused card in view by scrolling a strip, the way a
+    // TV home screen slides its row rather than paging it.
+    const LauncherLayout layout = launcherLayout();
+    const double step = double(layout.cardW + layout.gap);
+    for (size_t i = 0; i < rowScroll_.size() && i < rows_.size(); ++i) {
+        const int count = int(rows_[i].cards.size());
+        const double maxScroll =
+            std::max(0.0, double(count) * step - double(layout.contentW));
+        double target = 0.0;
+        if (int(i) == row_ && zone_ == Zone::Content)
+            target = std::clamp(double(col_) * step, 0.0, maxScroll);
+        else
+            target = std::clamp(rowScroll_[i].value, 0.0, maxScroll);
+        if (!rowScroll_[i].settled(target, 0.5)) {
+            rowScroll_[i].step(target, dt);
             moved = true;
         } else {
-            tileScale_[i].value = target;
+            rowScroll_[i].value = target;
         }
     }
     if (moved) dirty_ = true;
+    return moved;
 }
 
 void Manager::render() {
@@ -546,9 +579,6 @@ void Manager::onNewToplevel(struct wlr_xdg_toplevel* toplevel) {
     };
     wl_signal_add(&toplevel->events.request_fullscreen, &c->requestFullscreen);
 
-    c->requestClose.notify = [](struct wl_listener*, void*) {};
-    wl_signal_add(&toplevel->events.request_close, &c->requestClose);
-
     dirty_ = true;
     requestFrame();
 }
@@ -604,7 +634,7 @@ void Manager::onCommit(Client* c) {
         return;
     }
     if (c->surface && c->surface->buffer)
-        compositor_.importBuffer(c->surface->buffer, &c->tex);
+        compositor_.importBuffer(&c->surface->buffer->base, &c->tex);
     dirty_ = true;
     requestFrame();
 }
@@ -711,8 +741,10 @@ void Manager::onKey(uint32_t keycode, uint32_t, bool pressed) {
     if (!keyboard_) return;
     const xkb_keysym_t sym = xkb_state_key_get_one_sym(keyboard_->xkb_state, keycode + 8);
 
-    if (pressed && (sym == XKB_KEY_Home || sym == XKB_KEY_HOMEPAGE)) {
+    if (pressed && sym == XKB_KEY_Home) {
         setHome(true);
+        setSection(Section::Home);
+        zone_ = Zone::Content;
         return;
     }
     if (!home_ && active_ && pressed &&
@@ -729,9 +761,11 @@ void Manager::onKey(uint32_t keycode, uint32_t, bool pressed) {
             case XKB_KEY_Up: moveFocus(0, -1); break;
             case XKB_KEY_Down: moveFocus(0, 1); break;
             case XKB_KEY_Return:
-            case XKB_KEY_KP_Enter: selectFocus(); break;
-            case XKB_KEY_Page_Up: changePage(-1); break;
-            case XKB_KEY_Page_Down: changePage(1); break;
+            case XKB_KEY_KP_Enter: activateFocused(); break;
+            case XKB_KEY_Escape:
+            case XKB_KEY_BackSpace: launcherBack(); break;
+            case XKB_KEY_Page_Up: cycleSection(-1); break;
+            case XKB_KEY_Page_Down: cycleSection(1); break;
             default: break;
         }
         return;
@@ -747,12 +781,15 @@ void Manager::onController(const PadEvent& event) {
             case PadButton::Down: moveFocus(0, 1); break;
             case PadButton::Left: moveFocus(-1, 0); break;
             case PadButton::Right: moveFocus(1, 0); break;
-            case PadButton::Select: selectFocus(); break;
-            case PadButton::Back: break;
-            case PadButton::Home: break;
-            case PadButton::Menu: break;
-            case PadButton::PageLeft: changePage(-1); break;
-            case PadButton::PageRight: changePage(1); break;
+            case PadButton::Select: activateFocused(); break;
+            case PadButton::Back: launcherBack(); break;
+            case PadButton::Home:
+                setSection(Section::Home);
+                zone_ = Zone::Content;
+                break;
+            case PadButton::Menu: cycleSection(1); break;
+            case PadButton::PageLeft: cycleSection(-1); break;
+            case PadButton::PageRight: cycleSection(1); break;
         }
         return;
     }
@@ -781,67 +818,268 @@ void Manager::setHome(bool home) {
 
 void Manager::toggleHome() { setHome(!home_); }
 
-int Manager::pageCount() const {
-    const int per = std::max(1, perPage());
-    return std::max(1, (int(apps_.size()) + per - 1) / per);
+Section Manager::section() const { return section_; }
+
+LauncherLayout Manager::launcherLayout() const {
+    LauncherLayout L;
+    const int margin = std::max(16, screenW_ / 48);
+    L.railW = std::clamp(screenW_ / 9, 88, 168);
+    L.railItemH = std::clamp(screenH_ / 8, 56, 88);
+    L.topH = std::max(56, screenH_ / 9);
+    L.footerH = std::max(32, screenH_ / 20);
+    L.contentX = L.railW + margin;
+    L.contentW = std::max(200, screenW_ - L.contentX - margin);
+    L.heroH = std::clamp(int(screenH_ * 26 / 100), 110, 300);
+    L.rowsTop = L.topH + L.heroH + margin / 2;
+    L.gap = std::max(10, screenW_ / 110);
+
+    const int rowCount = std::max(1, int(rows_.size()));
+    const int available = std::max(120, screenH_ - L.rowsTop - L.footerH - margin / 2);
+    L.captionH = std::clamp(available / rowCount / 7, 20, 34);
+    L.cardH = std::clamp(available / rowCount - L.captionH - margin / 3, 84,
+                         int(screenH_ * 34 / 100));
+    L.cardW = std::clamp(L.cardH * 6 / 5, 110, std::max(110, L.contentW / 2));
+    L.rowStride = L.cardH + L.captionH + margin / 3;
+    L.iconsPerRow = std::max(1, (L.contentW + L.gap) / (L.cardW + L.gap));
+    return L;
 }
 
-int Manager::currentPage() const {
-    if (apps_.empty()) return 0;
-    return std::clamp(focus_ / std::max(1, perPage()), 0, pageCount() - 1);
+void Manager::reloadApps() {
+    std::vector<TvApp> fresh;
+    for (wm::AppEntry& entry : wm::scanApps()) {
+        if (entry.name.empty() || entry.exec.empty() || entry.exec == wm::kSettingsExec ||
+            entry.terminal)
+            continue;
+        TvApp app;
+        app.entry = std::move(entry);
+        fresh.push_back(std::move(app));
+    }
+    apps_ = std::move(fresh);
+
+    // Drop recents whose launcher has gone away since the last scan.
+    recentExecs_.erase(
+        std::remove_if(recentExecs_.begin(), recentExecs_.end(),
+                       [this](const std::string& exec) {
+                           return std::none_of(apps_.begin(), apps_.end(),
+                                               [&exec](const TvApp& a) {
+                                                   return a.entry.exec == exec;
+                                               });
+                       }),
+        recentExecs_.end());
+    rebuildRows();
 }
 
-void Manager::layoutApps() {
-    columns_ = screenW_ >= 1600 ? 6 : 5;
-    rows_ = screenH_ >= 900 ? 3 : 2;
-    if (!apps_.empty() && columns_ > int(apps_.size()))
-        columns_ = std::max(1, int(apps_.size()));
-    tileScale_.resize(apps_.size());
-    for (auto& s : tileScale_) {
-        if (s.value == 0.0) {
-            s.configureIOS(0.22, 0.80);
-            s.value = 1.0;
+void Manager::rebuildRows() {
+    rows_.clear();
+    const auto appIndices = [this]() {
+        std::vector<int> indices;
+        indices.reserve(apps_.size());
+        for (size_t i = 0; i < apps_.size(); ++i) indices.push_back(int(i));
+        return indices;
+    };
+    const auto recentIndices = [this]() {
+        std::vector<int> indices;
+        for (const std::string& exec : recentExecs_) {
+            for (size_t i = 0; i < apps_.size(); ++i) {
+                if (apps_[i].entry.exec == exec) {
+                    indices.push_back(int(i));
+                    break;
+                }
+            }
+        }
+        return indices;
+    };
+    const auto addAppRow = [this](const char* title, const std::vector<int>& indices) {
+        if (indices.empty()) return;
+        Row row;
+        row.title = title;
+        for (int index : indices) row.cards.push_back(CardRef{index, CardAction::None});
+        rows_.push_back(std::move(row));
+    };
+
+    switch (section_) {
+        case Section::Home:
+            addAppRow("Continue", recentIndices());
+            addAppRow("Your apps", appIndices());
+            break;
+        case Section::Apps:
+            addAppRow("All apps", appIndices());
+            break;
+        case Section::Recent:
+            addAppRow("Recently used", recentIndices());
+            break;
+        case Section::Settings: {
+            Row row;
+            row.title = "System";
+            row.cards.push_back(CardRef{-1, CardAction::RefreshApps});
+            row.cards.push_back(CardRef{-1, CardAction::QuitShell});
+            rows_.push_back(std::move(row));
+            break;
         }
     }
-    if (!apps_.empty()) focus_ = std::clamp(focus_, 0, int(apps_.size()) - 1);
-    else focus_ = 0;
+
+    rowScroll_.resize(rows_.size());
+    for (auto& spring : rowScroll_) spring.configureIOS(0.30, 0.90);
+
+    if (rows_.empty()) {
+        row_ = 0;
+        col_ = 0;
+    } else {
+        row_ = std::clamp(row_, 0, int(rows_.size()) - 1);
+        col_ = std::clamp(col_, 0, int(rows_[size_t(row_)].cards.size()) - 1);
+    }
+    dirty_ = true;
+    requestFrame();
+}
+
+void Manager::setSection(Section s) {
+    if (section_ == s && !rows_.empty()) {
+        railFocus_ = int(s);
+        return;
+    }
+    section_ = s;
+    railFocus_ = int(s);
+    row_ = 0;
+    col_ = 0;
+    rebuildRows();
+    dirty_ = true;
+    requestFrame();
+}
+
+void Manager::trackRecent(const std::string& exec) {
+    if (exec.empty()) return;
+    recentExecs_.erase(std::remove(recentExecs_.begin(), recentExecs_.end(), exec),
+                       recentExecs_.end());
+    recentExecs_.insert(recentExecs_.begin(), exec);
+    if (recentExecs_.size() > 8) recentExecs_.resize(8);
+    rebuildRows();
+}
+
+const CardRef* Manager::focusedCard() const {
+    if (row_ < 0 || row_ >= int(rows_.size())) return nullptr;
+    const Row& row = rows_[size_t(row_)];
+    if (col_ < 0 || col_ >= int(row.cards.size())) return nullptr;
+    return &row.cards[size_t(col_)];
+}
+
+int Manager::focusedApp() const {
+    const CardRef* card = focusedCard();
+    return card ? card->app : -1;
+}
+
+void Manager::moveRail(int dy) {
+    const int next = std::clamp(railFocus_ + dy, 0, 3);
+    if (next == railFocus_) return;
+    railFocus_ = next;
+    setSection(Section(railFocus_));
+    dirty_ = true;
+    requestFrame();
+}
+
+void Manager::moveContent(int dx, int dy) {
+    if (rows_.empty()) {
+        zone_ = Zone::Rail;
+        dirty_ = true;
+        requestFrame();
+        return;
+    }
+    Row& row = rows_[size_t(row_)];
+    const int count = int(row.cards.size());
+    if (dx != 0) {
+        if (count == 0) return;
+        const int next = std::clamp(col_ + dx, 0, count - 1);
+        if (next == col_) return;
+        col_ = next;
+    } else if (dy < 0) {
+        if (row_ > 0) {
+            --row_;
+            col_ = std::min(col_, int(rows_[size_t(row_)].cards.size()) - 1);
+        } else {
+            // Up from the first row hands the focus back to the section rail,
+            // which is where a TV remote expects to land.
+            zone_ = Zone::Rail;
+            railFocus_ = int(section_);
+        }
+    } else if (dy > 0) {
+        if (row_ + 1 >= int(rows_.size())) return;
+        ++row_;
+        col_ = std::min(col_, int(rows_[size_t(row_)].cards.size()) - 1);
+    } else {
+        return;
+    }
+    dirty_ = true;
+    requestFrame();
 }
 
 void Manager::moveFocus(int dx, int dy) {
-    if (apps_.empty()) return;
-    const int per = std::max(1, perPage());
-    const int page = currentPage();
-    const int start = page * per;
-    const int local = std::clamp(focus_ - start, 0, per - 1);
-    int col = local % columns_;
-    int row = local / columns_;
-    col = std::clamp(col + dx, 0, columns_ - 1);
-    row = std::clamp(row + dy, 0, rows_ - 1);
-    int next = start + row * columns_ + col;
-    if (next >= int(apps_.size())) next = int(apps_.size()) - 1;
-    if (next < start) next = start;
-    focus_ = next;
+    if (!home_) return;
+    if (zone_ == Zone::Rail) {
+        if (dx > 0) {
+            zone_ = Zone::Content;
+            row_ = 0;
+            col_ = rows_.empty() ? 0 : std::min(col_, int(rows_[0].cards.size()) - 1);
+            dirty_ = true;
+            requestFrame();
+            return;
+        }
+        if (dx < 0) return;
+        moveRail(dy);
+        return;
+    }
+    if (dx != 0)
+        moveContent(dx, 0);
+    else
+        moveContent(0, dy);
+}
+
+void Manager::cycleSection(int delta) {
+    const int next = std::clamp(railFocus_ + delta, 0, 3);
+    if (next == railFocus_) return;
+    railFocus_ = next;
+    setSection(Section(railFocus_));
+    zone_ = Zone::Rail;
     dirty_ = true;
     requestFrame();
 }
 
-void Manager::changePage(int delta) {
-    if (apps_.empty()) return;
-    const int page = std::clamp(currentPage() + delta, 0, pageCount() - 1);
-    focus_ = std::clamp(page * std::max(1, perPage()), 0, int(apps_.size()) - 1);
+void Manager::launcherBack() {
+    if (!home_) return;
+    if (zone_ == Zone::Content) {
+        zone_ = Zone::Rail;
+        railFocus_ = int(section_);
+    } else if (section_ != Section::Home) {
+        setSection(Section::Home);
+        zone_ = Zone::Rail;
+        return;
+    } else {
+        return;
+    }
     dirty_ = true;
     requestFrame();
 }
 
-void Manager::selectFocus() {
-    if (apps_.empty()) return;
-    launchFocus();
+void Manager::activateFocused() {
+    if (!home_) return;
+    if (zone_ == Zone::Rail) {
+        zone_ = Zone::Content;
+        row_ = 0;
+        col_ = rows_.empty() ? 0 : std::min(col_, int(rows_[0].cards.size()) - 1);
+        dirty_ = true;
+        requestFrame();
+        return;
+    }
+    const CardRef* card = focusedCard();
+    if (!card) return;
+    switch (card->action) {
+        case CardAction::RefreshApps: reloadApps(); return;
+        case CardAction::QuitShell: stop(); return;
+        case CardAction::None: break;
+    }
+    if (card->app < 0 || card->app >= int(apps_.size())) return;
+    launchEntry(apps_[size_t(card->app)].entry);
 }
 
-void Manager::launchFocus() {
-    if (focus_ < 0 || focus_ >= int(apps_.size())) return;
-    launchEntry(apps_[size_t(focus_)].entry);
-}
+void Manager::launchFocus() { activateFocused(); }
 
 Client* Manager::clientForApp(const wm::AppEntry& entry) const {
     const std::string wm = lower(entry.wmClass);
@@ -860,6 +1098,7 @@ Client* Manager::clientForApp(const wm::AppEntry& entry) const {
 
 void Manager::launchEntry(const wm::AppEntry& entry) {
     if (entry.exec.empty()) return;
+    trackRecent(entry.exec);
     if (Client* running = clientForApp(entry)) {
         active_ = running;
         setHome(false);
@@ -870,13 +1109,23 @@ void Manager::launchEntry(const wm::AppEntry& entry) {
 }
 
 void Manager::ensureIcons() {
-    const int px = std::max(48, std::min(screenW_, screenH_) / 10);
+    const LauncherLayout layout = launcherLayout();
+    const int px = std::max(48, std::min(layout.cardH * 55 / 100, layout.cardW));
     for (auto& app : apps_) {
         if (app.iconTried) continue;
         app.iconTried = true;
         app.icon = icons_.forApp(app.entry.icon, app.entry.wmClass, px,
                                  wm::IconTheme::Hatter);
     }
+    if (chromeIconsTried_) return;
+    chromeIconsTried_ = true;
+    const int railPx = std::max(22, layout.railItemH / 3);
+    railIcons_[0] = icons_.get("go-home", railPx);
+    railIcons_[1] = icons_.get("view-grid", railPx);
+    railIcons_[2] = icons_.get("lucide-play", railPx);
+    railIcons_[3] = icons_.get("systemsettings", railPx);
+    iconRefresh_ = icons_.get("view-grid", px);
+    iconQuit_ = icons_.get("lucide-power", px);
 }
 
 }  // namespace tv

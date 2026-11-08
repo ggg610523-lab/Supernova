@@ -2,9 +2,11 @@
 //
 // This is a native wlroots compositor, like the desktop Wayland build, but its
 // policy is a ten-foot living-room UI rather than a desktop: apps launch
-// fullscreen, a controller drives the launcher, and there is no taskbar,
-// wallpaper or window chrome. The GLES2 renderer, text rasteriser, icon store
-// and .desktop scanner are the same components the desktop shell uses.
+// fullscreen and a controller drives an Android TV style launcher -- a section
+// rail on the left, a hero preview of the focused app and horizontally scrolling
+// rows of cards. There is no taskbar, wallpaper or window chrome. The GLES2
+// renderer, text rasteriser, icon store and .desktop scanner are the same
+// components the desktop shell uses.
 #pragma once
 
 extern "C" {
@@ -78,14 +80,50 @@ struct Client {
     struct wl_listener toplevelTitle {};
     struct wl_listener toplevelAppId {};
     struct wl_listener requestFullscreen {};
-    struct wl_listener requestClose {};
 };
 
 struct TvApp {
     wm::AppEntry entry;
     wm::IconTex icon;
     bool iconTried = false;
-    std::string label;
+};
+
+// The launcher's rail, the way Android TV separates top-level destinations.
+enum class Section { Home, Apps, Recent, Settings };
+enum class Zone { Rail, Content };
+
+// What activating a launcher card does. A card is either an app (app index into
+// apps_) or one of the shell's own settings actions.
+enum class CardAction { None, RefreshApps, QuitShell };
+
+struct CardRef {
+    int app = -1;
+    CardAction action = CardAction::None;
+};
+
+// One horizontally scrolling row of the launcher. `title` is its caption.
+struct Row {
+    std::string title;
+    std::vector<CardRef> cards;
+};
+
+// Screen geometry of the launcher, derived from the section and the output size
+// so painting and navigation agree on where every card is.
+struct LauncherLayout {
+    int railW = 120;
+    int railItemH = 72;
+    int topH = 80;
+    int footerH = 36;
+    int contentX = 150;
+    int contentW = 1100;
+    int heroH = 180;
+    int rowsTop = 280;
+    int rowStride = 200;
+    int captionH = 28;
+    int cardW = 194;
+    int cardH = 162;
+    int gap = 11;
+    int iconsPerRow = 5;
 };
 
 class Manager {
@@ -114,7 +152,7 @@ private:
     void requestFrame();
     void renderFrameOnOutput();
     void render();
-    void tick(double now);
+    bool tick(double now);
     void dumpFrame();
 
     // ---- xdg-shell
@@ -136,22 +174,32 @@ private:
     // ---- TV policy
     void setHome(bool home);
     void toggleHome();
+    Section section() const;
+    void setSection(Section s);
+    void reloadApps();
+    void rebuildRows();
+    void trackRecent(const std::string& exec);
+    void moveRail(int dy);
+    void moveContent(int dx, int dy);
     void moveFocus(int dx, int dy);
-    void changePage(int delta);
-    void selectFocus();
+    void cycleSection(int delta);
+    void launcherBack();
+    void activateFocused();
     void launchFocus();
     void launchEntry(const wm::AppEntry& entry);
     Client* clientForApp(const wm::AppEntry& entry) const;
-    int perPage() const { return columns_ * rows_; }
-    int pageCount() const;
-    int currentPage() const;
-    void layoutApps();
+    const CardRef* focusedCard() const;
+    int focusedApp() const;
+    LauncherLayout launcherLayout() const;
     void ensureIcons();
 
     // ---- painting
     void drawBackground();
     void drawClient();
     void drawHome();
+    void drawHero(float opacity);
+    void drawRows(float opacity);
+    void drawRail(float opacity);
     void drawTopBar(float opacity);
     void drawHints(float opacity);
     void drawTextAt(const std::string& text, int px, wm::Weight weight,
@@ -190,10 +238,21 @@ private:
     Client* active_ = nullptr;
 
     std::vector<TvApp> apps_;
-    std::vector<wm::motion::Spring> tileScale_;
-    int focus_ = 0;
-    int columns_ = 5;
-    int rows_ = 2;
+    std::vector<Row> rows_;
+    std::vector<wm::motion::Spring> rowScroll_;
+    std::vector<std::string> recentExecs_;
+
+    Section section_ = Section::Home;
+    Zone zone_ = Zone::Rail;
+    int railFocus_ = 0;
+    int row_ = 0;
+    int col_ = 0;
+    wm::motion::Spring focusScale_;
+
+    bool chromeIconsTried_ = false;
+    wm::IconTex railIcons_[4];
+    wm::IconTex iconRefresh_;
+    wm::IconTex iconQuit_;
 
     bool home_ = true;
     wm::motion::Spring homeSpring_;

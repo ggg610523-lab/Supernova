@@ -12,6 +12,7 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
