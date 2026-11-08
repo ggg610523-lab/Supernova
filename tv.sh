@@ -3,8 +3,11 @@
 # Run tvshell, the 10-foot TV shell.
 #
 #   ./tv.sh                     nest inside the current Wayland session
+#   ./tv.sh --fullscreen        fullscreen the nested window
+#   ./tv.sh --pi                Raspberry Pi preset: DRM + fullscreen + minimal
 #   ./tv.sh --headless          render offscreen (tests/CI)
 #   ./tv.sh --drm               take over a TTY with DRM + libinput
+#   ./tv.sh --minimal           reduced motion and fill rate
 #   ./tv.sh --frames 60 --dump /tmp/tv.ppm
 #   ./tv.sh -e nautilus         start an app with the shell
 #
@@ -19,6 +22,17 @@ DEPS="$ROOT/.deps/prefix"
 
 say() { printf '\033[36m[tv]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31m[tv]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# --pi is a preset for the HDMI box: no session, so DRM owns the output, the
+# shell runs fullscreen and the launcher drops its animations.
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --pi) ARGS+=(--drm --fullscreen --minimal) ;;
+        *)    ARGS+=("$arg") ;;
+    esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 # The wlroots 0.18 build lives in .deps/prefix; use it when it is there.
 if [[ -d "$DEPS/lib" ]]; then

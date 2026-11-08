@@ -1,6 +1,16 @@
 #include "manager.h"
 
+#include "host_output.h"
 #include "wlr.h"
+
+// Pointer input. The shared header covers the devices the shell already used;
+// the cursor and the pointer events it forwards are pulled in here, without
+// touching the desktop shell's own header.
+extern "C" {
+#include <wayland-client-protocol.h>
+#include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_pointer.h>
+}
 
 #include <linux/input-event-codes.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
@@ -83,6 +93,9 @@ Manager::~Manager() { shutdown(); }
 
 int Manager::run(const Options& options) {
     opts_ = options;
+    // A TV stick is the target of the DRM path, so it always gets the lean
+    // profile: no spring animations and no per-frame work a Pi 3 cannot afford.
+    minimal_ = opts_.minimal || opts_.drm;
     nested_ = !opts_.headless && !opts_.drm && std::getenv("WAYLAND_DISPLAY");
     if (!initWayland()) return 1;
     if (!initShell()) return 1;
@@ -163,6 +176,42 @@ bool Manager::initWayland() {
     };
     wl_signal_add(&xdgShell_->events.new_toplevel, &newToplevel_);
 
+    // A pointer gives the shell two things a d-pad cannot: the clock as a
+    // Control Centre handle, and clicks on the panel's own controls. Apps get
+    // no pointer focus -- a TV is remote-driven -- so the shell draws the
+    // cursor itself.
+    cursor_ = wlr_cursor_create();
+    if (cursor_) {
+        wlr_cursor_attach_output_layout(cursor_, outputLayout_);
+        cursorMotion_.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, cursorMotion_);
+            auto* ev = static_cast<struct wlr_pointer_motion_event*>(data);
+            if (!m->cursor_ || !ev) return;
+            wlr_cursor_move(m->cursor_, &ev->pointer->base, ev->delta_x, ev->delta_y);
+            m->onPointerMotion(m->cursor_->x, m->cursor_->y);
+        };
+        wl_signal_add(&cursor_->events.motion, &cursorMotion_);
+        // A nested Wayland output reports the host pointer as an absolute
+        // position in 0..1 output coordinates instead of as deltas, so it has
+        // to be warped rather than moved.
+        cursorMotionAbsolute_.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, cursorMotionAbsolute_);
+            auto* ev = static_cast<struct wlr_pointer_motion_absolute_event*>(data);
+            if (!m->cursor_ || !ev) return;
+            wlr_cursor_warp_absolute(m->cursor_, &ev->pointer->base, ev->x, ev->y);
+            m->onPointerMotion(m->cursor_->x, m->cursor_->y);
+        };
+        wl_signal_add(&cursor_->events.motion_absolute, &cursorMotionAbsolute_);
+        cursorButton_.notify = [](struct wl_listener* l, void* data) {
+            Manager* m = wl_container_of(l, m, cursorButton_);
+            auto* ev = static_cast<struct wlr_pointer_button_event*>(data);
+            if (!ev) return;
+            m->onPointerButton(ev->button,
+                               ev->state == WL_POINTER_BUTTON_STATE_PRESSED);
+        };
+        wl_signal_add(&cursor_->events.button, &cursorButton_);
+    }
+
     if (!wlr_backend_start(backend_)) {
         std::fprintf(stderr, "[tvshell] backend failed to start\n");
         return false;
@@ -173,10 +222,16 @@ bool Manager::initWayland() {
             std::fprintf(stderr, "[tvshell] cannot add a headless output\n");
     } else if (nested_) {
         struct wlr_output* out = wlr_wl_output_create(backend_);
-        if (!out)
+        if (!out) {
             std::fprintf(stderr, "[tvshell] cannot create a nested output\n");
-        else
+        } else {
             wlr_wl_output_set_title(out, "TV Shell");
+            fullscreenPending_ = opts_.fullscreen;
+            if (fullscreenPending_ && wm_wl_output_set_fullscreen(out)) {
+                fullscreenPending_ = false;
+                std::fprintf(stderr, "[tvshell] nested window fullscreen\n");
+            }
+        }
     }
 
     const char* socket = nullptr;
@@ -216,7 +271,7 @@ bool Manager::initShell() {
     icons_.init(assetDir_ + "/icons", assetDir_ + "/icons-hatter");
 
     section_ = Section::Home;
-    zone_ = Zone::Rail;
+    zone_ = Zone::Content;
     railFocus_ = int(Section::Home);
     reloadApps();
 
@@ -227,7 +282,17 @@ bool Manager::initShell() {
     focusScale_.configureIOS(0.22, 0.80);
     focusScale_.value = 1.0;
 
+    gridScroll_.configureIOS(0.34, 0.86);
+    gridScroll_.value = 0.0;
+
+    ccSpring_.configureIOS(0.30, 0.90);
+    ccSpring_.value = 0.0;
+
     controllers_.init(evloop_, [this](const PadEvent& event) { onController(event); });
+    // The Control Centre reads the machine through SystemControls: radios,
+    // audio, backlight and the media player are all probed off the frame path.
+    sysctl_.init();
+    sysctl_.requestRefresh();
     if (controllers_.count() == 0)
         std::fprintf(stderr,
                      "[tvshell] no controller found (check /dev/input permissions)\n");
@@ -238,6 +303,12 @@ bool Manager::initShell() {
             Manager* m = static_cast<Manager*>(data);
             const double now = nowMs();
             m->controllers_.pollRepeats(now);
+            // A finished probe is drained here, off the render path, so the
+            // panel never waits on a helper process.
+            if (m->sysctl_.poll()) {
+                m->dirty_ = true;
+                m->requestFrame();
+            }
             if (m->home_ || !m->active_) {
                 const time_t t = time(nullptr);
                 struct tm lt {};
@@ -248,11 +319,12 @@ bool Manager::initShell() {
                     m->requestFrame();
                 }
             }
-            if (m->tickTimer_) wl_event_source_timer_update(m->tickTimer_, 50);
+            if (m->tickTimer_)
+                wl_event_source_timer_update(m->tickTimer_, m->minimal_ ? 100 : 50);
             return 0;
         },
         this);
-    if (tickTimer_) wl_event_source_timer_update(tickTimer_, 50);
+    if (tickTimer_) wl_event_source_timer_update(tickTimer_, minimal_ ? 100 : 50);
 
     for (const std::string& cmd : opts_.launch) wm::launchApp(cmd);
     return true;
@@ -354,7 +426,19 @@ void Manager::onNewOutput(struct wlr_output* output) {
     requestFrame();
 }
 
-void Manager::onOutputFrame() { renderFrameOnOutput(); }
+void Manager::onOutputFrame() {
+    // A nested output's host toplevel only exists once its surface has been
+    // mapped, so a fullscreen request made at creation can arrive too early.
+    // Retry on the first frame callbacks, by which point it is guaranteed.
+    if (fullscreenPending_ && output_ && fullscreenAttempts_ < 60) {
+        ++fullscreenAttempts_;
+        if (wm_wl_output_set_fullscreen(output_)) {
+            fullscreenPending_ = false;
+            std::fprintf(stderr, "[tvshell] nested window fullscreen\n");
+        }
+    }
+    renderFrameOnOutput();
+}
 
 void Manager::onOutputDestroy() {
     output_ = nullptr;
@@ -376,6 +460,7 @@ void Manager::syncOutputSize() {
         compositor_.resize(w, h);
     }
     rebuildRows();
+    if (ccOpen_) layoutControlCenter();
     dirty_ = true;
 }
 
@@ -406,9 +491,12 @@ void Manager::renderFrameOnOutput() {
 
     compositor_.beginFrame();
     render();
+    compositor_.present();
+    // present() is what flushes the last queued batch, so a dump taken before
+    // it loses the final group of draw calls -- which is the footer's hint text,
+    // the last thing painted every frame.
     if (!opts_.dump.empty() && opts_.frames > 0 && framesRendered_ + 1 >= opts_.frames)
         dumpFrame();
-    compositor_.present();
     wlr_render_pass_submit(pass);
 
     if (!wlr_output_commit_state(output_, &state)) {
@@ -445,6 +533,35 @@ bool Manager::tick(double now) {
     lastTick_ = now;
     if (dt <= 0.0 || dt > 0.1) dt = 1.0 / 60.0;
 
+    const double scaleTarget = (home_ && zone_ == Zone::Content) ? 1.0 : 0.0;
+    const LauncherLayout layout = launcherLayout();
+    const double step = double(layout.cardW + layout.gap);
+
+    // Minimal mode writes the resting value instead of running the spring. A
+    // remote press then costs exactly one frame, and the shell never redraws a
+    // whole 720p screen just to glide a card into place.
+    if (minimal_) {
+        homeSpring_.value = homeTarget_;
+        homeSpring_.velocity = 0.0;
+        focusScale_.value = scaleTarget;
+        focusScale_.velocity = 0.0;
+        for (size_t i = 0; i < rowScroll_.size() && i < rows_.size(); ++i) {
+            const int count = int(rows_[i].cards.size());
+            const double maxScroll =
+                std::max(0.0, double(count) * step - double(layout.contentW));
+            const double target = (int(i) == row_ && zone_ == Zone::Content)
+                                      ? std::clamp(double(col_) * step, 0.0, maxScroll)
+                                      : std::clamp(rowScroll_[i].value, 0.0, maxScroll);
+            rowScroll_[i].value = target;
+            rowScroll_[i].velocity = 0.0;
+        }
+        gridScroll_.value = gridScrollTarget(layout);
+        gridScroll_.velocity = 0.0;
+        ccSpring_.value = ccOpen_ ? 1.0 : 0.0;
+        ccSpring_.velocity = 0.0;
+        return false;
+    }
+
     bool moved = false;
     if (!homeSpring_.settled(homeTarget_, 0.001)) {
         homeSpring_.step(homeTarget_, dt);
@@ -456,7 +573,6 @@ bool Manager::tick(double now) {
     // Only the card strip the controller is standing on grows; leaving the
     // content column (or the launcher) lets every card settle back to its rest
     // size. One spring is enough because at most one card is focused.
-    const double scaleTarget = (home_ && zone_ == Zone::Content) ? 1.0 : 0.0;
     if (!focusScale_.settled(scaleTarget, 0.001)) {
         focusScale_.step(scaleTarget, dt);
         moved = true;
@@ -466,8 +582,6 @@ bool Manager::tick(double now) {
 
     // Each row keeps its focused card in view by scrolling a strip, the way a
     // TV home screen slides its row rather than paging it.
-    const LauncherLayout layout = launcherLayout();
-    const double step = double(layout.cardW + layout.gap);
     for (size_t i = 0; i < rowScroll_.size() && i < rows_.size(); ++i) {
         const int count = int(rows_[i].cards.size());
         const double maxScroll =
@@ -484,14 +598,35 @@ bool Manager::tick(double now) {
             rowScroll_[i].value = target;
         }
     }
+
+    const double gridTarget = gridScrollTarget(layout);
+    if (!gridScroll_.settled(gridTarget, 0.5)) {
+        gridScroll_.step(gridTarget, dt);
+        moved = true;
+    } else {
+        gridScroll_.value = gridTarget;
+    }
+
+    const double ccTarget = ccOpen_ ? 1.0 : 0.0;
+    if (!ccSpring_.settled(ccTarget, 0.001)) {
+        ccSpring_.step(ccTarget, dt);
+        moved = true;
+    } else {
+        ccSpring_.value = ccTarget;
+    }
     if (moved) dirty_ = true;
     return moved;
 }
 
 void Manager::render() {
-    drawBackground();
-    if (active_ && active_->mapped && active_->tex.valid()) drawClient();
+    const bool appVisible = active_ && active_->mapped && active_->tex.valid();
+    // A fullscreen app already covers the output; painting the backdrop under it
+    // is pure fill rate, which is the first thing a Pi 3 runs out of.
+    if (!appVisible) drawBackground();
+    if (appVisible) drawClient();
     if (homeSpring_.value > 0.001) drawHome();
+    if (ccOpen_ || ccSpring_.value > 0.001) drawControlCenter();
+    drawCursor();
 }
 
 void Manager::dumpFrame() {
@@ -503,7 +638,9 @@ void Manager::dumpFrame() {
     FILE* f = std::fopen(opts_.dump.c_str(), "wb");
     if (!f) return;
     std::fprintf(f, "P6\n%d %d\n255\n", w, h);
-    for (int y = h - 1; y >= 0; --y) {
+    // wlroots' output framebuffer is already top-down in GLES2 here (the same
+    // order the desktop build's dump uses), so the rows are written as read.
+    for (int y = 0; y < h; ++y) {
         const unsigned char* row = pixels.data() + size_t(y) * size_t(w) * 4;
         for (int x = 0; x < w; ++x) {
             const unsigned char rgb[3] = {row[x * 4 + 0], row[x * 4 + 1], row[x * 4 + 2]};
@@ -692,8 +829,16 @@ void Manager::focusClient(Client* c) {
 
 void Manager::onNewInput(struct wlr_input_device* device) {
     if (!device) return;
-    if (device->type == WLR_INPUT_DEVICE_KEYBOARD)
+    if (device->type == WLR_INPUT_DEVICE_KEYBOARD) {
         setupKeyboard(wlr_keyboard_from_input_device(device));
+        return;
+    }
+    // A pointer only reaches the cursor once it is attached to it; without this
+    // the shell never sees a motion or a button.
+    if (device->type == WLR_INPUT_DEVICE_POINTER) {
+        pointerPresent_ = true;
+        if (cursor_) wlr_cursor_attach_input_device(cursor_, device);
+    }
 }
 
 void Manager::setupKeyboard(struct wlr_keyboard* keyboard) {
@@ -741,14 +886,41 @@ void Manager::onKey(uint32_t keycode, uint32_t, bool pressed) {
     if (!keyboard_) return;
     const xkb_keysym_t sym = xkb_state_key_get_one_sym(keyboard_->xkb_state, keycode + 8);
 
-    if (pressed && sym == XKB_KEY_Home) {
+    if (ccOpen_) {
+        if (!pressed) return;
+        switch (sym) {
+            case XKB_KEY_Left: moveCcFocus(-1, 0); return;
+            case XKB_KEY_Right: moveCcFocus(1, 0); return;
+            case XKB_KEY_Up: moveCcFocus(0, -1); return;
+            case XKB_KEY_Down: moveCcFocus(0, 1); return;
+            case XKB_KEY_Return:
+            case XKB_KEY_KP_Enter: activateCcFocus(); return;
+            case XKB_KEY_Escape:
+            case XKB_KEY_BackSpace:
+            case XKB_KEY_XF86Back:
+            case XKB_KEY_Menu:
+            case XKB_KEY_XF86MenuKB: toggleControlCenter(); return;
+            case XKB_KEY_Home:
+            case XKB_KEY_XF86HomePage:
+                setHome(true);
+                toggleControlCenter();
+                return;
+            default: return;
+        }
+    }
+
+    // A Fire TV remote is an ordinary Bluetooth keyboard to Linux: the d-pad
+    // arrives as arrow keys, select as Return, back as KEY_BACK (XKB's
+    // XF86Back) and home as KEY_HOMEPAGE (XF86HomePage). Those have to drive
+    // the launcher too, not just the desktop keys.
+    if (pressed && (sym == XKB_KEY_Home || sym == XKB_KEY_XF86HomePage)) {
         setHome(true);
         setSection(Section::Home);
         zone_ = Zone::Content;
         return;
     }
     if (!home_ && active_ && pressed &&
-        (sym == XKB_KEY_Escape || sym == XKB_KEY_BackSpace)) {
+        (sym == XKB_KEY_Escape || sym == XKB_KEY_BackSpace || sym == XKB_KEY_XF86Back)) {
         setHome(true);
         return;
     }
@@ -763,7 +935,12 @@ void Manager::onKey(uint32_t keycode, uint32_t, bool pressed) {
             case XKB_KEY_Return:
             case XKB_KEY_KP_Enter: activateFocused(); break;
             case XKB_KEY_Escape:
-            case XKB_KEY_BackSpace: launcherBack(); break;
+            case XKB_KEY_BackSpace:
+            case XKB_KEY_XF86Back: launcherBack(); break;
+            // The Fire TV remote's menu button cycles the sections, like the
+            // Menu/Options button on a pad.
+            case XKB_KEY_Menu:
+            case XKB_KEY_XF86MenuKB: toggleControlCenter(); break;
             case XKB_KEY_Page_Up: cycleSection(-1); break;
             case XKB_KEY_Page_Down: cycleSection(1); break;
             default: break;
@@ -774,6 +951,25 @@ void Manager::onKey(uint32_t keycode, uint32_t, bool pressed) {
 }
 
 void Manager::onController(const PadEvent& event) {
+    if (ccOpen_) {
+        if (!event.pressed) return;
+        switch (event.button) {
+            case PadButton::Up: moveCcFocus(0, -1); break;
+            case PadButton::Down: moveCcFocus(0, 1); break;
+            case PadButton::Left: moveCcFocus(-1, 0); break;
+            case PadButton::Right: moveCcFocus(1, 0); break;
+            case PadButton::Select: activateCcFocus(); break;
+            case PadButton::Back:
+            case PadButton::Menu: toggleControlCenter(); break;
+            case PadButton::Home:
+                setHome(true);
+                toggleControlCenter();
+                break;
+            default: break;
+        }
+        return;
+    }
+
     if (home_) {
         if (!event.pressed) return;
         switch (event.button) {
@@ -787,16 +983,20 @@ void Manager::onController(const PadEvent& event) {
                 setSection(Section::Home);
                 zone_ = Zone::Content;
                 break;
-            case PadButton::Menu: cycleSection(1); break;
+            case PadButton::Menu: toggleControlCenter(); break;
             case PadButton::PageLeft: cycleSection(-1); break;
             case PadButton::PageRight: cycleSection(1); break;
         }
         return;
     }
 
-    if (event.button == PadButton::Home || event.button == PadButton::Menu ||
-        event.button == PadButton::Back) {
+    if (event.button == PadButton::Home || event.button == PadButton::Back) {
         if (event.pressed) setHome(true);
+        return;
+    }
+    // Menu is the quick-settings button everywhere, over an app as well.
+    if (event.button == PadButton::Menu) {
+        if (event.pressed) toggleControlCenter();
         return;
     }
     if (!active_) {
@@ -804,6 +1004,40 @@ void Manager::onController(const PadEvent& event) {
         return;
     }
     forwardKey(padKey(event.button), event.pressed);
+}
+
+void Manager::onPointerMotion(double x, double y) {
+    ptrX_ = x;
+    ptrY_ = y;
+    pointerSeen_ = true;
+    // The cursor is drawn by the shell, so every move needs a frame even when
+    // nothing else changed: the previous position has to be erased.
+    dirty_ = true;
+    requestFrame();
+}
+
+void Manager::onPointerButton(uint32_t button, bool pressed) {
+    if (!pressed || button != BTN_LEFT || !cursor_) return;
+    const int x = int(std::lround(cursor_->x));
+    const int y = int(std::lround(cursor_->y));
+
+    // The clock is the Control Centre's handle, exactly as it is on the
+    // desktop shell. Only while the launcher (and therefore the clock) is
+    // actually on screen.
+    if (home_ && homeSpring_.value > 0.5 && clockHitRect().contains(x, y)) {
+        toggleControlCenter();
+        return;
+    }
+
+    if (!ccOpen_) return;
+    for (size_t i = 0; i < ccControls_.size(); ++i) {
+        if (!ccControls_[i].rect.contains(x, y)) continue;
+        ccFocus_ = int(i);
+        activateCcControl(ccControls_[i].id);
+        return;
+    }
+    // Clicking the panel's padding keeps it; clicking outside dismisses it.
+    if (!ccRect_.contains(x, y)) toggleControlCenter();
 }
 
 void Manager::setHome(bool home) {
@@ -822,26 +1056,48 @@ Section Manager::section() const { return section_; }
 
 LauncherLayout Manager::launcherLayout() const {
     LauncherLayout L;
-    const int margin = std::max(16, screenW_ / 48);
-    L.railW = std::clamp(screenW_ / 9, 88, 168);
-    L.railItemH = std::clamp(screenH_ / 8, 56, 88);
-    L.topH = std::max(56, screenH_ / 9);
-    L.footerH = std::max(32, screenH_ / 20);
-    L.contentX = L.railW + margin;
-    L.contentW = std::max(200, screenW_ - L.contentX - margin);
-    L.heroH = std::clamp(int(screenH_ * 26 / 100), 110, 300);
-    L.rowsTop = L.topH + L.heroH + margin / 2;
-    L.gap = std::max(10, screenW_ / 110);
+    const int w = screenW_;
+    const int h = screenH_;
 
-    const int rowCount = std::max(1, int(rows_.size()));
-    const int available = std::max(120, screenH_ - L.rowsTop - L.footerH - margin / 2);
-    L.captionH = std::clamp(available / rowCount / 7, 20, 34);
-    L.cardH = std::clamp(available / rowCount - L.captionH - margin / 3, 84,
-                         int(screenH_ * 34 / 100));
-    L.cardW = std::clamp(L.cardH * 6 / 5, 110, std::max(110, L.contentW / 2));
-    L.rowStride = L.cardH + L.captionH + margin / 3;
-    L.iconsPerRow = std::max(1, (L.contentW + L.gap) / (L.cardW + L.gap));
+    L.margin = std::clamp(w / 48, 20, 40);
+    L.railW = std::clamp(w / 14, 72, 108);
+    L.contentX = L.railW + L.margin;
+    L.contentW = std::max(240, w - L.contentX - L.margin);
+    L.topH = std::clamp(h / 11, 54, 88);
+    L.footerH = std::max(26, h / 28);
+    L.gap = std::clamp(w / 120, 10, 20);
+    L.heroH = std::clamp(h * 21 / 100, 100, 232);
+    L.captionH = std::clamp(h / 42, 20, 32);
+    L.railItemH = std::clamp(h / 7, 58, 92);
+
+    // The grid is the part of the screen that has to fill exactly: the hero and
+    // the footer are fixed sizes, so the rows share whatever is left between
+    // them. A row is `visibleRows` of that space, which is what makes a page of
+    // rows land on the same baseline every time and never leave a half card
+    // sliced by the hero or the footer.
+    L.rowsTop = L.topH + L.heroH + std::max(10, h / 30);
+    L.gridBottom = h - L.footerH;
+    const int available = std::max(120, L.gridBottom - L.rowsTop);
+    L.visibleRows = std::clamp(
+        int(std::lround(double(available) / (double(h) * 0.19))), 2, 4);
+    L.rowStride = (available + L.gap) / L.visibleRows;
+    L.cardH = std::max(84, L.rowStride - L.captionH - 2 * L.gap);
+
+    // Cards keep roughly a 1:1.2 portrait ratio; the column count follows from
+    // that, then the width is stretched so a full row spans the content column
+    // with no ragged gap at the right edge.
+    L.iconsPerRow = std::clamp(
+        int(std::lround(double(L.contentW) / (double(L.cardH) * 1.18))), 3, 10);
+    L.cardW = (L.contentW - (L.iconsPerRow - 1) * L.gap) / L.iconsPerRow;
     return L;
+}
+
+double Manager::gridScrollTarget(const LauncherLayout& layout) const {
+    if (rows_.empty()) return 0.0;
+    const int pageRows = std::max(1, layout.visibleRows);
+    const int maxPage = (int(rows_.size()) - 1) / pageRows;
+    const int page = std::min(row_ / pageRows, maxPage);
+    return double(page * pageRows * layout.rowStride);
 }
 
 void Manager::reloadApps() {
@@ -889,24 +1145,45 @@ void Manager::rebuildRows() {
         }
         return indices;
     };
-    const auto addAppRow = [this](const char* title, const std::vector<int>& indices) {
+    const LauncherLayout layout = launcherLayout();
+    const size_t cols = size_t(std::max(1, layout.iconsPerRow));
+
+    // One long strip that the row slides along, the way a TV home screen
+    // carousels its shelves.
+    const auto addStrip = [this](const char* title, const std::vector<int>& indices) {
         if (indices.empty()) return;
         Row row;
         row.title = title;
         for (int index : indices) row.cards.push_back(CardRef{index, CardAction::None});
         rows_.push_back(std::move(row));
     };
+    // A grid: the list is cut into rows that hold one screen of columns, so the
+    // grid pages vertically while each row stays put. Continuation rows keep an
+    // empty caption, which is the spacing between them.
+    const auto addGrid = [this, cols](const char* title, const std::vector<int>& indices) {
+        for (size_t start = 0; start < indices.size(); start += cols) {
+            Row row;
+            if (start == 0) row.title = title;
+            const size_t end = std::min(indices.size(), start + cols);
+            for (size_t i = start; i < end; ++i)
+                row.cards.push_back(CardRef{indices[i], CardAction::None});
+            rows_.push_back(std::move(row));
+        }
+    };
 
     switch (section_) {
         case Section::Home:
-            addAppRow("Continue", recentIndices());
-            addAppRow("Your apps", appIndices());
+            // The way Android TV's home screen works when there is nothing to
+            // resume: a Continue shelf if anything has been opened, then the
+            // app grid itself, so the screen is never one lonely row.
+            addStrip("Continue", recentIndices());
+            addGrid("Your apps", appIndices());
             break;
         case Section::Apps:
-            addAppRow("All apps", appIndices());
+            addGrid("All apps", appIndices());
             break;
         case Section::Recent:
-            addAppRow("Recently used", recentIndices());
+            addGrid("Recently used", recentIndices());
             break;
         case Section::Settings: {
             Row row;
@@ -924,6 +1201,7 @@ void Manager::rebuildRows() {
     if (rows_.empty()) {
         row_ = 0;
         col_ = 0;
+        zone_ = Zone::Rail;
     } else {
         row_ = std::clamp(row_, 0, int(rows_.size()) - 1);
         col_ = std::clamp(col_, 0, int(rows_[size_t(row_)].cards.size()) - 1);
@@ -993,7 +1271,7 @@ void Manager::moveContent(int dx, int dy) {
     } else if (dy < 0) {
         if (row_ > 0) {
             --row_;
-            col_ = std::min(col_, int(rows_[size_t(row_)].cards.size()) - 1);
+            col_ = std::max(0, std::min(col_, int(rows_[size_t(row_)].cards.size()) - 1));
         } else {
             // Up from the first row hands the focus back to the section rail,
             // which is where a TV remote expects to land.
@@ -1003,7 +1281,7 @@ void Manager::moveContent(int dx, int dy) {
     } else if (dy > 0) {
         if (row_ + 1 >= int(rows_.size())) return;
         ++row_;
-        col_ = std::min(col_, int(rows_[size_t(row_)].cards.size()) - 1);
+        col_ = std::max(0, std::min(col_, int(rows_[size_t(row_)].cards.size()) - 1));
     } else {
         return;
     }

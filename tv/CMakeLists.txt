@@ -31,12 +31,15 @@ add_executable(tvshell
   main.cpp
   manager.cpp
   ui.cpp
+  cc.cpp
   controller.cpp
   ${SUPERNOVA_ROOT}/src/wl/compositor.cpp
+  ${SUPERNOVA_ROOT}/src/wl/host_output.cpp
   ${SUPERNOVA_ROOT}/src/wm/text.cpp
   ${SUPERNOVA_ROOT}/src/wm/icons.cpp
   ${SUPERNOVA_ROOT}/src/wm/png.cpp
   ${SUPERNOVA_ROOT}/src/wm/apps.cpp
+  ${SUPERNOVA_ROOT}/src/wm/sysctl.cpp
 )
 
 # src/wl/include first: its epoxy/gl.h shim maps the shared icon header onto
@@ -48,6 +51,15 @@ target_include_directories(tvshell PRIVATE
   ${SUPERNOVA_ROOT}/src/wm
   ${SUPERNOVA_ROOT}/src
 )
+
+# host_output.cpp needs wlroots' private wlr_wl_output (to reach the host
+# xdg_toplevel that a nested window is built on). Without the matching wlroots
+# source tree it compiles its stub, and --fullscreen reports that it cannot
+# fullscreen the nested window.
+if(EXISTS "${SUPERNOVA_ROOT}/.deps/src/wlroots/include/backend/wayland.h")
+  target_include_directories(tvshell PRIVATE
+    "${SUPERNOVA_ROOT}/.deps/src/wlroots/include")
+endif()
 
 target_compile_definitions(tvshell PRIVATE WLR_USE_UNSTABLE)
 target_compile_options(tvshell PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)

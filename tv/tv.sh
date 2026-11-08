@@ -5,11 +5,14 @@
 #   ./tv/tv.sh                     nest inside the current Wayland session
 #   ./tv/tv.sh --headless          render offscreen (for tests/CI)
 #   ./tv/tv.sh --drm               take over a TTY with DRM + libinput
+#   ./tv/tv.sh --firetv            shorthand for --drm --minimal, as on a TV stick
 #   ./tv/tv.sh --frames 120 --dump /tmp/tv.ppm
 #   ./tv/tv.sh --launch nautilus   start an app with the shell
 #
-# Controller input is read from /dev/input/event*. If no controller is found,
-# make sure your user can read those nodes (usually the "input" group).
+# Controller input is read from /dev/input/event*. Xbox pads, DualShock 4 and
+# DualSense are read directly; a Fire TV remote works as a Bluetooth keyboard.
+# If no controller is found, make sure your user can read those nodes (usually
+# the "input" group).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -62,4 +65,16 @@ elif [[ ! -r "$(compgen -G '/dev/input/event*' | head -n1)" ]]; then
 fi
 
 cd "$ROOT"
-exec "$BIN" "$@"
+
+# A Fire TV style box runs the lean profile straight on the HDMI output, with
+# no desktop under it and no motion the stick's GPU cannot afford.
+ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == "--firetv" ]]; then
+        ARGS+=(--drm --minimal)
+    else
+        ARGS+=("$arg")
+    fi
+done
+
+exec "$BIN" "${ARGS[@]}"

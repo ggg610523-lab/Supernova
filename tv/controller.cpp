@@ -51,15 +51,45 @@ bool hasEventBit(int fd, unsigned long ev, unsigned code) {
     return testBit(bits, code);
 }
 
-// A gamepad is recognised by the presence of the south face button and at least
-// one analog axis. This deliberately rejects ordinary keyboards and touchpads,
-// which wlroots already feeds through the seat.
+// A gamepad is recognised by the presence of a face/d-pad/guide button and at
+// least one analog axis. This deliberately rejects ordinary keyboards and
+// touchpads, which wlroots already feeds through the seat.
+//
+// BTN_MODE is what catches the TV remotes that present themselves as a joystick
+// with only a hat and a guide button (several Bluetooth remotes do), while the
+// PlayStation pads (DualShock 4, DualSense) always expose BTN_SOUTH and ABS_X.
 bool looksLikeGamepad(int fd) {
-    const bool south = hasEventBit(fd, EV_KEY, BTN_SOUTH) ||
-                       hasEventBit(fd, EV_KEY, BTN_DPAD_UP);
+    const bool face = hasEventBit(fd, EV_KEY, BTN_SOUTH) ||
+                      hasEventBit(fd, EV_KEY, BTN_DPAD_UP) ||
+                      hasEventBit(fd, EV_KEY, BTN_MODE);
     const bool axes = hasEventBit(fd, EV_ABS, ABS_X) ||
                       hasEventBit(fd, EV_ABS, ABS_HAT0X);
-    return south && axes;
+    return face && axes;
+}
+
+// The name a pad is reported by, so the log says "DualSense" rather than
+// "Wireless Controller" and a Fire TV remote is recognisable at a glance.
+std::string padLabel(unsigned short vendor, unsigned short product) {
+    switch (vendor) {
+        case 0x054C:  // Sony
+            switch (product) {
+                case 0x05C4:
+                case 0x09CC:
+                case 0x0BA0:
+                    return "DualShock 4";
+                case 0x0CE6:
+                    return "DualSense";
+                case 0x0DF2:
+                    return "DualSense Edge";
+                default:
+                    return "PlayStation controller";
+            }
+        case 0x045E: return "Xbox controller";
+        case 0x057E: return "Switch controller";
+        case 0x0171: return "Amazon Fire TV remote";
+        default: break;
+    }
+    return {};
 }
 
 }  // namespace
@@ -79,6 +109,8 @@ struct ControllerManager::Impl {
         Dir repeatDir = Dir::None;
         double nextRepeat = 0.0;
 
+        unsigned short vendor = 0;
+        unsigned short product = 0;
         int absMinX = 0, absMaxX = 0, absCenterX = 0;
         int absMinY = 0, absMaxY = 0, absCenterY = 0;
         int stickX = 0, stickY = 0;
@@ -183,6 +215,9 @@ struct ControllerManager::Impl {
             case BTN_TR:
                 b = PadButton::PageRight;
                 break;
+            // DualShock 4 / DualSense: Options opens the section menu and
+            // Share/Create steps back, which is what a TV remote's menu and
+            // back buttons do.
             case BTN_START:
                 b = PadButton::Menu;
                 break;
@@ -193,6 +228,17 @@ struct ControllerManager::Impl {
             case KEY_HOMEPAGE:
             case KEY_HOME:
                 b = PadButton::Home;
+                break;
+            // TV remotes that report as a joystick rather than a keyboard.
+            case KEY_MENU:
+            case KEY_INFO:
+                b = PadButton::Menu;
+                break;
+            case KEY_PAGEUP:
+                b = PadButton::PageLeft;
+                break;
+            case KEY_PAGEDOWN:
+                b = PadButton::PageRight;
                 break;
             default:
                 return;
@@ -274,6 +320,12 @@ struct ControllerManager::Impl {
         dev->fd = fd;
         char name[128] = {};
         if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) >= 0) dev->name = name;
+        struct input_id id {};
+        const bool haveId = ioctl(fd, EVIOCGID, &id) >= 0;
+        if (haveId) {
+            dev->vendor = id.vendor;
+            dev->product = id.product;
+        }
 
         struct input_absinfo info {};
         if (ioctl(fd, EVIOCGABS(ABS_X), &info) >= 0) {
@@ -294,8 +346,10 @@ struct ControllerManager::Impl {
             close(fd);
             return;
         }
-        std::fprintf(stderr, "[tvshell] controller: %s (%s)\n",
-                     dev->name.empty() ? "gamepad" : dev->name.c_str(), path.c_str());
+        std::string label = padLabel(dev->vendor, dev->product);
+        if (label.empty()) label = dev->name;
+        if (label.empty()) label = "gamepad";
+        std::fprintf(stderr, "[tvshell] controller: %s (%s)\n", label.c_str(), path.c_str());
         devices.push_back(std::move(dev));
     }
 

@@ -1,9 +1,18 @@
-// Xbox-style gamepad and TV-remote input for the TV shell.
+// Gamepad and TV-remote input for the TV shell.
 //
 // wlroots/libinput gives us keyboards and pointers, but not joysticks. A TV
 // shell needs the d-pad, A/B, Guide and the shoulder buttons, so this reads the
-// raw evdev event devices directly. The manager exposes only semantic events;
-// no Linux input codes leak into the UI.
+// raw evdev event devices directly. Xbox pads, DualShock 4 and DualSense all
+// speak the same Linux gamepad codes, so one mapping serves them; the device is
+// named in the log ("DualSense", "DualShock 4") to make a pairing visible.
+//
+// A Fire TV remote is not a gamepad at all: it is a Bluetooth HID keyboard, so
+// wlroots already delivers it through the seat and Manager::onKey maps its
+// arrow/Return/Back/Home/Menu keys. Only remotes that report as a joystick
+// (hat + guide button) come through here.
+//
+// The manager exposes only semantic events; no Linux input codes leak into the
+// UI.
 #pragma once
 
 #include <cstddef>

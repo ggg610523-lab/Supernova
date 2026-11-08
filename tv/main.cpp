@@ -38,6 +38,8 @@ void usage(const char* argv0) {
         "  --headless          render offscreen (no display needed)\n"
         "  --drm               take over a TTY through DRM + libinput\n"
         "  --nested            force nesting in the current Wayland session\n"
+        "  -f, --fullscreen    fullscreen the nested window\n"
+        "  --minimal           reduce motion and fill rate (Pi 3; on with --drm)\n"
         "  --socket NAME       Wayland socket name to advertise\n"
         "  --width W           output width for headless/nested (default 1280)\n"
         "  --height H          output height (default 720)\n"
@@ -48,7 +50,11 @@ void usage(const char* argv0) {
         "  -h, --help          this message\n"
         "\n"
         "Controller: d-pad/left stick navigate, A select, B back, Guide home,\n"
-        "LB/RB page, Start menu. Keyboard arrows/Enter/Escape/Home also work.\n"
+        "LB/RB page, Menu opens the Control Centre. Xbox, DualShock 4 and\n"
+        "DualSense are all read\n"
+        "directly from /dev/input. A Fire TV remote works over Bluetooth: its\n"
+        "d-pad/select/back/home/menu arrive as a keyboard, which is handled too.\n"
+        "Keyboard arrows/Enter/Escape/Home also work.\n"
         "\n"
         "On the Pi, run ./tv.sh --drm from a VT. The user needs read access to\n"
         "/dev/input/event* (normally the 'input' group) for the controller.\n",
@@ -80,6 +86,14 @@ int main(int argc, char** argv) {
         }
         if (a == "--no-vsync") {
             options.noVsync = true;
+            continue;
+        }
+        if (a == "-f" || a == "--fullscreen") {
+            options.fullscreen = true;
+            continue;
+        }
+        if (a == "--minimal") {
+            options.minimal = true;
             continue;
         }
         if ((a == "--socket") && i + 1 < argc) {

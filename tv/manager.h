@@ -16,6 +16,7 @@ extern "C" {
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "apps.h"
@@ -23,12 +24,14 @@ extern "C" {
 #include "controller.h"
 #include "icons.h"
 #include "motion.h"
+#include "sysctl.h"
 #include "text.h"
 #include "theme.h"
 #include "util.h"
 
 struct wl_display;
 struct wlr_allocator;
+struct wlr_cursor;
 struct wlr_backend;
 struct wlr_input_device;
 struct wlr_keyboard;
@@ -48,6 +51,8 @@ struct Options {
     bool headless = false;
     bool drm = false;
     bool noVsync = false;
+    bool fullscreen = false;  // nested window only
+    bool minimal = false;     // reduced motion and fill rate (Pi 3)
     int width = 1280;
     int height = 720;
     int frames = 0;  // self-test: render N frames then exit
@@ -110,20 +115,23 @@ struct Row {
 // Screen geometry of the launcher, derived from the section and the output size
 // so painting and navigation agree on where every card is.
 struct LauncherLayout {
-    int railW = 120;
+    int railW = 96;
     int railItemH = 72;
-    int topH = 80;
-    int footerH = 36;
-    int contentX = 150;
-    int contentW = 1100;
-    int heroH = 180;
-    int rowsTop = 280;
-    int rowStride = 200;
-    int captionH = 28;
-    int cardW = 194;
-    int cardH = 162;
-    int gap = 11;
-    int iconsPerRow = 5;
+    int margin = 28;
+    int topH = 64;
+    int footerH = 28;
+    int contentX = 124;
+    int contentW = 1120;
+    int heroH = 152;
+    int rowsTop = 240;
+    int gridBottom = 692;  // first pixel of the footer band
+    int rowStride = 154;
+    int captionH = 20;
+    int cardW = 132;
+    int cardH = 124;
+    int gap = 10;
+    int iconsPerRow = 8;
+    int visibleRows = 3;  // whole rows a grid page shows at once
 };
 
 class Manager {
@@ -169,6 +177,8 @@ private:
     void setupKeyboard(struct wlr_keyboard* keyboard);
     void onKey(uint32_t keycode, uint32_t modifiers, bool pressed);
     void onController(const PadEvent& event);
+    void onPointerMotion(double x, double y);
+    void onPointerButton(uint32_t button, bool pressed);
     void forwardKey(unsigned evdevCode, bool pressed);
 
     // ---- TV policy
@@ -191,6 +201,9 @@ private:
     const CardRef* focusedCard() const;
     int focusedApp() const;
     LauncherLayout launcherLayout() const;
+    // How far the grid is paged down so the focused row is on screen. Whole
+    // screens of rows, so rows never land half way under the hero.
+    double gridScrollTarget(const LauncherLayout& layout) const;
     void ensureIcons();
 
     // ---- painting
@@ -202,6 +215,33 @@ private:
     void drawRail(float opacity);
     void drawTopBar(float opacity);
     void drawHints(float opacity);
+    // The clock's block, as drawn; the hit rect is the same box plus a margin,
+    // so a click on the time reads the way it does on a desktop.
+    wm::Rect clockTextRect();
+    wm::Rect clockHitRect();
+    void drawCursor();
+
+    // ---- Control Centre (cc.cpp)
+    // The desktop shell's iOS quick-settings grid, driven by a d-pad instead of
+    // a pointer: a module occupies whole cells of a 4x6 grid and every
+    // interactive part is a rectangle the focus moves between.
+    struct CcControl {
+        wm::Rect rect;
+        int id = 0;
+        int slot = 0;
+        bool vertical = false;  // a slider: value grows upwards
+    };
+    void toggleControlCenter();
+    void layoutControlCenter();
+    void moveCcFocus(int dx, int dy);
+    void activateCcFocus();
+    void activateCcControl(int id);
+    void adjustCcControl(int id, int delta);
+    int ccControlIndex(int id, int slot) const;
+    int ccScale() const;
+    wm::IconTex ccIcon(const std::string& name);
+    void drawControlCenter();
+    void drawKeycap(const char* key, const wm::Rect& box, float opacity);
     void drawTextAt(const std::string& text, int px, wm::Weight weight,
                     const wm::Color& color, int x, int y, float opacity);
     void drawTextCentered(const std::string& text, int px, wm::Weight weight,
@@ -229,6 +269,17 @@ private:
     struct wl_listener keyboardKey_ {};
     struct wl_listener keyboardMods_ {};
 
+    struct wlr_cursor* cursor_ = nullptr;
+    struct wl_listener cursorMotion_ {};
+    struct wl_listener cursorMotionAbsolute_ {};
+    struct wl_listener cursorButton_ {};
+    bool pointerPresent_ = false;
+    bool pointerSeen_ = false;
+    // Last pointer position, kept outside wlroots types so the drawing code
+    // does not have to include the cursor header.
+    double ptrX_ = 0.0;
+    double ptrY_ = 0.0;
+
     wm::Compositor compositor_;
     wm::Text text_;
     wm::IconStore icons_;
@@ -240,6 +291,7 @@ private:
     std::vector<TvApp> apps_;
     std::vector<Row> rows_;
     std::vector<wm::motion::Spring> rowScroll_;
+    wm::motion::Spring gridScroll_;  // vertical page offset of the grid
     std::vector<std::string> recentExecs_;
 
     Section section_ = Section::Home;
@@ -248,6 +300,15 @@ private:
     int row_ = 0;
     int col_ = 0;
     wm::motion::Spring focusScale_;
+
+    // ---- Control Centre state
+    bool ccOpen_ = false;
+    wm::motion::Spring ccSpring_;
+    wm::Rect ccRect_;
+    int ccFocus_ = 0;
+    std::vector<CcControl> ccControls_;
+    wm::SystemControls sysctl_;
+    std::unordered_map<std::string, wm::IconTex> ccIcons_;
 
     bool chromeIconsTried_ = false;
     wm::IconTex railIcons_[4];
@@ -259,6 +320,9 @@ private:
     double homeTarget_ = 1.0;
 
     bool nested_ = false;
+    bool minimal_ = false;
+    bool fullscreenPending_ = false;
+    int fullscreenAttempts_ = 0;
     bool running_ = false;
     bool dirty_ = true;
     int framesRendered_ = 0;
