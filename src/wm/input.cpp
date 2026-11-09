@@ -345,6 +345,13 @@ void Manager::onButtonPress(XButtonEvent& ev) {
             static_cast<unsigned long>(ev.window), static_cast<unsigned>(ev.state));
     }
 
+    // The lock/greeter surface is modal above every other shell surface.
+    if (lockScreen && lockScreen->active()) {
+        lockScreen->pointerButton(x, y, ev.button, true);
+        dirty = true;
+        return;
+    }
+
     // The mode transition splash swallows input while it plays so a stray click
     // cannot land on a shell that is about to be replaced.
     if (modeSwitching) return;
@@ -428,6 +435,11 @@ void Manager::onButtonRelease(XButtonEvent& ev) {
     if (traceInput()) {
         log("release %s at (%d,%d) on 0x%lx", buttonName(ev.button), x, y,
             static_cast<unsigned long>(ev.window));
+    }
+    // The lock surface consumes every release while it is up.
+    if (lockScreen && lockScreen->active()) {
+        lockScreen->pointerButton(x, y, ev.button, false);
+        return;
     }
     // Settings acts on the press; its release must not fall through to the home
     // screen or a window underneath.
@@ -580,6 +592,11 @@ void Manager::onMotion(XMotionEvent& ev) {
     if (traceInput() && (dragClient || ev.state)) {
         log("motion to (%d,%d) on 0x%lx mods 0x%x%s", x, y, static_cast<unsigned long>(ev.window),
             static_cast<unsigned>(ev.state), dragClient ? " [dragging]" : "");
+    }
+    if (lockScreen && lockScreen->active()) {
+        lockScreen->pointerMove(x, y);
+        dirty = true;
+        return;
     }
     if (settingsOpen) {
         updateSettingsHover(x, y);
@@ -765,6 +782,23 @@ void Manager::onMotion(XMotionEvent& ev) {
 void Manager::onKeyPress(XKeyEvent& ev) {
     const unsigned mods = ev.state & (ShiftMask | ControlMask | Mod1Mask | Mod4Mask);
     const KeySym sym = XLookupKeysym(&ev, 0);
+
+    char typedBuf[64] = {};
+    const int typedLen = XLookupString(&ev, typedBuf, sizeof(typedBuf) - 1, nullptr, nullptr);
+    const std::string typed(typedBuf, typedLen > 0 ? size_t(typedLen) : 0);
+
+    if (lockScreen && lockScreen->active()) {
+        if (lockScreen->handleKey(uint32_t(sym), typed, true)) dirty = true;
+        return;
+    }
+    // Win+L is the lock shortcut on both builds. loginctl records the lock so
+    // other session agents see it too; the screen is shown immediately.
+    if ((mods & Mod4Mask) && (sym == XK_l || sym == XK_L)) {
+        lockScreen->start(LockScreen::Mode::Lock);
+        requestSessionLock();
+        dirty = true;
+        return;
+    }
 
     // Settings is a shell modal and keeps the keyboard while it is up. Escape
     // dismisses it; Left/Right walk the three category tabs.

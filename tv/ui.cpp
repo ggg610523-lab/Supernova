@@ -95,7 +95,10 @@ const char* actionBlurb(CardAction a) {
 void Manager::drawBackground() {
     compositor_.drawRect(wm::Rect(0, 0, screenW_, screenH_), 0.0f, kField, 1.0f);
     // A cold halo behind the banner; it lifts the darkest part of the screen off
-    // pure black without becoming a visible shape of its own.
+    // pure black without becoming a visible shape of its own. It is four
+    // translucent layers spanning most of the screen, which is the single most
+    // expensive thing in a launcher frame, so lean mode simply leaves it out.
+    if (minimal_) return;
     const LauncherLayout L = launcherLayout();
     softGlow(compositor_, wm::Rect(L.contentX, L.topH, L.contentW, L.heroH),
              float(std::clamp(screenH_ / 40, 14, 24)), wm::rgb(0x1B3450),
@@ -142,7 +145,12 @@ void Manager::drawHero(float opacity) {
     const int pad = std::clamp(L.heroH / 7, 18, 34);
 
     compositor_.drawRect(hero.inflated(1), float(radius + 1), wm::rgb(0xFFFFFF, 0.06f), opacity);
-    compositor_.drawGradient(hero, float(radius), wm::rgb(0x1B222C), wm::rgb(0x11151B), opacity);
+    // One flat banner in lean mode instead of a full-width blend.
+    if (minimal_)
+        compositor_.drawRect(hero, float(radius), wm::rgb(0x171C24), opacity);
+    else
+        compositor_.drawGradient(hero, float(radius), wm::rgb(0x1B222C), wm::rgb(0x11151B),
+                                 opacity);
 
     const CardRef* card = focusedCard();
     const TvApp* app = nullptr;
@@ -304,14 +312,16 @@ void Manager::drawRows(float opacity) {
                                      wm::rgb(0x8AB4F8, 0.20f), opacity);
                 compositor_.drawRect(card.inflated(2), float(radius + 2),
                                      wm::rgb(0xFFFFFF, 0.94f), opacity);
-            } else {
+            } else if (!minimal_) {
+                // A hairline edge on every card; lean mode skips the quad and
+                // lets the card's own fill sit straight on the field.
                 compositor_.drawRect(card.inflated(1), float(radius + 1),
                                      wm::rgb(0xFFFFFF, 0.07f), opacity);
             }
             compositor_.drawRect(card, float(radius),
                                  focused ? wm::rgb(0x252C36) : wm::rgb(0x161A20), opacity);
 
-            const int iconPx = std::clamp(int(double(L.cardH) * 0.54), 40, 120);
+            const int iconPx = cardIconPx();
             if (cardIcon && cardIcon->valid()) {
                 const int ix = card.x + (card.w - iconPx) / 2;
                 const int iy = card.y + std::max(8, (L.cardH - labelH - iconPx) / 2);
@@ -334,10 +344,10 @@ void Manager::drawRail(float opacity) {
     compositor_.drawRect(wm::Rect(L.railW - 1, 0, 1, screenH_), 0.0f, wm::rgb(0xFFFFFF, 0.05f),
                          opacity);
 
-    const int markPx = std::clamp(screenH_ / 80, 10, 14);
-    drawTextCentered("TV", markPx, wm::Weight::Bold, wm::rgb(0xFFFFFF, 0.34f),
-                     wm::Rect(0, std::max(8, (L.topH - markPx - 6) / 2), L.railW, markPx + 6),
-                     opacity);
+    // The head of the rail stays empty: the mark lives in the Home row below.
+    // Loading is still done here so the Home slot has its texture by the time
+    // the nav loop reaches it.
+    ensureLogo();
 
     const int itemH = L.railItemH;
     const int iconEdge = std::clamp(itemH / 3, 20, 30);
@@ -359,12 +369,13 @@ void Manager::drawRail(float opacity) {
         }
 
         const wm::Color tone = selected ? kInk : kInkMute;
-        const wm::IconTex& icon = railIcons_[i];
-        if (icon.valid())
-            compositor_.drawTex(icon.tex,
-                                wm::Rect(item.x + (item.w - iconEdge) / 2, item.y + 10,
-                                         iconEdge, iconEdge),
-                                0.0f, tone, opacity, true, true);
+        const wm::Rect iconR(item.x + (item.w - iconEdge) / 2, item.y + 10, iconEdge, iconEdge);
+        // Home wears the shell's own mark -- untinted, since the logo's colour is
+        // the point of it; the rest keep their theme glyphs in the rail's tone.
+        if (i == 0 && logo_.valid())
+            compositor_.drawTex(logo_.tex, iconR, 0.0f, wm::rgb(0xFFFFFF), opacity, true, true);
+        else if (railIcons_[i].valid())
+            compositor_.drawTex(railIcons_[i].tex, iconR, 0.0f, tone, opacity, true, true);
 
         const wm::Rect labelBox(item.x, item.y + 10 + iconEdge, item.w, labelPx + 10);
         drawTextCentered(fit(text_, sectionTitle(Section(i)), labelPx, wm::Weight::Medium,

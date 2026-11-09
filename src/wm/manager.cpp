@@ -317,6 +317,12 @@ int Manager::run(const Options& options) {
     // to the UI font, so the clock still tells the time.
     clockText.initFromFile(assetDir + "/fonts/Roboto.ttf");
 
+    lockScreen = std::make_unique<LockScreen>();
+    lockScreen->init(assetDir, options.noAuth);
+    if (options.noAuth) log("WARNING: --no-auth bypasses PAM");
+    if (options.login) lockScreen->start(LockScreen::Mode::Login);
+    else if (options.lock) lockScreen->start(LockScreen::Mode::Lock);
+
     std::string keyError;
     grabKeys(&keyError);
     if (!keyError.empty()) log("warning: %s", keyError.c_str());
@@ -445,6 +451,12 @@ void Manager::loop() {
         // battery every few seconds. Wake often enough to service them.
         int timeout = opts->stats ? 400 : -1;
         if (!widgets.empty() && (timeout < 0 || 250 < timeout)) timeout = 250;
+        // The lock screen watches logind while idle and animates its reveal
+        // while it is up, so the event loop must wake for it.
+        if (lockScreen) {
+            if (lockScreen->active()) timeout = 16;
+            else if (timeout < 0 || 1000 < timeout) timeout = 1000;
+        }
         // A press on the home screen is waiting to turn into a long press, and the
         // hold is judged on a timer, so the loop has to wake often enough for it to
         // land on time instead of a whole poll interval late.
@@ -459,6 +471,10 @@ void Manager::tickAnimations(double now) {
     lastTick = now;
     if (dt <= 0.0 || dt > 0.1) dt = 1.0 / 60.0;  // ignore stalls and the first frame
     const double dtMs = dt * 1000.0;
+
+    // The lock/greeter screen owns the frame while it is up, and its idle path
+    // watches logind's LockedHint so `loginctl lock-session` opens it.
+    if (lockScreen && lockScreen->tick(now)) dirty = true;
 
     // The home screen's long press is a timer, not an event, so it is serviced here.
     if (tabletAnim > 0.5) updateTabletLongPress();

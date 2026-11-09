@@ -377,6 +377,13 @@ struct ControllerManager::Impl {
             d->nextRepeat = now + 110.0;
         }
     }
+
+    bool repeating() const {
+        for (const auto& d : devices) {
+            if (!d->dead && d->repeatDir != Dir::None) return true;
+        }
+        return false;
+    }
 };
 
 ControllerManager::ControllerManager() : impl_(std::make_unique<Impl>()) {}
@@ -412,6 +419,8 @@ void ControllerManager::shutdown() {
 void ControllerManager::pollRepeats(double nowMs) {
     if (impl_) impl_->pollRepeats(nowMs);
 }
+
+bool ControllerManager::repeating() const { return impl_ && impl_->repeating(); }
 
 std::size_t ControllerManager::count() const {
     return impl_ ? impl_->devices.size() : 0;

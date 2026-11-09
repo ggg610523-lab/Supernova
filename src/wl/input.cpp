@@ -131,6 +131,13 @@ void Manager::onPointerMotion(double dx, double dy) {
     pointerX = x;
     pointerY = y;
 
+    if (lockScreen && lockScreen->active()) {
+        lockScreen->pointerMove(x, y);
+        dirty = true;
+        requestFrame();
+        return;
+    }
+
     onShellMotion(x, y);
 
     // The shell owns the pointer while one of its surfaces is open or a drag is
@@ -205,6 +212,13 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
         case BTN_SIDE: button = 8; break;
         case BTN_EXTRA: button = 9; break;
         default: break;
+    }
+
+    if (lockScreen && lockScreen->active()) {
+        lockScreen->pointerButton(x, y, button, pressed);
+        dirty = true;
+        requestFrame();
+        return;
     }
 
     // A seat grab (an xdg popup menu, a drag-and-drop session) owns the pointer
@@ -298,6 +312,7 @@ void Manager::onPointerButton(unsigned button, bool pressed, uint32_t time) {
 
 void Manager::onPointerAxis(double delta) {
     PointerFrame pointerFrame{seat};
+    if (lockScreen && lockScreen->active()) return;
     // Menus and drag sessions grabs own the pointer; send the scroll through the
     // seat so the grab (a popup's scrollable menu, a drag source) receives it.
     if (seat && seat->pointer_state.grab &&
@@ -327,6 +342,18 @@ void Manager::onKey(uint32_t keycode, uint32_t modifiers, bool pressed) {
                                          sizeof buf - 1);
     std::string typed;
     if (n > 0) typed.assign(buf, size_t(n));
+
+    if (lockScreen && lockScreen->active()) {
+        if (pressed && lockScreen->handleKey(uint32_t(sym), typed, true)) dirty = true;
+        requestFrame();
+        return;
+    }
+    if (pressed && (modifiers & Mod4Mask) && (sym == XK_l || sym == XK_L)) {
+        lockScreen->start(LockScreen::Mode::Lock);
+        requestSessionLock();
+        requestFrame();
+        return;
+    }
 
     // Releasing Alt commits the Alt-Tab choice, exactly like the X11 build
     // (which watches Alt's KeyRelease): the switcher is a hold-to-cycle UI, not

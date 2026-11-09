@@ -43,6 +43,7 @@ void usage(const char* argv0) {
         "  --socket NAME       Wayland socket name to advertise\n"
         "  --width W           output width for headless/nested (default 1280)\n"
         "  --height H          output height (default 720)\n"
+        "  --mode WxH          [DRM] pick the closest output mode (e.g. 1280x720)\n"
         "  --frames N          render N frames then exit (self test)\n"
         "  --dump PATH         write the last frame as a PPM\n"
         "  --no-vsync          do not hint vsync\n"
@@ -108,6 +109,18 @@ int main(int argc, char** argv) {
         if ((a == "--height") && i + 1 < argc) {
             options.height = std::atoi(argv[++i]);
             if (options.height < 240) options.height = 240;
+            continue;
+        }
+        if ((a == "--mode") && i + 1 < argc) {
+            const std::string m = argv[++i];
+            int mw = 0;
+            int mh = 0;
+            if (std::sscanf(m.c_str(), "%dx%d", &mw, &mh) != 2 || mw < 320 || mh < 240) {
+                std::fprintf(stderr, "tvshell: bad --mode '%s' (expected WxH)\n", m.c_str());
+                return 2;
+            }
+            options.modeW = mw;
+            options.modeH = mh;
             continue;
         }
         if ((a == "--frames") && i + 1 < argc) {

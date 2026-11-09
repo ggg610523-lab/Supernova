@@ -24,6 +24,7 @@ extern "C" {
 #include "apps.h"
 #include "compositor.h"
 #include "icons.h"
+#include "lockscreen.h"
 #include "motion.h"
 #include "sysctl.h"
 #include "text.h"
@@ -240,6 +241,10 @@ struct Options {
     bool vsync = true;
     bool stats = false;
     bool unredirect = true;
+    // Requested size for a nested Wayland output. Zero means "let the host
+    // decide", which is what desktop nesting wants; mobile.sh sets a phone size.
+    int width = 0;
+    int height = 0;
     int frames = 0;  // > 0: render this many frames and exit (self test)
     // Optional: launch these commands once the WM owns the display. This
     // replaces the old SDL prototype's "--embed prog" flag: instead of
@@ -262,6 +267,14 @@ struct Options {
     // the first Start menu / desktop repaint is instant: the opt-in trade for a
     // cold cache that would otherwise stall the shell one icon at a time.
     bool preload = false;
+    // Start behind the GDM-style lock screen. --login starts in the sign-in
+    // variant with the local user picker; --lock starts locked as the current
+    // user. Both authenticate through PAM.
+    bool lock = false;
+    bool login = false;
+    // Test-only: skip PAM and unlock with any credential. Never enable this for
+    // a real session.
+    bool noAuth = false;
 };
 
 
@@ -936,6 +949,7 @@ private:
     // heavy weight out of the UI font's.
     Text clockText;
     IconStore icons;
+    std::unique_ptr<LockScreen> lockScreen;
 
     std::vector<std::unique_ptr<Client>> clients;  // bottom .. top
     Client* focused = nullptr;

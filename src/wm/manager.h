@@ -27,6 +27,7 @@
 #include "apps.h"
 #include "compositor.h"
 #include "icons.h"
+#include "lockscreen.h"
 #include "motion.h"
 #include "sysctl.h"
 #include "text.h"
@@ -239,6 +240,14 @@ struct Options {
     // the first Start menu / desktop repaint is instant: the opt-in trade for a
     // cold cache that would otherwise stall the shell one icon at a time.
     bool preload = false;
+    // Start behind the GDM-style lock screen. --login starts in the sign-in
+    // variant with the local user picker; --lock starts locked as the current
+    // user. Both authenticate through PAM.
+    bool lock = false;
+    bool login = false;
+    // Test-only: skip PAM and unlock with any credential. Never enable this for
+    // a real session.
+    bool noAuth = false;
 };
 
 
@@ -803,6 +812,7 @@ private:
     // heavy weight out of the UI font's.
     Text clockText;
     IconStore icons;
+    std::unique_ptr<LockScreen> lockScreen;
 
     std::vector<std::unique_ptr<Client>> clients;  // bottom .. top
     Client* focused = nullptr;

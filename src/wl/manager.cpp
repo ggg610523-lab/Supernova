@@ -1263,6 +1263,11 @@ int Manager::run(const Options& options) {
             m->screenH = o->height;
         }
         if (!wlr_output_init_render(o, m->allocator, m->renderer)) return;
+        if (m->opts && m->opts->width > 0 && m->opts->height > 0 &&
+            wlr_output_is_wl(o) &&
+            !wm_wl_output_set_size(o, m->opts->width, m->opts->height))
+            log("cannot request nested output size %dx%d", m->opts->width,
+                m->opts->height);
         struct wlr_output_state st;
         wlr_output_state_init(&st);
         wlr_output_state_set_enabled(&st, true);
@@ -1451,7 +1456,9 @@ int Manager::run(const Options& options) {
     }
 
     if (options.headless) {
-        struct wlr_output* o = wlr_headless_add_output(backend, 1280, 800);
+        const int hw = options.width > 0 ? options.width : 1280;
+        const int hh = options.height > 0 ? options.height : 800;
+        struct wlr_output* o = wlr_headless_add_output(backend, hw, hh);
         if (!o) log("cannot add a headless output");
     } else if (nested) {
         struct wlr_output* o = wlr_wl_output_create(backend);
@@ -1473,6 +1480,12 @@ int Manager::run(const Options& options) {
     icons.init(assetDir + "/icons", assetDir + "/icons-hatter");
     text.init(assetDir + "/fonts");
     clockText.initFromFile(assetDir + "/fonts/Roboto.ttf");
+
+    lockScreen = std::make_unique<LockScreen>();
+    lockScreen->init(assetDir, options.noAuth);
+    if (options.noAuth) log("WARNING: --no-auth bypasses PAM");
+    if (options.login) lockScreen->start(LockScreen::Mode::Login);
+    else if (options.lock) lockScreen->start(LockScreen::Mode::Lock);
 
     std::string error;
     if (!comp.init(renderer, screenW, screenH,
@@ -1555,6 +1568,11 @@ int Manager::run(const Options& options) {
             Manager* m = static_cast<Manager*>(data);
             const double now = nowMs();
             m->pollTimers(now);
+            // The frame-driven animation path cannot watch logind while the
+            // shell is idle, so the polling timer does it and asks for the
+            // first lock frame.
+            if (m->lockScreen && !m->lockScreen->active() && m->lockScreen->tick(now))
+                m->requestFrame();
             if (m->cursor && testScriptPos < testScript.size()) {
                 const std::string& step = testScript[testScriptPos++];
                 int a = 0, b = 0, c = 0;
@@ -1643,6 +1661,8 @@ bool Manager::tickAnimations(double now) {
     // and report motion separately, so "moved" really means "still in flight".
     const bool pending = dirty;
     dirty = false;
+
+    if (lockScreen && lockScreen->tick(now)) dirty = true;
 
     // The Smart Apps folder keeps its own clock: the dwell that opens edit mode,
     // the board's jiggle and the springs that glide a resize.

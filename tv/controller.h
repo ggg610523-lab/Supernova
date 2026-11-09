@@ -59,6 +59,10 @@ public:
     // so holding left/right keeps moving even when no other event arrives.
     void pollRepeats(double nowMs);
 
+    // True while a direction is held, so the shell knows it has to keep the
+    // repeat clock running. When nothing is held it can sleep.
+    bool repeating() const;
+
     std::size_t count() const;
 
 private:

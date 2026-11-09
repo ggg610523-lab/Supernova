@@ -46,11 +46,15 @@ void usage(const char* argv0) {
         "  --drm               take over a TTY through the DRM/libinput backend\n"
         "  --fullscreen        ask the host to fullscreen the nested output\n"
         "  --socket NAME       Wayland socket name to advertise\n"
+        "  -s, --size WxH      requested nested-output size (default: host)\n"
         "  --no-vsync          do not hint vsync (nesting still paces us)\n"
         "  --stats             draw the FPS/frame-time HUD\n"
         "  --perf              machine-readable PERF lines and an end-of-run\n"
         "                      BENCH summary on stdout, without the HUD\n"
         "  --tablet            boot into the tablet/mobile home screen\n"
+        "  --lock              start behind the lock screen\n"
+        "  --login             start on the Android-style sign-in screen\n"
+        "  --no-auth           TEST ONLY: bypass PAM on lock/login\n"
         "  --preload-assets    decode every launcher icon at start-up, so the first\n"
         "                      Start menu / desktop repaint never stalls (slower start)\n"
         "  -n, --frames N      render N frames then exit (self test)\n"
@@ -97,6 +101,16 @@ int main(int argc, char** argv) {
             options.socket = argv[++i];
             continue;
         }
+        if ((a == "-s" || a == "--size") && i + 1 < argc) {
+            int w = 0, h = 0;
+            if (std::sscanf(argv[++i], "%dx%d", &w, &h) != 2 || w <= 0 || h <= 0) {
+                std::fprintf(stderr, "win11wm-wl: invalid --size (expected WxH)\n");
+                return 2;
+            }
+            options.width = w;
+            options.height = h;
+            continue;
+        }
         if (a == "--no-vsync") {
             options.vsync = false;
             continue;
@@ -114,6 +128,18 @@ int main(int argc, char** argv) {
         }
         if (a == "--tablet" || a == "--mobile") {
             options.tablet = true;
+            continue;
+        }
+        if (a == "--lock") {
+            options.lock = true;
+            continue;
+        }
+        if (a == "--login" || a == "--greeter") {
+            options.login = true;
+            continue;
+        }
+        if (a == "--no-auth") {
+            options.noAuth = true;
             continue;
         }
         if (a == "--preload-assets") {

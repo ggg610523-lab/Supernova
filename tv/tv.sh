@@ -6,6 +6,8 @@
 #   ./tv/tv.sh --headless          render offscreen (for tests/CI)
 #   ./tv/tv.sh --drm               take over a TTY with DRM + libinput
 #   ./tv/tv.sh --firetv            shorthand for --drm --minimal, as on a TV stick
+#   ./tv/tv.sh --pi                shorthand for --drm --mode 1280x720 (Pi 3/4)
+#   ./tv/tv.sh --pi --mode 1920x1080   a Pi 5 on a 1080p panel
 #   ./tv/tv.sh --frames 120 --dump /tmp/tv.ppm
 #   ./tv/tv.sh --launch nautilus   start an app with the shell
 #
@@ -70,11 +72,13 @@ cd "$ROOT"
 # no desktop under it and no motion the stick's GPU cannot afford.
 ARGS=()
 for arg in "$@"; do
-    if [[ "$arg" == "--firetv" ]]; then
-        ARGS+=(--drm --minimal)
-    else
-        ARGS+=("$arg")
-    fi
+    case "$arg" in
+        --firetv) ARGS+=(--drm --minimal) ;;
+        # 720p is the point: on a Pi 3 a 1080p frame costs 2.25x the fill, and the
+        # launcher is fill-bound long before it is CPU-bound.
+        --pi) ARGS+=(--drm --minimal --mode 1280x720) ;;
+        *) ARGS+=("$arg") ;;
+    esac
 done
 
 exec "$BIN" "${ARGS[@]}"

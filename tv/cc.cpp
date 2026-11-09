@@ -178,6 +178,9 @@ void Manager::toggleControlCenter() {
         ccFocus_ = 0;
         sysctl_.requestRefresh();
     }
+    // The shell only polls the machine while the panel is open, so the timer
+    // has to switch between its idle sleep and its polling cadence here.
+    scheduleTick();
     dirty_ = true;
     requestFrame();
 }

@@ -34,6 +34,10 @@ pkg_check_modules(FT2       REQUIRED IMPORTED_TARGET freetype2)
 pkg_check_modules(FC        REQUIRED IMPORTED_TARGET fontconfig)
 # zlib only inflates the icon PNGs the asset script produced (src/wm/png.cpp).
 pkg_check_modules(ZLIB      REQUIRED IMPORTED_TARGET zlib)
+# PAM authenticates the lock/login screen. Without it the UI still builds and
+# renders, but unlocking reports that PAM support is unavailable instead of
+# silently accepting a password.
+pkg_check_modules(PAM       IMPORTED_TARGET pam)
 
 add_executable(win11wm
   src/main.cpp
@@ -52,6 +56,7 @@ add_executable(win11wm
   src/wm/smartapps.cpp
   src/wm/tablet.cpp
   src/wm/settings.cpp
+  src/wm/lockscreen.cpp
 )
 target_include_directories(win11wm PRIVATE src src/wm)
 target_compile_options(win11wm PRIVATE -Wall -Wextra -Wno-unused-parameter -O2)
@@ -66,6 +71,10 @@ target_link_libraries(win11wm PRIVATE
   PkgConfig::FC
   PkgConfig::ZLIB
 )
+if(PAM_FOUND)
+  target_compile_definitions(win11wm PRIVATE WIN11WM_HAVE_PAM)
+  target_link_libraries(win11wm PRIVATE PkgConfig::PAM)
+endif()
 
 # ---------------------------------------------------------------------------
 # Optional: render an icon's SVG source at load time, so icons stay crisp at any
@@ -117,6 +126,7 @@ if(WIN11WM_BUILD_WAYLAND)
     src/wm/icons.cpp
     src/wm/png.cpp
     src/wm/sysctl.cpp
+    src/wm/lockscreen.cpp
   )
   # src/wl first: the shared shell units include "manager.h", and this is the
   # Wayland Manager they must see.
@@ -141,6 +151,10 @@ if(WIN11WM_BUILD_WAYLAND)
     PkgConfig::ZLIB
     PkgConfig::EPOXY
   )
+  if(PAM_FOUND)
+    target_compile_definitions(win11wm-wl PRIVATE WIN11WM_HAVE_PAM)
+    target_link_libraries(win11wm-wl PRIVATE PkgConfig::PAM)
+  endif()
   if(CAIRO_FOUND AND RSVG_FOUND)
     target_compile_definitions(win11wm-wl PRIVATE WIN11WM_HAVE_RSVG)
     target_link_libraries(win11wm-wl PRIVATE PkgConfig::CAIRO PkgConfig::RSVG)

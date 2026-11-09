@@ -1,6 +1,7 @@
 #include "manager.h"
 
 #include "host_output.h"
+#include "png.h"
 #include "wlr.h"
 
 // Pointer input. The shared header covers the devices the shell already used;
@@ -104,6 +105,11 @@ int Manager::run(const Options& options) {
     dirty_ = true;
     requestFrame();
     loop();
+    // A one-line readout for tuning on real hardware: how many frames were
+    // actually committed, and how big the last one was. TV_STATS=1 ./tv.sh --pi
+    if (std::getenv("TV_STATS"))
+        std::fprintf(stderr, "[tvshell] frames=%d draws/last=%ld\n", framesRendered_,
+                     compositor_.drawCallsLastFrame());
     shutdown();
     return 0;
 }
@@ -319,12 +325,11 @@ bool Manager::initShell() {
                     m->requestFrame();
                 }
             }
-            if (m->tickTimer_)
-                wl_event_source_timer_update(m->tickTimer_, m->minimal_ ? 100 : 50);
+            m->scheduleTick();
             return 0;
         },
         this);
-    if (tickTimer_) wl_event_source_timer_update(tickTimer_, minimal_ ? 100 : 50);
+    scheduleTick();
 
     for (const std::string& cmd : opts_.launch) wm::launchApp(cmd);
     return true;
@@ -381,10 +386,38 @@ void Manager::onNewOutput(struct wlr_output* output) {
     // A nested output already carries the size its host window gave it. Asking
     // for a custom mode there is rejected and leaves the output's swapchain
     // unable to pass its test, which is why the nested window never mapped.
-    if (output->current_mode) {
-        wlr_output_state_set_mode(&state, output->current_mode);
-    } else if (output->width <= 0 || output->height <= 0) {
-        wlr_output_state_set_custom_mode(&state, opts_.width, opts_.height, 60000);
+    // An explicit --mode picks the closest mode the output advertises. On a Pi
+    // 3 hooked to a 1080p TV, asking for 1280x720 halves the pixels every frame
+    // has to be filled, which is the cheapest large win available there.
+    bool modeSet = false;
+    if (opts_.modeW > 0 && opts_.modeH > 0) {
+        struct wlr_output_mode* best = nullptr;
+        int bestDiff = INT_MAX;
+        struct wlr_output_mode* mode = nullptr;
+        wl_list_for_each(mode, &output->modes, link) {
+            if (mode->width <= 0 || mode->height <= 0) continue;
+            const int diff = std::abs(mode->width - opts_.modeW) +
+                             std::abs(mode->height - opts_.modeH);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                best = mode;
+            }
+        }
+        if (best) {
+            wlr_output_state_set_mode(&state, best);
+            modeSet = true;
+            std::fprintf(stderr, "[tvshell] mode %dx%d\n", best->width, best->height);
+        } else {
+            std::fprintf(stderr, "[tvshell] mode %dx%d unavailable, using the native mode\n",
+                         opts_.modeW, opts_.modeH);
+        }
+    }
+    if (!modeSet) {
+        if (output->current_mode) {
+            wlr_output_state_set_mode(&state, output->current_mode);
+        } else if (output->width <= 0 || output->height <= 0) {
+            wlr_output_state_set_custom_mode(&state, opts_.width, opts_.height, 60000);
+        }
     }
     if (!wlr_output_commit_state(output, &state))
         std::fprintf(stderr, "[tvshell] output commit failed\n");
@@ -469,6 +502,26 @@ void Manager::requestFrame() {
     if (!output_ || !output_->enabled) return;
     if (nowMs() < frameBackoffUntil_) return;
     wlr_output_schedule_frame(output_);
+}
+
+int Manager::tickDelayMs() const {
+    // The panel keeps up with the machine while it is open: radios, volume and
+    // the media player all change without the user touching the shell.
+    if (ccOpen_) return 250;
+    // A held d-pad direction is repeating, one step per 110 ms.
+    if (controllers_.repeating()) return 100;
+    // Otherwise the only scheduled work is the clock. Sleep to just past the next
+    // minute boundary instead of waking twenty times a second all night -- on a
+    // Pi that is the difference between idle and busy.
+    const time_t t = time(nullptr);
+    struct tm lt {};
+    localtime_r(&t, &lt);
+    return std::clamp((60 - lt.tm_sec) * 1000 + 200, 1000, 60000);
+}
+
+void Manager::scheduleTick() {
+    if (!tickTimer_) return;
+    wl_event_source_timer_update(tickTimer_, tickDelayMs());
 }
 
 void Manager::renderFrameOnOutput() {
@@ -951,6 +1004,9 @@ void Manager::onKey(uint32_t keycode, uint32_t, bool pressed) {
 }
 
 void Manager::onController(const PadEvent& event) {
+    // A press can start a direction repeat, and a release can end it; either way
+    // the timer's sleep has to be re-chosen.
+    scheduleTick();
     if (ccOpen_) {
         if (!event.pressed) return;
         switch (event.button) {
@@ -1386,9 +1442,13 @@ void Manager::launchEntry(const wm::AppEntry& entry) {
     wm::launchApp(entry.exec);
 }
 
-void Manager::ensureIcons() {
+int Manager::cardIconPx() const {
     const LauncherLayout layout = launcherLayout();
-    const int px = std::max(48, std::min(layout.cardH * 55 / 100, layout.cardW));
+    return std::clamp(int(double(layout.cardH) * 0.54), 40, 120);
+}
+
+void Manager::ensureIcons() {
+    const int px = cardIconPx();
     for (auto& app : apps_) {
         if (app.iconTried) continue;
         app.iconTried = true;
@@ -1397,13 +1457,100 @@ void Manager::ensureIcons() {
     }
     if (chromeIconsTried_) return;
     chromeIconsTried_ = true;
+    const LauncherLayout layout = launcherLayout();
     const int railPx = std::max(22, layout.railItemH / 3);
-    railIcons_[0] = icons_.get("go-home", railPx);
+    // Slot 0 is Home, which draws the shell logo instead of a glyph.
     railIcons_[1] = icons_.get("view-grid", railPx);
     railIcons_[2] = icons_.get("lucide-play", railPx);
     railIcons_[3] = icons_.get("systemsettings", railPx);
     iconRefresh_ = icons_.get("view-grid", px);
     iconQuit_ = icons_.get("lucide-power", px);
+}
+
+
+
+void Manager::ensureLogo() {
+    if (logoTried_) return;
+    logoTried_ = true;
+
+    const std::string path = assetDir_ + "/tv/logo.png";
+    std::vector<unsigned char> rgba;
+    int w = 0;
+    int h = 0;
+    if (!wm::loadPng(path, &rgba, &w, &h) || w <= 0 || h <= 0) {
+        std::fprintf(stderr, "[tvshell] logo: no %s, using the text mark\n", path.c_str());
+        return;
+    }
+
+    // The artwork ships on a square canvas with a wide transparent margin, so
+    // trim to the painted box first: otherwise a third of the mark's box is
+    // padding and it reads much smaller than its slot. The bounds are found on a
+    // coarse grid -- a 2000 px source is 4 M pixels, and reading every one of
+    // them twice cost about a second of start-up on a Pi for a 40 px mark.
+    const int stride = std::max(1, std::min(w, h) / 256);
+    int x0 = w;
+    int y0 = h;
+    int x1 = -1;
+    int y1 = -1;
+    for (int y = 0; y < h; y += stride) {
+        const unsigned char* row = rgba.data() + size_t(y) * size_t(w) * 4;
+        for (int x = 0; x < w; x += stride) {
+            if (row[size_t(x) * 4 + 3] < 8) continue;
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
+        }
+    }
+    if (x1 < x0 || y1 < y0) return;
+    const int cw = std::min(x1 + stride, w - 1) - x0 + 1;
+    const int ch = std::min(y1 + stride, h - 1) - y0 + 1;
+
+    // A 2000x2000 texture is 16 MB on the GPU to draw a 40-70 px mark, so it is
+    // reduced to twice the drawn size -- all a TV screen resolves. Four taps per
+    // axis per output pixel keep the rounded edges smooth without touching every
+    // source pixel: the cost no longer depends on how big the artwork is.
+    const int maxEdge = 160;
+    const double s = std::min(1.0, double(maxEdge) / double(std::max(cw, ch)));
+    const int dw = std::max(1, int(std::lround(double(cw) * s)));
+    const int dh = std::max(1, int(std::lround(double(ch) * s)));
+    constexpr int kTaps = 4;
+    std::vector<unsigned char> out(size_t(dw) * size_t(dh) * 4, 0);
+    for (int y = 0; y < dh; ++y) {
+        const int sy0 = y0 + int(int64_t(y) * ch / dh);
+        const int sy1 = std::max(sy0 + 1, y0 + int(int64_t(y + 1) * ch / dh));
+        for (int x = 0; x < dw; ++x) {
+            const int sx0 = x0 + int(int64_t(x) * cw / dw);
+            const int sx1 = std::max(sx0 + 1, x0 + int(int64_t(x + 1) * cw / dw));
+            unsigned long long r = 0, g = 0, b = 0, a = 0, n = 0;
+            for (int j = 0; j < kTaps; ++j) {
+                const int sy = std::min(y1, sy0 + (sy1 - sy0) * j / kTaps);
+                const unsigned char* row = rgba.data() + size_t(sy) * size_t(w) * 4;
+                for (int i = 0; i < kTaps; ++i) {
+                    const int sx = std::min(x1, sx0 + (sx1 - sx0) * i / kTaps);
+                    const unsigned char* p = row + size_t(sx) * 4;
+                    // Weighted by alpha: the transparent margin must not drag
+                    // the colour towards black.
+                    r += p[0] * p[3];
+                    g += p[1] * p[3];
+                    b += p[2] * p[3];
+                    a += p[3];
+                    ++n;
+                }
+            }
+            if (!n || !a) continue;
+            unsigned char* o = out.data() + (size_t(y) * size_t(dw) + size_t(x)) * 4;
+            o[0] = static_cast<unsigned char>(r / a);
+            o[1] = static_cast<unsigned char>(g / a);
+            o[2] = static_cast<unsigned char>(b / a);
+            o[3] = static_cast<unsigned char>(a / n);
+        }
+    }
+
+    compositor_.uploadTexture(&logo_.tex, out.data(), dw, dh);
+    logo_.w = dw;
+    logo_.h = dh;
+    std::fprintf(stderr, "[tvshell] logo: %s (%dx%d)\n", path.c_str(), dw, dh);
 }
 
 }  // namespace tv

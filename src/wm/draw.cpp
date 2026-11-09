@@ -244,6 +244,10 @@ void Manager::render() {
     }
     // The mode transition splash owns the whole screen, so it is painted last.
     if (on(kLayTablet) && modeSwitching) drawTabletSplash();
+    // The login/lock surface is the final authority: nothing behind it is
+    // actionable, and the same layout serves desktop and tablet.
+    if (lockScreen && lockScreen->active())
+        lockScreen->draw(comp, text, icons, screenW, screenH, tabletAnim > 0.5);
     if (opts->stats) drawStats();
 }
 

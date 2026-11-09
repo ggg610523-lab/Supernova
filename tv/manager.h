@@ -55,6 +55,9 @@ struct Options {
     bool minimal = false;     // reduced motion and fill rate (Pi 3)
     int width = 1280;
     int height = 720;
+    // DRM only: prefer the output mode closest to this. Zero means native.
+    int modeW = 0;
+    int modeH = 0;
     int frames = 0;  // self-test: render N frames then exit
     std::string socket;
     std::string dump;
@@ -158,6 +161,11 @@ private:
     void onOutputDestroy();
     void syncOutputSize();
     void requestFrame();
+    // Re-arms the shell's one timer for however long it can afford to sleep:
+    // the top of the next minute when idle, quickly while a button repeats or
+    // the Control Centre is polling the machine.
+    void scheduleTick();
+    int tickDelayMs() const;
     void renderFrameOnOutput();
     void render();
     bool tick(double now);
@@ -205,6 +213,9 @@ private:
     // screens of rows, so rows never land half way under the hero.
     double gridScrollTarget(const LauncherLayout& layout) const;
     void ensureIcons();
+    int cardIconPx() const;
+    // The shell's own mark, decoded from assets/tv/logo.png on first draw.
+    void ensureLogo();
 
     // ---- painting
     void drawBackground();
@@ -314,6 +325,8 @@ private:
     wm::IconTex railIcons_[4];
     wm::IconTex iconRefresh_;
     wm::IconTex iconQuit_;
+    wm::IconTex logo_;
+    bool logoTried_ = false;
 
     bool home_ = true;
     wm::motion::Spring homeSpring_;
