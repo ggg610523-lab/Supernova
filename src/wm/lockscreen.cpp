@@ -137,11 +137,11 @@ struct LockScreen::Impl {
     double suppressUntil = 0.0;
     int lastMinute = -1;
 
-    // Android-style lock surface: the clock/notification layer is shown first;
-    // tapping, pressing Enter or swiping up raises the credential sheet.
+    // iOS-style lock surface: the clock layer is shown first; tapping, pressing
+    // Enter or swiping up raises the passcode layer.
     bool credentialSheet = false;
     bool keypad = true;
-    // Unlock animation: the credential sheet slides down and the whole lock
+    // Unlock animation: the passcode layer slides down and the whole lock
     // surface fades while the desktop underneath is already painted.
     bool closing = false;
     double closeStart = 0.0;
@@ -506,8 +506,8 @@ bool LockScreen::pointerButton(int x, int y, unsigned button, bool pressed) {
             const int dx = x - impl_->pressX;
             const int dy = y - impl_->pressY;
             impl_->pointerDown = false;
-            // A real swipe up, or a click/tap on desktop, raises the credential
-            // sheet. Nothing authenticates on the first gesture, like Android.
+            // A real swipe up, or a click/tap on desktop, raises the passcode
+            // layer. Nothing authenticates on the first gesture.
             if (dy < -36 || (std::abs(dx) < 14 && std::abs(dy) < 14)) {
                 impl_->credentialSheet = true;
                 impl_->error.clear();
@@ -593,241 +593,270 @@ void LockScreen::draw(Compositor& comp, Text& text, IconStore& icons, int screen
     if (a <= 0.001f) return;
 
     const Color white = rgb(0xFFFFFF);
-    const Color muted = rgb(0xD7DEE8, 0.72f);
-    const Color dim = rgb(0xFFFFFF, 0.55f);
-    const Color accent = rgb(0xA8C7FA);
+    const Color muted = rgb(0xFFFFFF, 0.62f);
+    const Color dim = rgb(0xFFFFFF, 0.38f);
+    const Color accent = rgb(0x0A84FF);  // iOS system blue
     const bool sheet = impl_->credentialSheet;
-    // `tablet` is the shell's mode flag; a narrow window is touch-first even if
-    // it was started without --tablet (the usual mobile.sh path).
     const bool touch = tablet || screenW < 640;
 
     comp.drawWallpaper();
-    // Android's lock screen scrim: dark enough for white type at the top and
-    // bottom, almost clear across the middle so the wallpaper still reads.
-    comp.drawGradient(Rect(0, 0, screenW, screenH * 0.58f), 0.0f,
-                      rgb(0x000000, 0.62f), rgb(0x000000, 0.0f), a);
-    comp.drawGradient(Rect(0, screenH * 0.42f, screenW, screenH * 0.58f), 0.0f,
-                      rgb(0x000000, 0.0f), rgb(0x000000, 0.72f), a);
+    // iOS lock screen keeps the wallpaper clear in the middle and only darkens
+    // the top for the clock and the bottom for the controls.
+    comp.drawGradient(Rect(0, 0, screenW, screenH * 0.48f), 0.0f,
+                      rgb(0x000000, 0.40f), rgb(0x000000, 0.0f), a);
+    comp.drawGradient(Rect(0, screenH * 0.54f, screenW, screenH * 0.46f), 0.0f,
+                      rgb(0x000000, 0.0f), rgb(0x000000, 0.48f), a);
+    if (sheet) {
+        // The passcode layer is a full-screen dim, not a bottom sheet. The
+        // stronger scrim stands in for iOS's blurred wallpaper.
+        comp.drawRect(Rect(0, 0, screenW, screenH), 0.0f, rgb(0x000000, 0.58f), a);
+    }
 
-    const int pad = touch ? 26 : std::max(40, screenW / 24);
-    const int datePx = touch ? 15 : 14;
-    const int top = touch ? 52 : std::max(38, screenH / 11);
-    const int clockPx = touch ? std::clamp(screenW / 4, 68, 122)
-                               : std::clamp(screenW / 11, 64, 104);
-    const int clockPxNow = sheet ? int(clockPx * 0.78f) : clockPx;
+    const int pad = touch ? 24 : std::max(40, screenW / 24);
+    const int statusY = touch ? 12 : 16;
+    const Impl::User* selected = impl_->selected();
 
+    // ---------------------------------------------------------- status bar
+    if (selected && !selected->display.empty()) {
+        drawTextLeft(comp, text, selected->display, touch ? 11 : 12, Weight::Medium,
+                     rgb(0xFFFFFF, 0.58f), pad, statusY + 8, a);
+    }
+
+    const int bw = touch ? 24 : 26;
+    const int bh = touch ? 12 : 13;
+    const Rect batt(screenW - pad - bw, statusY + 3, bw, bh);
+    comp.drawRect(Rect(batt.x, batt.y, batt.w, 2), 1.0f, rgb(0xFFFFFF, 0.72f), a);
+    comp.drawRect(Rect(batt.x, batt.bottom() - 2, batt.w, 2), 1.0f, rgb(0xFFFFFF, 0.72f), a);
+    comp.drawRect(Rect(batt.x, batt.y, 2, batt.h), 1.0f, rgb(0xFFFFFF, 0.72f), a);
+    comp.drawRect(Rect(batt.right() - 2, batt.y, 2, batt.h), 1.0f, rgb(0xFFFFFF, 0.72f), a);
+    comp.drawRect(Rect(batt.x + 3, batt.y + 3, int((batt.w - 6) * 0.78f), batt.h - 6),
+                  1.5f, white, a * 0.82f);
+    comp.drawRect(Rect(batt.right(), batt.y + batt.h / 3, 2, batt.h / 3), 1.0f,
+                  rgb(0xFFFFFF, 0.62f), a);
+    // The battery is the status-bar affordance for the power menu.
+    impl_->powerButton = Rect(batt.x - 10, batt.y - 8, batt.w + 22, batt.h + 16);
+
+    // ------------------------------------------------------------- clock
     char clock[16] = {};
-    char date[48] = {};
+    char date[64] = {};
     const time_t t = time(nullptr);
     struct tm lt {};
     localtime_r(&t, &lt);
     std::strftime(clock, sizeof(clock), "%H:%M", &lt);
     char dateBase[32] = {};
-    std::strftime(dateBase, sizeof(dateBase), "%a, %b", &lt);
+    std::strftime(dateBase, sizeof(dateBase), "%A, %B", &lt);
     std::snprintf(date, sizeof(date), "%s %d", dateBase, lt.tm_mday);
 
-    drawTextLeft(comp, text, date, datePx, Weight::Medium, muted, pad, top + datePx / 2, a);
-    const int clockY = top + datePx + 10;
-    drawTextLeft(comp, text, clock, clockPxNow, Weight::Regular, white, pad,
-                 clockY + clockPxNow / 2, a);
+    const int clockPx = touch ? std::clamp(int(screenW * 0.30f), 88, 140)
+                               : std::clamp(screenW / 8, 100, 176);
+    const int clockPxNow = sheet ? int(clockPx * 0.62f) : clockPx;
+    const int dateY = sheet ? (touch ? 46 : 38) : (touch ? 70 : 58);
+    const int clockTop = dateY + (sheet ? 24 : 30);
 
-    const int clockBottom = clockY + clockPxNow;
+    drawTextCentered(comp, text, date, touch ? 15 : 15, Weight::Medium,
+                     rgb(0xFFFFFF, 0.92f), Rect(0, dateY, screenW, 22), a);
+    drawTextCentered(comp, text, clock, clockPxNow, Weight::Medium,
+                     rgb(0x000000, 0.22f), Rect(0, clockTop + 2, screenW, clockPxNow + 12), a);
+    drawTextCentered(comp, text, clock, clockPxNow, Weight::Medium, white,
+                     Rect(0, clockTop, screenW, clockPxNow + 12), a);
 
-    // One quiet notification card keeps the first screen from reading as a
-    // bare clock without pretending to know about real notifications.
-    if (!sheet && impl_->mode == Mode::Lock) {
-        const int cardW = std::min(screenW - 2 * pad, 420);
-        const int cardH = touch ? 68 : 64;
-        int cardY = clockBottom + (touch ? 30 : 34);
-        cardY = std::min(cardY, screenH - (touch ? 250 : 220) - cardH);
-        const Rect card(pad, cardY, cardW, cardH);
-        comp.drawRect(card, 22.0f, rgb(0x151A22, 0.58f), a);
-        comp.drawRect(card, 22.0f, rgb(0xFFFFFF, 0.08f), a);
-        const int ic = touch ? 36 : 34;
-        const Rect icon(card.x + 16, card.y + (cardH - ic) / 2, ic, ic);
-        comp.drawRect(icon, float(ic) / 2.0f, rgb(0xA8C7FA, 0.20f), a);
-        comp.drawArc(icon.x + ic / 2, icon.y + ic / 2, ic * 0.22f, 2.0f,
-                     0.0f, 6.2831853f, accent, a * 0.85f);
-        const int tx = icon.x + ic + 14;
-        drawTextLeft(comp, text, "No notifications", touch ? 15 : 14, Weight::Medium,
-                     white, tx, card.y + cardH / 2 - 9, a);
-        drawTextLeft(comp, text, "You're all caught up", touch ? 12 : 12, Weight::Regular,
-                     muted, tx, card.y + cardH / 2 + 10, a);
-    }
-
+    // -------------------------------------------------------- lock controls
     if (!sheet) {
-    // Bottom shortcut buttons, the Android lock-screen flashlight/camera pair.
-    const int shortcut = touch ? 54 : 46;
-    const int shortcutY = screenH - (touch ? 54 : 42) - shortcut;
-    auto shortcutCircle = [&](int x) {
-        const Rect r(x, shortcutY, shortcut, shortcut);
-        comp.drawRect(r, float(shortcut) / 2.0f, rgb(0xFFFFFF, 0.13f), a);
-        comp.drawRect(r, float(shortcut) / 2.0f, rgb(0xFFFFFF, 0.10f), a);
-        return r;
-    };
-    const Rect flash = shortcutCircle(pad);
-    const Rect camera = shortcutCircle(screenW - pad - shortcut);
+        const int shortcut = touch ? 54 : 46;
+        const int rowCy = screenH - (touch ? 76 : 64);
+        const int sy = rowCy - shortcut / 2;
+        auto glassCircle = [&](int x) {
+            const Rect r(x, sy, shortcut, shortcut);
+            comp.drawRect(r, float(shortcut) / 2.0f, rgb(0x1C1C1E, 0.42f), a);
+            comp.drawRect(r, float(shortcut) / 2.0f, rgb(0xFFFFFF, 0.12f), a);
+            return r;
+        };
+        const Rect flash = glassCircle(pad);
+        const Rect camera = glassCircle(screenW - pad - shortcut);
 
-    // Flashlight: a simple torch body and beam cone.
-    const int fcx = flash.x + flash.w / 2;
-    const int fcy = flash.y + flash.h / 2;
-    comp.drawRect(Rect(fcx - 4, fcy - 9, 8, 15), 2.5f, white, a);
-    comp.drawRect(Rect(fcx - 7, fcy - 12, 14, 5), 2.0f, white, a);
-    comp.drawRect(Rect(fcx - 1, fcy + 7, 2, 4), 1.0f, rgb(0xFFFFFF, 0.7f), a);
+        const int fcx = flash.x + flash.w / 2;
+        const int fcy = flash.y + flash.h / 2;
+        comp.drawRect(Rect(fcx - 4, fcy - 9, 8, 15), 2.5f, white, a);
+        comp.drawRect(Rect(fcx - 7, fcy - 12, 14, 5), 2.0f, white, a);
+        comp.drawRect(Rect(fcx - 1, fcy + 7, 2, 4), 1.0f, rgb(0xFFFFFF, 0.7f), a);
 
-    // Camera: body, lens ring and viewfinder bump.
-    const int ccx = camera.x + camera.w / 2;
-    const int ccy = camera.y + camera.h / 2;
-    comp.drawRect(Rect(ccx - 11, ccy - 7, 22, 16), 4.0f, white, a);
-    comp.drawRect(Rect(ccx - 5, ccy - 10, 10, 4), 1.5f, white, a);
-    comp.drawArc(ccx, ccy + 1, 4.5f, 2.0f, 0.0f, 6.2831853f, rgb(0x1A1F28), a);
-    }
+        const int ccx = camera.x + camera.w / 2;
+        const int ccy = camera.y + camera.h / 2;
+        comp.drawRect(Rect(ccx - 11, ccy - 7, 22, 16), 4.0f, white, a);
+        comp.drawRect(Rect(ccx - 5, ccy - 10, 10, 4), 1.5f, white, a);
+        comp.drawArc(ccx, ccy + 1, 4.5f, 2.0f, 0.0f, 6.2831853f, rgb(0x1C1C1E), a);
 
-    if (!sheet) {
-        const int hintY = screenH - (touch ? 148 : 122);
-        // Lock glyph.
+        // Center lock glyph, iOS bottom row.
         const int lx = screenW / 2;
-        const int ly = hintY - 30;
-        comp.drawRect(Rect(lx - 9, ly, 18, 13), 3.0f, white, a * 0.92f);
-        comp.drawArc(lx, ly + 1, 6.5f, 2.2f, 4.7123890f, 1.5707963f, white, a * 0.92f);
-        comp.drawRect(Rect(lx - 1, ly + 4, 2, 4), 1.0f, rgb(0x1A1F28), a);
+        const int ly = rowCy - 6;
+        comp.drawRect(Rect(lx - 9, ly, 18, 13), 3.0f, rgb(0xFFFFFF, 0.94f), a);
+        comp.drawArc(lx, ly + 1, 6.5f, 2.2f, 4.7123890f, 1.5707963f,
+                     rgb(0xFFFFFF, 0.94f), a);
+        comp.drawRect(Rect(lx - 1, ly + 4, 2, 4), 1.0f, rgb(0x1C1C1E), a);
 
-        // Up chevron above the lock, then the Android hint.
-        const int chY = ly - 20;
-        comp.drawRectRotated(lx - 5, chY, 12, 2.5f, -0.7f, 1.2f, white, a * 0.65f);
-        comp.drawRectRotated(lx + 5, chY, 12, 2.5f, 0.7f, 1.2f, white, a * 0.65f);
-        drawTextCentered(comp, text,
-                         touch ? "Swipe up to unlock" : "Click or press Enter to unlock",
-                         touch ? 14 : 13, Weight::Medium, white,
-                         Rect(0, hintY + 6, screenW, 22), a * 0.90f);
+        // iOS home indicator.
+        const int hw = std::min(180, int(screenW * 0.34f));
+        comp.drawRect(Rect((screenW - hw) / 2, screenH - 16, hw, 5), 2.5f,
+                      rgb(0xFFFFFF, 0.82f), a);
     }
 
-    // Android's credential layer: a bottom sheet with the user identity, a
-    // rounded PIN/password field and an accent unlock button.
+    // ------------------------------------------------------ passcode layer
     if (sheet) {
-        const int panelH = touch ? std::min(int(screenH * 0.64f), 540)
-                                  : std::min(int(screenH * 0.62f), 500);
-        // Slide in from the bottom on open, then slide back down on unlock.
-        const int openSlide = int((1.0f - open) * panelH * 0.12f);
-        const int closeSlide = int(close * (panelH + 80));
-        const int panelY = screenH - panelH + openSlide + closeSlide;
-        comp.drawRect(Rect(0, panelY, screenW, panelH), 28.0f, rgb(0x11161F, 0.94f), a);
-        comp.drawRect(Rect(0, panelY, screenW, 1), 0.0f, rgb(0xFFFFFF, 0.08f), a);
-        comp.drawRect(Rect(screenW / 2 - 18, panelY + 10, 36, 4), 2.0f,
-                      rgb(0xFFFFFF, 0.22f), a);
+        const int uiShift = int((1.0f - open) * 30.0f + close * 60.0f);
+        const int titleY = int(screenH * (impl_->mode == Mode::Login ? (touch ? 0.36f : 0.34f)
+                                                                     : (touch ? 0.34f : 0.30f))) +
+                           uiShift;
 
-        int y = panelY + 32;
-        const Impl::User* selected = impl_->selected();
         impl_->userRects.clear();
-        if (impl_->mode == Mode::Login && impl_->users.size() > 1) {
-            const int chip = touch ? 38 : 34;
-            const int gap = 9;
-            const int maxChips = std::min<int>(5, int(impl_->users.size()));
-            const int total = maxChips * chip + (maxChips - 1) * gap;
-            int x = (screenW - total) / 2;
-            for (int i = 0; i < maxChips; ++i) {
-                const Rect r(x, y, chip, chip);
-                const bool on = i == impl_->userIndex;
-                comp.drawRect(r, float(chip) / 2.0f,
-                              on ? accent : rgb(0xFFFFFF, 0.10f), a);
+        if (impl_->mode == Mode::Login) {
+            int uy = titleY - 58;
+            if (impl_->users.size() > 1) {
+                const int chip = touch ? 34 : 30;
+                const int gap = 8;
+                const int maxChips = std::min<int>(5, int(impl_->users.size()));
+                const int total = maxChips * chip + (maxChips - 1) * gap;
+                int x = (screenW - total) / 2;
+                for (int i = 0; i < maxChips; ++i) {
+                    const Rect r(x, titleY - 98, chip, chip);
+                    const bool on = i == impl_->userIndex;
+                    comp.drawRect(r, float(chip) / 2.0f,
+                                  on ? accent : rgb(0xFFFFFF, 0.14f), a);
+                    const std::string initial =
+                        impl_->users[size_t(i)].display.empty()
+                            ? "?"
+                            : impl_->users[size_t(i)].display.substr(0, 1);
+                    drawTextCentered(comp, text, initial, std::max(11, chip / 2),
+                                     Weight::Bold, white, r, a);
+                    impl_->userRects.push_back(r);
+                    x += chip + gap;
+                }
+            }
+            const int av = touch ? 40 : 36;
+            const std::string name = selected ? selected->display : "User";
+            const TextTex nt = text.get(name, touch ? 17 : 16, Weight::Medium);
+            const int groupW = av + 10 + (nt.tex ? nt.w : 0);
+            const int gx = (screenW - groupW) / 2;
+            const Rect avatarRect(gx, uy, av, av);
+            if (selected && !selected->avatar.empty()) {
+                const IconTex ic = icons.get(selected->avatar, av, IconTheme::Hatter);
+                if (ic.valid())
+                    comp.drawTex(ic.tex, avatarRect, float(av) / 2.0f, white, a, true, true);
+                else
+                    comp.drawRect(avatarRect, float(av) / 2.0f, accent, a);
+            } else {
+                comp.drawRect(avatarRect, float(av) / 2.0f, rgb(0xFFFFFF, 0.16f), a);
                 const std::string initial =
-                    impl_->users[size_t(i)].display.empty()
-                        ? "?"
-                        : impl_->users[size_t(i)].display.substr(0, 1);
-                drawTextCentered(comp, text, initial, std::max(12, chip / 2), Weight::Bold,
-                                 on ? rgb(0x0A1628) : white, r, a);
-                impl_->userRects.push_back(r);
-                x += chip + gap;
+                    selected && !selected->display.empty() ? selected->display.substr(0, 1) : "?";
+                drawTextCentered(comp, text, initial, av / 2, Weight::Bold, white,
+                                 avatarRect, a);
             }
-            y += chip + 18;
+            drawTextLeft(comp, text, name, touch ? 17 : 16, Weight::Medium, white,
+                         avatarRect.right() + 10, avatarRect.y + av / 2, a);
         }
 
-        const int av = touch ? 56 : 48;
-        const std::string name = selected ? selected->display : "User";
-        const TextTex nt = text.get(name, touch ? 20 : 18, Weight::Medium);
-        const int groupW = av + 12 + (nt.tex ? nt.w : 0);
-        const int gx = (screenW - groupW) / 2;
-        const Rect avatarRect(gx, y, av, av);
-        if (selected && !selected->avatar.empty()) {
-            const IconTex ic = icons.get(selected->avatar, av, IconTheme::Hatter);
-            if (ic.valid())
-                comp.drawTex(ic.tex, avatarRect, float(av) / 2.0f, white, a, true, true);
-            else
-                comp.drawRect(avatarRect, float(av) / 2.0f, accent, a);
+        drawTextCentered(comp, text,
+                         impl_->mode == Mode::Login ? "Enter Password" : "Enter Passcode",
+                         touch ? 15 : 15, Weight::Medium, rgb(0xFFFFFF, 0.92f),
+                         Rect(0, titleY, screenW, 20), a);
+
+        const int dotsY = titleY + 34;
+        const int count = std::min<int>(12, int(impl_->password.size()));
+        const int slots = std::max(6, count);
+        const int dot = touch ? 9 : 8;
+        const int gap = touch ? 18 : 16;
+        const int total = slots * gap - (gap - dot);
+        int dx = (screenW - total) / 2;
+        for (int i = 0; i < slots; ++i) {
+            const Rect r(dx, dotsY, dot, dot);
+            comp.drawRect(r, float(dot) / 2.0f,
+                          i < count ? white : rgb(0xFFFFFF, 0.22f), a);
+            dx += gap;
+        }
+
+        // A small check affordance is needed because this password can be any
+        // length; iOS auto-submits a fixed-length passcode, we cannot.
+        if (impl_->keypad && !impl_->password.empty()) {
+            impl_->unlockRect = Rect(dx + 4, dotsY - 10, 30, 30);
+            comp.drawRect(impl_->unlockRect, 15.0f, accent, a);
+            comp.drawRectRotated(impl_->unlockRect.x + 9, impl_->unlockRect.y + 15,
+                                 9, 2.0f, -0.7f, 1.0f, white, a);
+            comp.drawRectRotated(impl_->unlockRect.x + 16, impl_->unlockRect.y + 13,
+                                 15, 2.0f, 0.6f, 1.0f, white, a);
+        } else if (!impl_->keypad) {
+            // Set in the text-field branch below.
         } else {
-            comp.drawRect(avatarRect, float(av) / 2.0f, rgb(0xA8C7FA, 0.85f), a);
-            const std::string initial = selected && !selected->display.empty()
-                                            ? selected->display.substr(0, 1)
-                                            : "?";
-            drawTextCentered(comp, text, initial, av / 2, Weight::Bold, rgb(0x0A1628),
-                             avatarRect, a);
-        }
-        drawTextLeft(comp, text, name, touch ? 20 : 18, Weight::Medium, white,
-                     avatarRect.right() + 12, avatarRect.y + av / 2, a);
-        y += av + 22;
-
-        const int fieldW = std::min(screenW - 2 * pad, 420);
-        impl_->fieldRect = Rect((screenW - fieldW) / 2, y, fieldW, touch ? 56 : 52);
-        comp.drawRect(impl_->fieldRect, 15.0f, rgb(0x2A303B, 0.92f), a);
-        comp.drawRect(impl_->fieldRect, 15.0f,
-                      impl_->error.empty() ? rgb(0xFFFFFF, 0.10f) : rgb(0xFF8A8A, 0.72f), a);
-
-        if (impl_->password.empty()) {
-            drawTextLeft(comp, text, "PIN or password", touch ? 16 : 15, Weight::Regular,
-                         dim, impl_->fieldRect.x + 20, impl_->fieldRect.y + impl_->fieldRect.h / 2,
-                         a);
-        } else {
-            const int count = std::min<int>(24, int(impl_->password.size()));
-            const int dot = touch ? 8 : 7;
-            const int gap = touch ? 15 : 13;
-            int dx = impl_->fieldRect.x + 20;
-            const int dy = impl_->fieldRect.y + impl_->fieldRect.h / 2;
-            for (int i = 0; i < count; ++i) {
-                comp.drawRect(Rect(dx, dy - dot / 2, dot, dot), float(dot) / 2.0f,
-                              white, a);
-                dx += gap;
-            }
+            impl_->unlockRect = Rect{};
         }
 
-        impl_->unlockRect = Rect(impl_->fieldRect.right() - 44, impl_->fieldRect.y + 4, 44, 44);
-        comp.drawRect(impl_->unlockRect, 22.0f, accent, a);
-        drawTextCentered(comp, text, ">", 22, Weight::Bold, rgb(0x0A1628),
-                         impl_->unlockRect, a);
-        y = impl_->fieldRect.bottom() + 10;
-
+        int y = dotsY + 42;
         if (!impl_->error.empty()) {
-            drawTextCentered(comp, text, impl_->error, touch ? 14 : 13, Weight::Regular,
-                             rgb(0xFF8A8A), Rect(pad, y, screenW - 2 * pad, 22), a);
+            drawTextCentered(comp, text, impl_->error, touch ? 13 : 12, Weight::Regular,
+                             rgb(0xFF453A), Rect(pad, y - 8, screenW - 2 * pad, 20), a);
             y += 22;
         }
 
         for (Rect& r : impl_->keyRects) r = Rect{};
         impl_->keypadToggleRect = Rect{};
         if (impl_->keypad) {
-            const int key = (touch ? 54 : 50) - (impl_->error.empty() ? 0 : 6);
-            const int gap = touch ? 6 : 8;
-            const int total = key * 3 + gap * 2;
-            const int kx = (screenW - total) / 2;
-            const int ky = y + 4;
+            impl_->fieldRect = Rect{};
+            const int keyW = touch ? 78 : 72;
+            const int keyH = touch ? 62 : 56;
+            const int gapX = 6;
+            const int gapY = 4;
+            const int keypadH = keyH * 3 + gapY * 2;
+            const int keypadTop =
+                std::min(int(screenH * (touch ? 0.53f : 0.50f)),
+                         screenH - keypadH - (touch ? 120 : 96));
+            y = std::max(y, std::max(0, keypadTop));
+            const int totalW = keyW * 3 + gapX * 2;
+            const int kx = (screenW - totalW) / 2;
             const char* labels[12] = {"1", "2", "3", "4", "5", "6", "7", "8", "9",
                                       "ABC", "0", "<"};
+            const char* letters[8] = {"ABC", "DEF", "GHI", "JKL",
+                                      "MNO", "PQRS", "TUV", "WXYZ"};
             for (int i = 0; i < 12; ++i) {
                 const int row = i / 3;
                 const int col = i % 3;
-                const Rect r(kx + col * (key + gap), ky + row * (key + gap), key, key);
+                const Rect r(kx + col * (keyW + gapX), y + row * (keyH + gapY),
+                             keyW, keyH);
                 impl_->keyRects[i] = r;
-                comp.drawRect(r, float(key) / 2.0f, rgb(0xFFFFFF, 0.08f), a);
-                drawTextCentered(comp, text, labels[i], i == 9 ? 12 : 20,
+                drawTextCentered(comp, text, labels[i], i == 9 ? 13 : (touch ? 28 : 26),
                                  i == 9 ? Weight::Medium : Weight::Regular, white, r, a);
+                if (i >= 1 && i <= 8) {
+                    drawTextCentered(comp, text, letters[i - 1], touch ? 9 : 8,
+                                     Weight::Medium, rgb(0xFFFFFF, 0.48f),
+                                     Rect(r.x, r.y + int(r.h * 0.64f), r.w, 12), a);
+                }
             }
         } else {
-            impl_->keypadToggleRect = Rect(screenW / 2 - 80, y + 4, 160, 34);
-            comp.drawRect(impl_->keypadToggleRect, 17.0f, rgb(0xFFFFFF, 0.08f), a);
+            const int fieldW = std::min(screenW - 2 * pad, 360);
+            impl_->fieldRect = Rect((screenW - fieldW) / 2, y + 8, fieldW, touch ? 54 : 50);
+            comp.drawRect(impl_->fieldRect, 14.0f, rgb(0x1C1C1E, 0.55f), a);
+            comp.drawRect(impl_->fieldRect, 14.0f,
+                          impl_->error.empty() ? rgb(0xFFFFFF, 0.14f) : rgb(0xFF453A, 0.72f), a);
+            if (impl_->password.empty()) {
+                drawTextLeft(comp, text, "Password", touch ? 16 : 15, Weight::Regular,
+                             dim, impl_->fieldRect.x + 18,
+                             impl_->fieldRect.y + impl_->fieldRect.h / 2, a);
+            } else {
+                int px = impl_->fieldRect.x + 18;
+                const int dy = impl_->fieldRect.y + impl_->fieldRect.h / 2;
+                for (size_t i = 0; i < impl_->password.size() && i < 24; ++i) {
+                    comp.drawRect(Rect(px, dy - 4, 8, 8), 4.0f, white, a);
+                    px += 14;
+                }
+            }
+            impl_->unlockRect = Rect(impl_->fieldRect.right() - 44,
+                                     impl_->fieldRect.y + 4, 44, impl_->fieldRect.h - 8);
+            comp.drawRect(impl_->unlockRect, float(impl_->unlockRect.h) / 2.0f, accent, a);
+            drawTextCentered(comp, text, ">", 21, Weight::Bold, white, impl_->unlockRect, a);
+            impl_->keypadToggleRect = Rect(screenW / 2 - 82, impl_->fieldRect.bottom() + 18,
+                                           164, 32);
             drawTextCentered(comp, text, "Use PIN keypad", touch ? 14 : 13, Weight::Medium,
-                             white, impl_->keypadToggleRect, a);
+                             rgb(0xFFFFFF, 0.72f), impl_->keypadToggleRect, a);
         }
 
-        impl_->cancelRect = Rect(screenW / 2 - 50, panelY + panelH - 54, 100, 28);
+        impl_->cancelRect = Rect(screenW / 2 - 60, screenH - (touch ? 72 : 64), 120, 30);
         if (impl_->mode == Mode::Lock) {
             drawTextCentered(comp, text, "Cancel", touch ? 14 : 13, Weight::Medium, muted,
                              impl_->cancelRect, a);
@@ -835,40 +864,24 @@ void LockScreen::draw(Compositor& comp, Text& text, IconStore& icons, int screen
             impl_->cancelRect = Rect{};
         }
 
-        const std::string hint = impl_->mode == Mode::Login
-                                     ? "Enter  Sign in"
-                                     : "Enter  Unlock     Esc  Back";
-        drawTextCentered(comp, text, hint, touch ? 12 : 11, Weight::Regular, dim,
-                         Rect(pad, panelY + panelH - 28, screenW - 2 * pad, 18), a);
-    }
-
-    // Power button, small and out of the way at the top-right. Tapping it opens
-    // the Android power menu; there is no visible row of power text on the lock
-    // screen itself.
-    if (!sheet) {
-        const int pb = touch ? 38 : 34;
-        impl_->powerButton = Rect(screenW - pad - pb, top - 10, pb, pb);
-        comp.drawRect(impl_->powerButton, float(pb) / 2.0f, rgb(0xFFFFFF, 0.10f), a);
-        const int px = impl_->powerButton.x + pb / 2;
-        const int py = impl_->powerButton.y + pb / 2;
-        comp.drawArc(px, py, 7.0f, 2.0f, 0.7853982f, 5.4977871f, white, a * 0.85f);
-        comp.drawRect(Rect(px - 1, py - 10, 2, 9), 1.0f, white, a * 0.85f);
-    } else {
-        impl_->powerButton = Rect{};
+        // Home indicator is still visible on the passcode layer.
+        const int hw = std::min(180, int(screenW * 0.34f));
+        comp.drawRect(Rect((screenW - hw) / 2, screenH - 16, hw, 5), 2.5f,
+                      rgb(0xFFFFFF, 0.82f), a);
     }
 
     if (impl_->powerMenu) {
-        comp.drawRect(Rect(0, 0, screenW, screenH), 0.0f, rgb(0x000000, 0.45f), a);
-        const int menuW = std::min(screenW - 2 * pad, 340);
-        const int menuH = 250;
+        comp.drawRect(Rect(0, 0, screenW, screenH), 0.0f, rgb(0x000000, 0.48f), a);
+        const int menuW = std::min(screenW - 2 * pad, 320);
+        const int menuH = 236;
         const int mx = (screenW - menuW) / 2;
         const int my = (screenH - menuH) / 2;
-        comp.drawRect(Rect(mx, my, menuW, menuH), 26.0f, rgb(0x171C25, 0.96f), a);
-        drawTextCentered(comp, text, "Power", 18, Weight::Medium, white,
-                         Rect(mx, my + 18, menuW, 28), a);
-        const char* labels[3] = {"Sleep", "Restart", "Shut down"};
+        comp.drawRect(Rect(mx, my, menuW, menuH), 28.0f, rgb(0x1C1C1E, 0.96f), a);
+        drawTextCentered(comp, text, "Power", 17, Weight::Medium, white,
+                         Rect(mx, my + 18, menuW, 26), a);
+        const char* labels[3] = {"Sleep", "Restart", "Shut Down"};
         for (int i = 0; i < 3; ++i) {
-            const Rect r(mx + 18, my + 58 + i * 56, menuW - 36, 48);
+            const Rect r(mx + 16, my + 54 + i * 56, menuW - 32, 48);
             impl_->powerRects[i] = r;
             if (impl_->hoverPower == i)
                 comp.drawRect(r, 14.0f, rgb(0xFFFFFF, 0.08f), a);

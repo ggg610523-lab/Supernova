@@ -53,7 +53,7 @@ void usage(const char* argv0) {
         "                      BENCH summary on stdout, without the HUD\n"
         "  --tablet            boot into the tablet/mobile home screen\n"
         "  --lock              start behind the lock screen\n"
-        "  --login             start on the Android-style sign-in screen\n"
+        "  --login             start on the iOS-style sign-in screen\n"
         "  --no-auth           TEST ONLY: bypass PAM on lock/login\n"
         "  --preload-assets    decode every launcher icon at start-up, so the first\n"
         "                      Start menu / desktop repaint never stalls (slower start)\n"

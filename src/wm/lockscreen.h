@@ -1,11 +1,10 @@
-// Android-style lock and sign-in screen, shared by the X11 and Wayland shells.
+// iOS-style lock and sign-in screen, shared by the X11 and Wayland shells.
 //
 // The same surface serves three jobs:
 //   * a session lock screen (Win+L, Control Centre, logind's LockedHint);
-//   * an Android-style sign-in screen (`--login`) with a user picker;
+//   * an iOS-style sign-in screen (`--login`) with a user picker;
 //   * the tablet/mobile variant, which uses the same touch-first layout as a
-//     phone (large clock, notification card, shortcuts, swipe-up credential
-//     sheet and PIN keypad).
+//     phone (large clock, lock controls, swipe-up passcode layer and keypad).
 //
 // Authentication is PAM. The screen never sees a password hash, and it does not
 // try to manage sessions itself: unlocking a logind-locked session calls

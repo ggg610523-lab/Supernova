@@ -203,9 +203,11 @@ void Manager::layoutControlCenter() {
     add(cellRect(0, 4, 1, 1), kCcLock);
     add(cellRect(1, 4, 1, 1), kCcScreenshot);
     // The bottom row is two half-width plates: the desktop <-> tablet / mobile mode
-    // switch, and the Fluent shell's light/dark palette.
-    add(cellRect(0, 5, 2, 1), kCcTablet);
-    add(cellRect(2, 5, 2, 1), kCcLight);
+    // switch, and the Fluent shell's light/dark palette. Mobile mode is entered
+    // through mobile.sh, so it does not offer a way back to the desktop here;
+    // the light switch takes the full row instead.
+    if (!tabletMode) add(cellRect(0, 5, 2, 1), kCcTablet);
+    add(cellRect(tabletMode ? 0 : 2, 5, tabletMode ? 4 : 2, 1), kCcLight);
 
     // --- launchers share the bottom row, which leaves exactly two slots ----
     for (int i = 0; i < kCcLauncherCount; ++i) {
@@ -654,7 +656,7 @@ void Manager::drawControlCenter() {
                         on ? theme::kCcActiveGlyph.a : theme::kCcGlyph.a, IconTheme::Shell);
         };
 
-        {
+        if (!tabletMode) {
             const Rect m = cellRect(0, 5, 2, 1);
             const bool on = tabletMode;
             const Rect box = switchPlate(m, kCcTablet, on);
@@ -665,7 +667,7 @@ void Manager::drawControlCenter() {
                        m.y + (m.h - px * 3 / 2) / 2);
         }
         {
-            const Rect m = cellRect(2, 5, 2, 1);
+            const Rect m = cellRect(tabletMode ? 0 : 2, 5, tabletMode ? 4 : 2, 1);
             const bool on = theme::isLight();
             const Rect box = switchPlate(m, kCcLight, on);
             // Both halves of the toggle are Lucide, and the glyph names the mode the

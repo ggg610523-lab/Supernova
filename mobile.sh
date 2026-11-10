@@ -12,8 +12,8 @@
 #   ./mobile.sh --wayland       force the Wayland compositor
 #   ./mobile.sh --x11           force the Xwayland fallback
 #   ./mobile.sh --build         rebuild win11wm-wl before starting
-#   ./mobile.sh --lock          boot behind the Android-style lock screen
-#   ./mobile.sh --login         boot on the Android-style sign-in screen
+#   ./mobile.sh --lock          boot behind the iOS-style lock screen
+#   ./mobile.sh --login         boot on the iOS-style sign-in screen
 #   ./mobile.sh --no-auth       TEST ONLY: bypass PAM on lock/login
 #
 # Anything else before `--` is passed through to the backend runner; everything
